@@ -1,5 +1,6 @@
 package com.example.dart.notify;
 
+import com.example.dart.filter.NewsFilter;
 import com.example.dart.model.Disclosure;
 import com.example.dart.service.DocumentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,12 +44,12 @@ public class WebexService implements Notifier {
         send("DART 호재 알림 봇이 시작되었습니다.");
     }
 
-    public void sendTitleAlert(Disclosure d) {
+    public void sendTitleAlert(Disclosure d, NewsFilter.TitleMatch match) {
         String dartUrl = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + d.rceptNo();
         String rceptDate = formatDate(d.rceptDt());
         String header = String.format(
-                "**[호재 공시]**%n**회사명**: %s%n**공시제목**: %s%n**접수일**: %s%n**제출인**: %s%n**[DART 원문](%s)**",
-                d.corpName(), d.reportNm(), rceptDate, d.flrNm(), dartUrl);
+                "**[호재 공시 · %s]**%n**회사명**: %s%n**공시제목**: %s%n**접수일**: %s%n**제출인**: %s%n**[DART 원문](%s)**",
+                match.category(), d.corpName(), d.reportNm(), rceptDate, d.flrNm(), dartUrl);
 
         String detail;
         try {

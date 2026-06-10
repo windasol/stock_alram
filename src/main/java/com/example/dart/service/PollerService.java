@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -64,13 +65,15 @@ public class PollerService {
                 seenStore.add(d.rceptNo());
 
                 // Stage 1: 공시 제목 필터 (빠름, 네트워크 없음)
-                if (!newsFilter.isGoodNewsTitle(d.reportNm())) continue;
+                Optional<NewsFilter.TitleMatch> match = newsFilter.matchTitle(d.reportNm());
+                if (match.isEmpty()) continue;
 
                 // Stage 2: 본문 필터 (조건부 제외, 계약금액 비율 검증)
                 try {
                     String bodyText = documentService.toPlainText(d.rceptNo());
-                    if (!newsFilter.isGoodNewsBody(bodyText)) {
-                        log.debug("본문 필터 제외: {} - {}", d.corpName(), d.reportNm());
+                    Optional<String> reject = newsFilter.bodyRejectReason(bodyText, match.get());
+                    if (reject.isPresent()) {
+                        log.info("본문 필터 제외 [{}]: {} - {}", reject.get(), d.corpName(), d.reportNm());
                         continue;
                     }
                 } catch (Exception e) {
@@ -78,8 +81,9 @@ public class PollerService {
                     log.warn("본문 조회 실패, 제목 기준으로 알림: {} - {}", d.corpName(), d.reportNm());
                 }
 
-                log.info("호재 공시 감지: {} - {}", d.corpName(), d.reportNm());
-                notifier.sendTitleAlert(d);
+                log.info("호재 공시 감지 [{}|{}]: {} - {}",
+                        match.get().category(), match.get().matchedKeyword(), d.corpName(), d.reportNm());
+                notifier.sendTitleAlert(d, match.get());
             }
         } catch (Exception e) {
             log.error("폴링 중 오류 발생", e);

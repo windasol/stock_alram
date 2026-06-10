@@ -2,6 +2,9 @@ package com.example.dart.config;
 
 import io.github.cdimascio.dotenv.Dotenv;
 
+import java.util.Arrays;
+import java.util.List;
+
 public record AppConfig(
         String dartApiKey,
         String notifier,
@@ -11,7 +14,9 @@ public record AppConfig(
         String discordChannelId,
         int pollIntervalSec,
         String corpCls,
-        String pblntfTy
+        String pblntfTy,
+        List<String> filterExtraKeywords,
+        List<String> filterExcludeKeywords
 ) {
 
     public static AppConfig load() {
@@ -27,6 +32,8 @@ public record AppConfig(
         String corpCls  = resolveOrDefault(dotenv, "CORP_CLS",   "Y,K");
         // B=주요사항보고(공급계약·자사주취득 등), I=거래소공시(수주 등)
         String pblntfTy = resolveOrDefault(dotenv, "PBLNTF_TY",  "B,I");
+        List<String> filterExtraKeywords   = parseCsv(resolve(dotenv, "FILTER_EXTRA_KEYWORDS"));
+        List<String> filterExcludeKeywords = parseCsv(resolve(dotenv, "FILTER_EXCLUDE_KEYWORDS"));
 
         // 공통 필수
         if (dartApiKey == null || dartApiKey.isBlank()) {
@@ -52,7 +59,16 @@ public record AppConfig(
         }
 
         return new AppConfig(dartApiKey, notifier, webexBotToken, webexRoomId,
-                discordBotToken, discordChannelId, pollInterval, corpCls, pblntfTy);
+                discordBotToken, discordChannelId, pollInterval, corpCls, pblntfTy,
+                filterExtraKeywords, filterExcludeKeywords);
+    }
+
+    private static List<String> parseCsv(String csv) {
+        if (csv == null || csv.isBlank()) return List.of();
+        return Arrays.stream(csv.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toList();
     }
 
     private static String resolve(Dotenv dotenv, String key) {

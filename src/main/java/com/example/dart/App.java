@@ -22,7 +22,7 @@ public class App {
 
         AppConfig config = AppConfig.load();
         DartClient dartClient = new DartClient(config.dartApiKey());
-        NewsFilter newsFilter = new NewsFilter();
+        NewsFilter newsFilter = new NewsFilter(config.filterExtraKeywords(), config.filterExcludeKeywords());
         SeenStore seenStore = new SeenStore();
         DocumentParser documentParser = new DocumentParser();
         DocumentService documentService = new DocumentService(dartClient, documentParser);
