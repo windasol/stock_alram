@@ -29,6 +29,7 @@ class NewsFilterTest {
         assertCategory("수주공급계약", "단일판매ㆍ공급계약체결");
         assertCategory("수주공급계약", "[첨부추가]단일판매 · 공급계약 체결");  // 접두어+공백+점 변형
         assertCategory("수주공급계약", "수주공시(자율공시)");
+        assertCategory("수주공급계약", "우선협상대상자선정(자율공시)");  // 수주 직전 신호
     }
 
     @Test
@@ -43,29 +44,58 @@ class NewsFilterTest {
     @Test
     void 투자_특허_매칭() {
         assertCategory("투자", "신규시설투자등");
+        assertCategory("투자", "신규시설투자등(생산라인증설)");
         assertCategory("특허", "특허권취득(자율공시)");
+        assertCategory("특허", "특허 등록 결정(자율공시)");
     }
 
     @Test
-    void 기술계약_체결만_매칭() {
+    void 기술계약_매칭() {
         assertCategory("기술계약", "투자판단관련주요경영사항(기술이전계약체결)");
         assertCategory("기술계약", "투자판단관련주요경영사항(기술수출 계약 체결)");
-        assertRejected("투자판단관련주요경영사항(기술이전계약변경)");   // 변경 제외
-        assertRejected("투자판단관련주요경영사항(기술이전계약 경과)"); // 체결 없음
+        // 재현율 우선: 경과 공시(마일스톤 수령 등)도 호재 — "체결" 요구 제거
+        assertCategory("기술계약", "투자판단관련주요경영사항(기술이전계약 경과)");
+        assertRejected("투자판단관련주요경영사항(기술이전계약변경)");   // 변경(축소·지연)은 제외
     }
 
     @Test
     void 바이오승인_매칭() {
         assertCategory("바이오승인", "투자판단관련주요경영사항(임상시험계획승인)");
         assertCategory("바이오승인", "투자판단관련주요경영사항(품목허가승인)");
+        assertCategory("바이오승인", "투자판단관련주요경영사항(임상시험결과)");
+        assertCategory("바이오승인", "투자판단관련주요경영사항(미국 FDA 품목허가 승인)");
+        assertCategory("바이오승인", "투자판단관련주요경영사항(희귀의약품지정)");
+    }
+
+    @Test
+    void 장래계획_재개_승소_매칭() {
+        assertCategory("장래계획", "장래사업ㆍ경영계획(공정공시)");
+        assertCategory("영업재개", "생산재개(자율공시)");
+        assertCategory("소송승소", "소송등의판결ㆍ결정 (특허침해소송 승소)");
+        // 전역 제외("취하")는 그대로 적용
+        assertRejected("소송등의판결ㆍ결정 (가처분 취하)");
+        // 기타경영사항 전체 포함은 노이즈가 커서 의도적으로 미포함
+        assertRejected("기타경영사항(자율공시)");
+    }
+
+    @Test
+    void 안전망_주요경영사항_매칭() {
+        // 특정 카테고리에 안 걸려도 "투자판단관련주요경영사항"이면 알림 (재현율 우선)
+        assertCategory("주요경영사항", "투자판단관련주요경영사항(국책과제선정)");
+        assertCategory("주요경영사항", "투자판단관련주요경영사항(해외자회사설립)");
+        // "신청"은 바이오승인 룰에서 빠지지만 안전망이 받는다 — 알림은 나감
+        assertCategory("주요경영사항", "투자판단관련주요경영사항(임상시험계획승인신청)");
+        assertCategory("주요경영사항", "투자판단관련주요경영사항(품목허가신청)");
     }
 
     // ── Stage 1 : 제목 — 제외 ──────────────────────────────────────────
 
     @Test
-    void 바이오_신청은_승인이_아니므로_제외() {
-        assertRejected("투자판단관련주요경영사항(임상시험계획승인신청)");
-        assertRejected("투자판단관련주요경영사항(품목허가신청)");
+    void 안전망_악재_키워드_제외() {
+        assertRejected("투자판단관련주요경영사항(소송제기)");
+        assertRejected("투자판단관련주요경영사항(횡령ㆍ배임혐의발생)");
+        assertRejected("투자판단관련주요경영사항(생산중단)");  // 전역 "중단"
+        assertRejected("투자판단관련주요경영사항(품목허가 불승인)");
     }
 
     @Test
@@ -106,13 +136,17 @@ class NewsFilterTest {
     private static final TitleMatch BUYBACK_MATCH = new TitleMatch("주주환원", "자기주식취득");
 
     @Test
-    void 조건부_본문_제외() {
-        assertTrue(filter.bodyRejectReason("본 계약은 조건부 계약으로...", CONTRACT_MATCH).isPresent());
+    void 조건부계약_해당_명시만_제외() {
+        assertTrue(filter.bodyRejectReason("2-1. 조건부 계약여부 해당 2-2. 조건내용 ...", CONTRACT_MATCH).isPresent());
+        // 서식에 "조건부 계약여부" 항목이 항상 있으므로 "미해당"은 통과해야 함
+        assertTrue(filter.bodyRejectReason("2-1. 조건부 계약여부 미해당", CONTRACT_MATCH).isEmpty());
+        // 단어 "조건부"가 본문 어딘가에 있다는 이유만으로 제외하지 않음
+        assertTrue(filter.bodyRejectReason("기타 조건부 사항 참고", CONTRACT_MATCH).isEmpty());
     }
 
     @Test
     void 매출액_비율_미달시_수주공급계약만_제외() {
-        String body = "최근 매출액 대비(%) 5.2";
+        String body = "최근 매출액 대비(%) 3.2";
         assertTrue(filter.bodyRejectReason(body, CONTRACT_MATCH).isPresent());
         // 다른 카테고리의 본문 보일러플레이트에는 비율 검사를 적용하지 않음
         assertTrue(filter.bodyRejectReason(body, BUYBACK_MATCH).isEmpty());
@@ -121,6 +155,16 @@ class NewsFilterTest {
     @Test
     void 매출액_비율_충족시_통과() {
         assertTrue(filter.bodyRejectReason("매출액 대비 15.5%", CONTRACT_MATCH).isEmpty());
+        assertTrue(filter.bodyRejectReason("매출액 대비(%) 8.5", CONTRACT_MATCH).isEmpty());     // 5% 이상
+        assertTrue(filter.bodyRejectReason("매출액 대비(%) 1,031.5", CONTRACT_MATCH).isEmpty()); // 콤마 비율
+    }
+
+    @Test
+    void 매출액_금액행이나_미기재는_비율로_오인하지_않음() {
+        // "매출액(원)" 금액 행의 숫자를 비율로 읽으면 안 됨
+        assertTrue(filter.bodyRejectReason("최근 매출액(원) 50,000,000,000", CONTRACT_MATCH).isEmpty());
+        // 비율 미기재("-")는 통과
+        assertTrue(filter.bodyRejectReason("최근 매출액(원) 50,000,000,000 매출액 대비(%) - 3. 계약기간", CONTRACT_MATCH).isEmpty());
     }
 
     @Test
