@@ -17,6 +17,13 @@ public class DocumentService {
         this.documentParser = documentParser;
     }
 
+    /** Stage 2 필터용: 원문 본문을 평문으로 반환. */
+    public String toPlainText(String rceptNo) {
+        byte[] zipBytes = dartClient.fetchDocument(rceptNo);
+        return documentParser.toPlainText(zipBytes);
+    }
+
+    /** 알림 메시지용: 핵심 정보 요약 + 미리보기 반환. */
     public String buildDetail(String rceptNo) {
         log.info("상세 내역 조회 시작: {}", rceptNo);
         byte[] zipBytes = dartClient.fetchDocument(rceptNo);

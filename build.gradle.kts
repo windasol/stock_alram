@@ -11,7 +11,6 @@ repositories {
 }
 
 dependencies {
-    implementation("net.dv8tion:JDA:5.2.3")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.2")
     implementation("org.jsoup:jsoup:1.18.3")
     implementation("org.slf4j:slf4j-api:2.0.16")
@@ -24,6 +23,10 @@ dependencies {
 
 application {
     mainClass.set("com.example.dart.App")
+}
+
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
 }
 
 tasks.named<Test>("test") {

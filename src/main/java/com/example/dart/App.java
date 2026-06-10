@@ -4,6 +4,8 @@ import com.example.dart.config.AppConfig;
 import com.example.dart.dart.DartClient;
 import com.example.dart.filter.NewsFilter;
 import com.example.dart.notify.DiscordService;
+import com.example.dart.notify.Notifier;
+import com.example.dart.notify.WebexService;
 import com.example.dart.parse.DocumentParser;
 import com.example.dart.service.DocumentService;
 import com.example.dart.service.PollerService;
@@ -24,17 +26,22 @@ public class App {
         SeenStore seenStore = new SeenStore();
         DocumentParser documentParser = new DocumentParser();
         DocumentService documentService = new DocumentService(dartClient, documentParser);
-        DiscordService discordService = new DiscordService(config.discordBotToken(), config.discordChannelId(), documentService);
 
-        discordService.start();
+        Notifier notifier = switch (config.notifier()) {
+            case "discord" -> new DiscordService(config.discordBotToken(), config.discordChannelId(), documentService);
+            case "webex"   -> new WebexService(config.webexBotToken(), config.webexRoomId(), documentService);
+            default -> throw new IllegalStateException("알 수 없는 NOTIFIER: " + config.notifier());
+        };
 
-        PollerService pollerService = new PollerService(dartClient, newsFilter, discordService, seenStore, config);
+        notifier.start();
+
+        PollerService pollerService = new PollerService(dartClient, newsFilter, notifier, documentService, seenStore, config);
         pollerService.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("종료 신호 수신, 서비스 중지 중...");
             pollerService.stop();
-            discordService.stop();
+            notifier.stop();
             log.info("봇 종료 완료");
         }));
     }

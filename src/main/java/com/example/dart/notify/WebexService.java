@@ -13,20 +13,21 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
 
-public class DiscordService implements Notifier {
+public class WebexService implements Notifier {
 
-    private static final Logger log = LoggerFactory.getLogger(DiscordService.class);
-    private static final int MAX_MESSAGE_LENGTH = 2000;
+    private static final Logger log = LoggerFactory.getLogger(WebexService.class);
+    private static final String MESSAGES_URL = "https://webexapis.com/v1/messages";
+    private static final int MAX_MARKDOWN_LENGTH = 7000;
 
     private final String botToken;
-    private final String channelId;
+    private final String roomId;
     private final DocumentService documentService;
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
 
-    public DiscordService(String botToken, String channelId, DocumentService documentService) {
+    public WebexService(String botToken, String roomId, DocumentService documentService) {
         this.botToken = botToken;
-        this.channelId = channelId;
+        this.roomId = roomId;
         this.documentService = documentService;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -34,22 +35,19 @@ public class DiscordService implements Notifier {
         this.mapper = new ObjectMapper();
     }
 
-    @Override
     public void start() {
-        log.info("Discord 알림 서비스 시작 (channelId: {})", channelId);
+        log.info("Webex 알림 서비스 시작 (roomId: {})", roomId);
     }
 
-    @Override
     public void sendBootMessage() {
         send("DART 호재 알림 봇이 시작되었습니다.");
     }
 
-    @Override
     public void sendTitleAlert(Disclosure d) {
         String dartUrl = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + d.rceptNo();
         String rceptDate = formatDate(d.rceptDt());
         String header = String.format(
-                "**[호재 공시]**\n**회사명**: %s\n**공시제목**: %s\n**접수일**: %s\n**제출인**: %s\n%s",
+                "**[호재 공시]**%n**회사명**: %s%n**공시제목**: %s%n**접수일**: %s%n**제출인**: %s%n**[DART 원문](%s)**",
                 d.corpName(), d.reportNm(), rceptDate, d.flrNm(), dartUrl);
 
         String detail;
@@ -65,22 +63,23 @@ public class DiscordService implements Notifier {
         send(truncate(fullText));
     }
 
-    @Override
     public void stop() {
-        log.info("Discord 알림 서비스 종료");
+        log.info("Webex 알림 서비스 종료");
     }
 
     // ---- private helpers ----
 
-    private void send(String content) {
+    private void send(String markdown) {
         try {
-            String url = "https://discord.com/api/v10/channels/" + channelId + "/messages";
-            String body = mapper.writeValueAsString(Map.of("content", content));
+            String body = mapper.writeValueAsString(Map.of(
+                    "roomId", roomId,
+                    "markdown", markdown
+            ));
 
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
+                    .uri(URI.create(MESSAGES_URL))
                     .timeout(Duration.ofSeconds(15))
-                    .header("Authorization", "Bot " + botToken)
+                    .header("Authorization", "Bearer " + botToken)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
@@ -88,12 +87,12 @@ public class DiscordService implements Notifier {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                log.debug("Discord 메시지 전송 완료 (status={})", response.statusCode());
+                log.debug("Webex 메시지 전송 완료 (status={})", response.statusCode());
             } else {
-                log.error("Discord 메시지 전송 실패: status={}, body={}", response.statusCode(), response.body());
+                log.error("Webex 메시지 전송 실패: status={}, body={}", response.statusCode(), response.body());
             }
         } catch (Exception e) {
-            log.error("Discord 메시지 전송 중 오류 발생", e);
+            log.error("Webex 메시지 전송 중 오류 발생", e);
         }
     }
 
@@ -104,7 +103,7 @@ public class DiscordService implements Notifier {
     }
 
     private static String truncate(String text) {
-        if (text.length() <= MAX_MESSAGE_LENGTH) return text;
-        return text.substring(0, MAX_MESSAGE_LENGTH - 20) + "\n...(생략)";
+        if (text.length() <= MAX_MARKDOWN_LENGTH) return text;
+        return text.substring(0, MAX_MARKDOWN_LENGTH - 20) + "\n...(생략)";
     }
 }
