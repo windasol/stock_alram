@@ -1,6 +1,9 @@
 .gradle/
 build/
+out/
 .idea/
 *.iml
 .env
 seen.txt
+seen_news.txt
+bash.exe.stackdump
