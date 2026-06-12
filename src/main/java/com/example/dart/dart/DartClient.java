@@ -1,6 +1,7 @@
 package com.example.dart.dart;
 
 import com.example.dart.model.Disclosure;
+import com.example.dart.util.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -35,6 +36,7 @@ public class DartClient {
     public DartClient(String apiKey) {
         this.apiKey = apiKey;
         this.httpClient = HttpClient.newBuilder()
+                .sslContext(TrustStores.systemDefault())
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.mapper = new ObjectMapper();

@@ -1,5 +1,6 @@
 package com.example.dart.notify;
 
+import com.example.dart.util.TrustStores;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +21,7 @@ abstract class HttpNotifier implements Notifier {
     protected final Logger log = LoggerFactory.getLogger(getClass());
 
     private final HttpClient httpClient = HttpClient.newBuilder()
+            .sslContext(TrustStores.systemDefault())
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
