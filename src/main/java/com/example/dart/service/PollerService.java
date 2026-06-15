@@ -6,6 +6,7 @@ import com.example.dart.filter.NewsFilter;
 import com.example.dart.model.Disclosure;
 import com.example.dart.notify.AlertComposer;
 import com.example.dart.notify.Notifier;
+import com.example.dart.util.DisclosureKeys;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,18 +30,21 @@ public class PollerService {
     private final DocumentService documentService;
     private final AlertComposer alertComposer;
     private final SeenStore seenStore;
+    private final SeenStore disclosureKeys;
     private final AppConfig config;
     private final ScheduledExecutorService scheduler;
 
     public PollerService(DartClient dartClient, NewsFilter newsFilter,
                          Notifier notifier, DocumentService documentService,
-                         AlertComposer alertComposer, SeenStore seenStore, AppConfig config) {
+                         AlertComposer alertComposer, SeenStore seenStore,
+                         SeenStore disclosureKeys, AppConfig config) {
         this.dartClient = dartClient;
         this.newsFilter = newsFilter;
         this.notifier = notifier;
         this.documentService = documentService;
         this.alertComposer = alertComposer;
         this.seenStore = seenStore;
+        this.disclosureKeys = disclosureKeys;
         this.config = config;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "dart-poller"));
     }
@@ -83,6 +87,12 @@ public class PollerService {
 
         // Stage 2: 본문 필터 (수주공급계약 한정 — 조건부 계약, 매출액 비율)
         if (rejectedByBody(d, match.get())) return;
+
+        // KIND 폴러가 먼저 알린 공시면 건너뛴다 — add가 원자적이라 한쪽만 true를 받는다.
+        if (!disclosureKeys.add(DisclosureKeys.of(d.corpName(), d.reportNm()))) {
+            log.info("교차 중복 제외 (KIND 선행 알림): {} - {}", d.corpName(), d.reportNm());
+            return;
+        }
 
         log.info("호재 공시 감지 [{}|{}|{}]: {} - {}",
                 d.marketName(), match.get().category(), match.get().matchedKeyword(), d.corpName(), d.reportNm());

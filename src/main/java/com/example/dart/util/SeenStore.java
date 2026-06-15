@@ -31,10 +31,13 @@ public class SeenStore {
         return seen.contains(id);
     }
 
-    public void add(String id) {
+    /** @return 처음 본 ID였으면 true — 두 폴러가 같은 키를 두고 경쟁해도 한쪽만 true를 받는다. */
+    public boolean add(String id) {
         if (seen.add(id)) {
             appendToFile(id);
+            return true;
         }
+        return false;
     }
 
     private void loadFromFile() {

@@ -33,7 +33,11 @@ public record AppConfig(
         List<String> newsExcludeKeywords,
         List<String> newsRssFeeds,
         int newsMaxAgeMin,
-        int newsMacroCooldownMin
+        int newsMacroCooldownMin,
+        List<String> newsGoogleKeywords,
+        int newsGooglePollIntervalSec,
+        boolean kindEnabled,
+        int kindPollIntervalSec
 ) {
 
     /**
@@ -75,14 +79,36 @@ public record AppConfig(
             "철회,취소,무산,불발,실패,중단,보류,연기,부결,불승인,해제,모면,무혐의,반환,"
             + "승소,무죄,해소,흑자,무효";
 
-    /** 검증된 언론사 속보 RSS — "이름|URL" 콤마 구분. 포털 색인 없이 발행 즉시 잡힌다. */
+    /**
+     * 검증된 언론사 속보 RSS — "이름|URL" 콤마 구분. 포털 색인 없이 발행 즉시 잡힌다.
+     * korea.kr 보도자료(정책브리핑·식약처·방위사업청)는 정책 수혜·품목허가·방산 수주의
+     * 원천 신호 — 제목이 호재 키워드에 걸릴 때만 알림이 나가므로 노이즈는 키워드 게이트가 막는다.
+     */
     private static final String DEFAULT_NEWS_RSS_FEEDS = String.join(",",
             "한국경제|https://www.hankyung.com/feed/finance",
             "이데일리|http://rss.edaily.co.kr/stock_news.xml",
             "머니투데이|http://rss.mt.co.kr/mt_news.xml",
             "연합인포맥스|https://news.einfomax.co.kr/rss/allArticle.xml",
             "연합뉴스|https://www.yna.co.kr/rss/economy.xml",
-            "파이낸셜뉴스|https://www.fnnews.com/rss/r20/fn_realnews_stock.xml");
+            "파이낸셜뉴스|https://www.fnnews.com/rss/r20/fn_realnews_stock.xml",
+            "매일경제|https://www.mk.co.kr/rss/30800011/",
+            "조선비즈|https://biz.chosun.com/arc/outboundfeeds/rss/category/stock/?outputType=xml",
+            "전자신문|https://rss.etnews.com/Section902.xml",
+            "아시아경제|https://www.asiae.co.kr/rss/stock.htm",
+            "서울경제|https://www.sedaily.com/rss/finance",
+            "이투데이|https://rss.etoday.co.kr/eto/market_news.xml",
+            "뉴스핌|http://rss.newspim.com/news/category/105",
+            "인포스탁데일리|https://www.infostockdaily.co.kr/rss/allArticle.xml",
+            "정책브리핑|https://www.korea.kr/rss/pressrelease.xml",
+            "식약처|https://www.korea.kr/rss/dept_mfds.xml",
+            "방위사업청|https://www.korea.kr/rss/dept_dapa.xml");
+
+    /**
+     * 구글뉴스 검색 RSS용 키워드 — 네이버 API 사각지대(중소매체·외신 한글판) 보완망.
+     * 검색어 하나가 피드 하나가 되므로 가치 큰 정밀 쿼리만. 호출량 = 키워드 수 × (86400/주기).
+     */
+    private static final String DEFAULT_NEWS_GOOGLE_KEYWORDS =
+            "수주,공급계약,기술수출,품목허가,FDA 승인,무상증자,자사주 소각,흑자전환,우선협상대상자,임상 3상";
 
     /**
      * 네이버 검색에 쓰는 전체 키워드 (호재 + 악재 + 시황 단독).
@@ -145,6 +171,12 @@ public record AppConfig(
         List<String> newsRssFeeds = parseCsv(resolveOrDefault(dotenv, "NEWS_RSS_FEEDS", DEFAULT_NEWS_RSS_FEEDS));
         int newsMaxAgeMin = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_MAX_AGE_MIN", "30"));
         int newsMacroCooldownMin = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_MACRO_COOLDOWN_MIN", "10"));
+        // 기본 120초 — 키워드 10개 × 720회 = 일 7,200회. 구글 비공식 한도라 429 발생 시 주기를 늘린다.
+        List<String> newsGoogleKeywords = parseCsv(resolveOrDefault(dotenv, "NEWS_GOOGLE_KEYWORDS", DEFAULT_NEWS_GOOGLE_KEYWORDS));
+        int newsGooglePollInterval = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_GOOGLE_POLL_INTERVAL_SEC", "120"));
+        // KIND(거래소 공시)는 DART보다 선게시가 빈번 — 같은 공시는 교차 중복 제거로 한쪽만 알린다.
+        boolean kindEnabled = Boolean.parseBoolean(resolveOrDefault(dotenv, "KIND_ENABLED", "true"));
+        int kindPollIntervalSec = Integer.parseInt(resolveOrDefault(dotenv, "KIND_POLL_INTERVAL_SEC", "15"));
 
         // 공통 필수
         if (dartApiKey == null || dartApiKey.isBlank()) {
@@ -182,13 +214,15 @@ public record AppConfig(
         }
 
         return new AppConfig(dartApiKey, notifier, webexBotToken, webexRoomId, webexNewsRoomId,
-                discordBotToken, discordChannelId, discordNewsChannelId, pollInterval, corpCls, pblntfTy,
+                discordBotToken, discordChannelId, discordNewsChannelId,
+                pollInterval, corpCls, pblntfTy,
                 filterExtraKeywords, filterExcludeKeywords,
                 newsEnabled, naverClientId, naverClientSecret,
                 newsPollInterval, newsRssPollInterval,
                 newsKeywords, newsBadKeywords, newsMacroKeywords,
                 newsMacroTopics, newsMacroTriggers, newsFlipKeywords, newsExcludeKeywords,
-                newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin);
+                newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin,
+                newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec);
     }
 
     private static List<String> parseCsv(String csv) {

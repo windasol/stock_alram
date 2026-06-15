@@ -3,6 +3,10 @@ package com.example.dart;
 import com.example.dart.config.AppConfig;
 import com.example.dart.dart.DartClient;
 import com.example.dart.filter.NewsFilter;
+import com.example.dart.kind.KindAlertComposer;
+import com.example.dart.kind.KindClient;
+import com.example.dart.kind.KindPollerService;
+import com.example.dart.news.GoogleNewsFeeds;
 import com.example.dart.news.NaverNewsClient;
 import com.example.dart.news.NewsAlertComposer;
 import com.example.dart.news.NewsArticleFilter;
@@ -60,9 +64,25 @@ public class App {
             log.info("뉴스 알림 채널 분리 (channel/room: {})", newsChannelId);
         }
 
+        // DART와 KIND가 같은 공시를 각각 게시하므로, 공유 키 저장소로 먼저 잡은 쪽만 알린다.
+        SeenStore disclosureKeys = new SeenStore(Path.of("seen_disclosure_keys.txt"));
+
         PollerService pollerService = new PollerService(
-                dartClient, newsFilter, notifier, documentService, alertComposer, seenStore, config);
+                dartClient, newsFilter, notifier, documentService, alertComposer,
+                seenStore, disclosureKeys, config);
         pollerService.start();
+
+        // KIND 폴러 — 거래소 공시는 KIND에 먼저 게시되는 경우가 많아 가장 빠른 공시 소스.
+        KindPollerService kindPollerService;
+        if (config.kindEnabled()) {
+            kindPollerService = new KindPollerService(
+                    new KindClient(), newsFilter, notifier, new KindAlertComposer(),
+                    new SeenStore(Path.of("seen_kind.txt")), disclosureKeys, config);
+            kindPollerService.start();
+        } else {
+            kindPollerService = null;
+            log.info("KIND 폴링 비활성화 (KIND_ENABLED=false)");
+        }
 
         // 뉴스 폴러 — 공시 폴러와 별도 스레드에서 병렬 동작, Notifier만 공유.
         // RSS는 항상, 네이버 검색은 키가 있을 때만 보완망으로 동작.
@@ -83,6 +103,7 @@ public class App {
             SeenStore newsSeenStore = new SeenStore(Path.of("seen_news.txt"));
             newsPollerService = new NewsPollerService(
                     new RssClient(), RssFeed.parseList(config.newsRssFeeds()),
+                    GoogleNewsFeeds.of(config.newsGoogleKeywords()),
                     newsClient, classifier, articleFilter, newsNotifier,
                     new NewsAlertComposer(), newsSeenStore, config);
             newsPollerService.start();
@@ -94,6 +115,7 @@ public class App {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("종료 신호 수신, 서비스 중지 중...");
             pollerService.stop();
+            if (kindPollerService != null) kindPollerService.stop();
             if (newsPollerService != null) newsPollerService.stop();
             notifier.stop();
             if (newsNotifier != notifier) newsNotifier.stop();

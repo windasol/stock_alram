@@ -16,11 +16,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * 뉴스 폴러 — 공시 폴러(PollerService)와 독립된 스레드에서 병렬로 동작하며 Notifier만 공유한다.
  *
- * 두 소스를 같은 스레드에서 다른 주기로 폴링한다 (필터 상태 공유, 동기화 불필요):
- *  - RSS   : 언론사 속보 피드 직접 폴링. 포털 색인 지연이 없어 가장 빠르다. 무료·무제한이라 짧은 주기.
- *  - 네이버 : 키워드 검색. RSS에 없는 매체를 잡는 보완망. 일 25,000회 한도라 긴 주기.
+ * 세 소스를 같은 스레드에서 다른 주기로 폴링한다 (필터 상태 공유, 동기화 불필요):
+ *  - RSS      : 언론사 속보 피드 직접 폴링. 포털 색인 지연이 없어 가장 빠르다. 무료·무제한이라 짧은 주기.
+ *  - 구글뉴스  : 키워드 검색 RSS. 네이버 API 사각지대(중소매체·외신 한글판) 보완. 비공식 한도라 중간 주기.
+ *  - 네이버    : 키워드 검색. RSS에 없는 매체를 잡는 보완망. 일 25,000회 한도라 긴 주기.
  *
- * RSS가 먼저 알린 이슈는 유사 제목 중복 필터가 네이버 쪽 같은 기사를 자동 억제한다.
+ * 빠른 소스가 먼저 알린 이슈는 유사 제목 중복 필터가 느린 소스의 같은 기사를 자동 억제한다.
  * 흐름: 신규 기사(링크 기준) → 키워드 분류(호재/악재/시황) → 노이즈 필터 → 조립 → 전송.
  */
 public class NewsPollerService {
@@ -30,6 +31,7 @@ public class NewsPollerService {
 
     private final RssClient rssClient;
     private final List<RssFeed> rssFeeds;
+    private final List<RssFeed> googleFeeds;
     private final NaverNewsClient newsClient;
     private final NewsKeywordClassifier classifier;
     private final NewsArticleFilter articleFilter;
@@ -39,12 +41,13 @@ public class NewsPollerService {
     private final AppConfig config;
     private final ScheduledExecutorService scheduler;
 
-    public NewsPollerService(RssClient rssClient, List<RssFeed> rssFeeds,
+    public NewsPollerService(RssClient rssClient, List<RssFeed> rssFeeds, List<RssFeed> googleFeeds,
                              NaverNewsClient newsClient, NewsKeywordClassifier classifier,
                              NewsArticleFilter articleFilter, Notifier notifier,
                              NewsAlertComposer alertComposer, SeenStore seenStore, AppConfig config) {
         this.rssClient = rssClient;
         this.rssFeeds = rssFeeds;
+        this.googleFeeds = googleFeeds;
         this.newsClient = newsClient;
         this.classifier = classifier;
         this.articleFilter = articleFilter;
@@ -58,14 +61,18 @@ public class NewsPollerService {
     public void start() {
         int queryCount = config.allNewsKeywords().size();
         long dailyCalls = (long) queryCount * 86_400 / config.newsPollIntervalSec();
-        log.info("뉴스 폴링 시작 (RSS {}개 피드 {}초 주기, 네이버 키워드 {}개 {}초 주기 — 예상 일 호출 {}회)",
+        log.info("뉴스 폴링 시작 (RSS {}개 피드 {}초 주기, 구글뉴스 {}개 키워드 {}초 주기, 네이버 키워드 {}개 {}초 주기 — 예상 일 호출 {}회)",
                 rssFeeds.size(), config.newsRssPollIntervalSec(),
+                googleFeeds.size(), config.newsGooglePollIntervalSec(),
                 queryCount, config.newsPollIntervalSec(), dailyCalls);
         if (dailyCalls > NAVER_DAILY_LIMIT) {
             log.warn("네이버 예상 일 호출 수가 한도({}회)를 초과합니다 — NEWS_POLL_INTERVAL_SEC를 늘리거나 키워드를 줄이세요.",
                     NAVER_DAILY_LIMIT);
         }
         scheduler.scheduleWithFixedDelay(this::pollRss, 0, config.newsRssPollIntervalSec(), TimeUnit.SECONDS);
+        if (!googleFeeds.isEmpty()) {
+            scheduler.scheduleWithFixedDelay(this::pollGoogle, 10, config.newsGooglePollIntervalSec(), TimeUnit.SECONDS);
+        }
         if (newsClient != null) {
             scheduler.scheduleWithFixedDelay(this::pollNaver, 5, config.newsPollIntervalSec(), TimeUnit.SECONDS);
         }
@@ -85,14 +92,22 @@ public class NewsPollerService {
     }
 
     private void pollRss() {
+        pollFeeds(rssFeeds, "RSS");
+    }
+
+    private void pollGoogle() {
+        pollFeeds(googleFeeds, "구글뉴스");
+    }
+
+    private void pollFeeds(List<RssFeed> feeds, String label) {
         try {
             int fresh = 0, matched = 0, alerted = 0;
-            for (RssFeed feed : rssFeeds) {
+            for (RssFeed feed : feeds) {
                 for (NewsArticle article : rssClient.fetch(feed)) {
                     if (seenStore.contains(article.link())) continue;
                     seenStore.add(article.link());
                     fresh++;
-                    // RSS는 전체 기사 스트림 — 키워드 미매칭은 그냥 버린다.
+                    // 피드는 전체 기사 스트림 — 키워드 미매칭은 그냥 버린다.
                     Optional<NewsKeywordClassifier.Match> match = classifier.classify(article.title());
                     if (match.isEmpty()) continue;
                     matched++;
@@ -100,10 +115,10 @@ public class NewsPollerService {
                 }
             }
             if (fresh > 0) {
-                log.info("RSS 폴링: 신규 {}건 → 키워드 매칭 {}건 → 알림 {}건", fresh, matched, alerted);
+                log.info("{} 폴링: 신규 {}건 → 키워드 매칭 {}건 → 알림 {}건", label, fresh, matched, alerted);
             }
         } catch (Exception e) {
-            log.error("RSS 폴링 중 오류 발생", e);
+            log.error("{} 폴링 중 오류 발생", label, e);
         }
     }
 

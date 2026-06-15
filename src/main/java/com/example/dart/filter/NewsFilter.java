@@ -213,8 +213,9 @@ public class NewsFilter {
     /**
      * 공백·가운뎃점 변형 제거 + 영문 대문자화(fda → FDA)로 키워드 매칭을 안정화.
      * 대괄호 접두어([기재정정] 등)는 제외 신호이므로 보존.
+     * DART·KIND 교차 중복 키(DisclosureKeys)도 같은 정규화를 쓴다 — 두 시스템의 표기 차이 흡수.
      */
-    static String normalize(String s) {
+    public static String normalize(String s) {
         return NORMALIZE_PATTERN.matcher(s).replaceAll("").toUpperCase(Locale.ROOT);
     }
 

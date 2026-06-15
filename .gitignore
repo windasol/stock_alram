@@ -6,4 +6,6 @@ out/
 .env
 seen.txt
 seen_news.txt
+seen_kind.txt
+seen_disclosure_keys.txt
 bash.exe.stackdump
