@@ -3,7 +3,10 @@ package com.example.dart.kind;
 import com.example.dart.config.AppConfig;
 import com.example.dart.filter.NewsFilter;
 import com.example.dart.notify.Notifier;
+import com.example.dart.parse.DocumentParser;
+import com.example.dart.quote.StockQuoteClient;
 import com.example.dart.util.DisclosureKeys;
+import com.example.dart.util.KoreanMoney;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,9 +15,11 @@ import java.time.Duration;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -34,6 +39,8 @@ public class KindPollerService {
 
     private static final Logger log = LoggerFactory.getLogger(KindPollerService.class);
     private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    /** 교차중복 키 날짜 포맷 — DART rcept_dt(yyyyMMdd)와 동일해야 같은 공시가 매칭된다. */
+    private static final DateTimeFormatter KEY_DATE_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     /** KIND 공시 게시 시간대 밖에는 폴링하지 않는다 — 야간 무의미 트래픽 방지 (DART 폴러는 24시간 커버). */
     private static final LocalTime OPEN = LocalTime.of(7, 0);
@@ -45,26 +52,38 @@ public class KindPollerService {
      */
     private static final Duration MAX_AGE = Duration.ofMinutes(30);
 
+    /** KIND 본문은 보통 즉시 공개되지만, 순간 미반영 대비로 짧게 재시도한다. */
+    private static final long ENRICH_RETRY_DELAY_SEC = 15;
+    private static final int ENRICH_MAX_ATTEMPTS = 4;
+
     private final KindClient client;
     private final NewsFilter newsFilter;
     private final Notifier notifier;
     private final KindAlertComposer alertComposer;
+    private final KindDocumentClient docClient;
+    private final DocumentParser documentParser;
+    private final StockQuoteClient quoteClient;
     private final SeenStore seenStore;
     private final SeenStore disclosureKeys;
     private final Set<String> allowedMarkets;
     private final int intervalSec;
     private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService enrichmentPool;
 
     private int consecutiveFailures = 0;
     private int skipPolls = 0;
 
     public KindPollerService(KindClient client, NewsFilter newsFilter, Notifier notifier,
-                             KindAlertComposer alertComposer, SeenStore seenStore,
-                             SeenStore disclosureKeys, AppConfig config) {
+                             KindAlertComposer alertComposer, KindDocumentClient docClient,
+                             DocumentParser documentParser, StockQuoteClient quoteClient,
+                             SeenStore seenStore, SeenStore disclosureKeys, AppConfig config) {
         this.client = client;
         this.newsFilter = newsFilter;
         this.notifier = notifier;
         this.alertComposer = alertComposer;
+        this.docClient = docClient;
+        this.documentParser = documentParser;
+        this.quoteClient = quoteClient;
         this.seenStore = seenStore;
         this.disclosureKeys = disclosureKeys;
         // DART와 같은 CORP_CLS 설정 공유 — 빈 값이면 전체 시장
@@ -75,6 +94,7 @@ public class KindPollerService {
                         .collect(Collectors.toUnmodifiableSet());
         this.intervalSec = config.kindPollIntervalSec();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kind-poller"));
+        this.enrichmentPool = Executors.newScheduledThreadPool(2, r -> new Thread(r, "kind-enrich"));
     }
 
     public void start() {
@@ -84,12 +104,17 @@ public class KindPollerService {
 
     public void stop() {
         scheduler.shutdown();
+        enrichmentPool.shutdown();
         try {
             if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
                 scheduler.shutdownNow();
             }
+            if (!enrichmentPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                enrichmentPool.shutdownNow();
+            }
         } catch (InterruptedException e) {
             scheduler.shutdownNow();
+            enrichmentPool.shutdownNow();
             Thread.currentThread().interrupt();
         }
         log.info("KIND 폴링 중지 완료");
@@ -135,14 +160,51 @@ public class KindPollerService {
         }
 
         // DART 폴러가 먼저 알린 공시면 건너뛴다 — add가 원자적이라 한쪽만 true를 받는다.
-        if (!disclosureKeys.add(DisclosureKeys.of(d.company(), d.title()))) {
+        // 키 날짜는 DART rcept_dt와 맞추기 위해 폴링 시점(KST)의 오늘 날짜를 쓴다.
+        String today = now.toLocalDate().format(KEY_DATE_FMT);
+        if (!disclosureKeys.add(DisclosureKeys.of(today, d.company(), d.title()))) {
             log.info("교차 중복 제외 (DART 선행 알림): {} - {}", d.company(), d.title());
             return;
         }
 
         log.info("호재 공시 감지 [KIND|{}|{}|{}]: {} - {}",
                 d.market(), match.get().category(), match.get().matchedKeyword(), d.company(), d.title());
+        // 1단계: 감지 즉시 헤더
         notifier.send(alertComposer.compose(d, match.get()));
+        // 2단계: KIND 뷰어 본문에서 규모를 뽑아 후속 — 폴링 루프를 막지 않게 비동기로.
+        scheduleEnrichment(d, 1);
+    }
+
+    /**
+     * KIND 뷰어 본문을 파싱해 규모 분석 후속 메시지를 보낸다. KIND 선행 공시는 DART가 보강을 건너뛰므로
+     * (PollerService 참고) 이 경로가 유일한 규모 분석이다 — 본문은 DART 원문 지연과 무관하게 즉시 받을 수 있다.
+     */
+    private void scheduleEnrichment(KindDisclosure d, int attempt) {
+        enrichmentPool.submit(() -> {
+            try {
+                KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
+                DocumentParser.ContractInfo c =
+                        documentParser.extractContractFromText(documentParser.htmlToPlainText(doc.bodyHtml()));
+                OptionalLong cap = doc.stockCode() != null
+                        ? quoteClient.marketCapWon(doc.stockCode())
+                        : OptionalLong.empty();
+                log.info("KIND 규모 분석 [{} - {}] 계약금액 {}", d.company(), d.title(),
+                        c.contractWon().isPresent() ? KoreanMoney.format(c.contractWon().getAsLong()) : "미추출");
+                notifier.send(alertComposer.composeFollowup(d, c, cap));
+            } catch (Exception e) {
+                if (attempt < ENRICH_MAX_ATTEMPTS) {
+                    log.info("KIND 본문 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
+                            ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString());
+                    enrichmentPool.schedule(() -> scheduleEnrichment(d, attempt + 1),
+                            ENRICH_RETRY_DELAY_SEC, TimeUnit.SECONDS);
+                } else {
+                    log.warn("KIND 본문 보강 {}회 실패 — 규모 분석 생략: {} - {}",
+                            ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
+                    notifier.send(String.format("📊 **시총·매출 대비** | %s — %s\n상세 조회 실패",
+                            d.company(), d.title()));
+                }
+            }
+        });
     }
 
     private static boolean olderThanMaxAge(String hhmm, ZonedDateTime now) {

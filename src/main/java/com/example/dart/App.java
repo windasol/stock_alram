@@ -5,6 +5,7 @@ import com.example.dart.dart.DartClient;
 import com.example.dart.filter.NewsFilter;
 import com.example.dart.kind.KindAlertComposer;
 import com.example.dart.kind.KindClient;
+import com.example.dart.kind.KindDocumentClient;
 import com.example.dart.kind.KindPollerService;
 import com.example.dart.news.GoogleNewsFeeds;
 import com.example.dart.news.NaverNewsClient;
@@ -19,13 +20,19 @@ import com.example.dart.notify.DiscordService;
 import com.example.dart.notify.Notifier;
 import com.example.dart.notify.WebexService;
 import com.example.dart.parse.DocumentParser;
+import com.example.dart.quote.StockQuoteClient;
 import com.example.dart.service.DocumentService;
 import com.example.dart.service.PollerService;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 
 /** 조립 루트 — 의존성 생성·연결과 생명주기 관리만 담당한다. */
@@ -33,15 +40,26 @@ public class App {
 
     private static final Logger log = LoggerFactory.getLogger(App.class);
 
+    /**
+     * 단일 인스턴스 보장용 락. JVM 수명 동안 잡고 있어야 하므로 정적 참조로 유지한다
+     * (지역 변수면 GC되어 채널이 닫히고 락이 풀린다).
+     */
+    private static FileChannel lockChannel;
+    @SuppressWarnings("unused") // 락 유지 목적의 참조 — 직접 사용하진 않는다.
+    private static FileLock instanceLock;
+
     public static void main(String[] args) {
         log.info("DART 실시간 호재 알림 봇 시작");
+        ensureSingleInstance();
 
         AppConfig config = AppConfig.load();
         DartClient dartClient = new DartClient(config.dartApiKey());
         NewsFilter newsFilter = new NewsFilter(config.filterExtraKeywords(), config.filterExcludeKeywords());
         SeenStore seenStore = new SeenStore(Path.of("seen.txt"));
-        DocumentService documentService = new DocumentService(dartClient, new DocumentParser());
-        AlertComposer alertComposer = new AlertComposer(documentService);
+        DocumentParser documentParser = new DocumentParser();
+        DocumentService documentService = new DocumentService(dartClient, documentParser);
+        StockQuoteClient quoteClient = new StockQuoteClient();
+        AlertComposer alertComposer = new AlertComposer(documentService, newsFilter, quoteClient, dartClient);
 
         Notifier notifier = createNotifier(config, null);
 
@@ -68,7 +86,7 @@ public class App {
         SeenStore disclosureKeys = new SeenStore(Path.of("seen_disclosure_keys.txt"));
 
         PollerService pollerService = new PollerService(
-                dartClient, newsFilter, notifier, documentService, alertComposer,
+                dartClient, newsFilter, notifier, alertComposer,
                 seenStore, disclosureKeys, config);
         pollerService.start();
 
@@ -77,6 +95,7 @@ public class App {
         if (config.kindEnabled()) {
             kindPollerService = new KindPollerService(
                     new KindClient(), newsFilter, notifier, new KindAlertComposer(),
+                    new KindDocumentClient(), documentParser, quoteClient,
                     new SeenStore(Path.of("seen_kind.txt")), disclosureKeys, config);
             kindPollerService.start();
         } else {
@@ -99,7 +118,8 @@ public class App {
                     config.newsMacroTopics(), config.newsMacroTriggers(), config.newsFlipKeywords());
             NewsArticleFilter articleFilter = new NewsArticleFilter(
                     config.newsExcludeKeywords(), Duration.ofMinutes(config.newsMaxAgeMin()),
-                    Duration.ofMinutes(config.newsMacroCooldownMin()));
+                    Duration.ofMinutes(config.newsMacroCooldownMin()),
+                    Path.of("seen_news_titles.txt"));
             SeenStore newsSeenStore = new SeenStore(Path.of("seen_news.txt"));
             newsPollerService = new NewsPollerService(
                     new RssClient(), RssFeed.parseList(config.newsRssFeeds()),
@@ -124,6 +144,31 @@ public class App {
     }
 
     /** @param channelOverride 채널/룸 ID 재지정 (null이면 기본 채널) */
+    /**
+     * 인스턴스가 하나만 뜨도록 파일 락을 건다. 이미 다른 프로세스가 잡고 있으면 즉시 종료한다.
+     * 두 인스턴스가 동시에 돌면 각자 메모리 중복필터(SeenStore·NewsArticleFilter.recentAlerts)를
+     * 따로 들고 있어 서로의 알림을 못 막고, 같은 기사를 인스턴스 수만큼 중복 전송하기 때문이다.
+     */
+    private static void ensureSingleInstance() {
+        Path lockFile = Path.of("app.lock");
+        try {
+            lockChannel = FileChannel.open(lockFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            instanceLock = lockChannel.tryLock();
+            if (instanceLock == null) {
+                log.error("이미 다른 인스턴스가 실행 중입니다 ({}). 중복 알림 방지를 위해 종료합니다 — "
+                        + "기존 프로세스를 먼저 종료하세요.", lockFile.toAbsolutePath());
+                System.exit(1);
+            }
+            log.info("단일 인스턴스 락 획득 ({})", lockFile.toAbsolutePath());
+        } catch (OverlappingFileLockException e) {
+            log.error("이미 다른 인스턴스가 실행 중입니다 ({}). 중복 알림 방지를 위해 종료합니다.",
+                    lockFile.toAbsolutePath());
+            System.exit(1);
+        } catch (IOException e) {
+            log.error("인스턴스 락 획득 실패 ({}) — 단일 인스턴스 보장 없이 계속 진행합니다.", lockFile, e);
+        }
+    }
+
     private static Notifier createNotifier(AppConfig config, String channelOverride) {
         return switch (config.notifier()) {
             case "discord" -> new DiscordService(config.discordBotToken(),

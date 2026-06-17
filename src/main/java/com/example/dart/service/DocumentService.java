@@ -45,6 +45,17 @@ public class DocumentService {
         return documentParser.extractSummary(fetchBytes(rceptNo));
     }
 
+    /** 규모 계산용: 핵심 라벨(계약금액·최근매출액·매출액대비 등) → 값 Map. */
+    public Map<String, String> fields(String rceptNo) {
+        return documentParser.extractFields(fetchBytes(rceptNo));
+    }
+
+    /** 알림용: 수주공급계약 핵심값(계약금액·매출액대비·최근매출액·계약상대방·계약기간)을 깔끔하게 추출. */
+    public DocumentParser.ContractInfo contractInfo(String rceptNo) {
+        log.info("규모 분석 핵심값 조회: {}", rceptNo);
+        return documentParser.extractContract(fetchBytes(rceptNo));
+    }
+
     private byte[] fetchBytes(String rceptNo) {
         byte[] cached = cache.get(rceptNo);
         if (cached != null) return cached;

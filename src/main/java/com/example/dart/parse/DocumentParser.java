@@ -8,10 +8,14 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -26,15 +30,109 @@ public class DocumentParser {
             "투자금액", "시설규모"
     };
 
+    /** 본문으로 우선 채택할 텍스트 문서 확장자 (대소문자 무시). */
+    private static final String[] TEXT_EXTS = {".xml", ".html", ".htm", ".txt"};
+
+    /** 본문 후보에서 제외할 이미지·바이너리 확장자 (대소문자 무시). */
+    private static final String[] BINARY_EXTS =
+            {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".pdf"};
+
+    /** ZIP 로컬 파일 헤더 시그니처 (PK). */
+    private static final byte[] ZIP_SIGNATURE = {0x50, 0x4B, 0x03, 0x04};
+
     public String toPlainText(byte[] zipBytes) {
-        byte[] xmlBytes = unzip(zipBytes);
-        String raw = decodeWithFallback(xmlBytes);
+        return htmlToPlainText(unzip(zipBytes));
+    }
+
+    /**
+     * ZIP을 거치지 않는 평문 추출 — KIND 뷰어 본문(.htm, EUC-KR)처럼 압축되지 않은 HTML 바이트용.
+     * DART 경로의 {@link #toPlainText(byte[])}와 같은 정리(태그 제거·공백 정규화)를 공유한다.
+     */
+    public String htmlToPlainText(byte[] htmlBytes) {
+        String raw = decodeWithFallback(htmlBytes);
         return Jsoup.parse(raw).text().replaceAll("\\s{2,}", " ").trim();
     }
 
-    public String extractSummary(byte[] zipBytes) {
-        String plainText = toPlainText(zipBytes);
+    /**
+     * 수주공급계약 공시에서 알림에 쓸 핵심값만 "깔끔하게" 추출한다.
+     * 기존 라벨+100자 캡처는 옆 필드까지 끌려와 지저분하므로, 라벨에 딱 붙는 값만 정밀 매칭한다.
+     * 라벨 표기는 공백·콜론 유무가 제각각이라("최근매출액(원)" vs "최근 매출액(원)") 정규식에서 흡수한다.
+     */
+    public ContractInfo extractContract(byte[] zipBytes) {
+        return extractContractFromText(toPlainText(zipBytes));
+    }
 
+    /**
+     * 평문에서 수주공급계약 핵심값을 추출한다. DART 원문(ZIP)·KIND 뷰어 본문(.htm) 모두
+     * 라벨 표기가 동일하므로 같은 정규식을 공유한다.
+     */
+    public ContractInfo extractContractFromText(String t) {
+        return new ContractInfo(
+                wonAfter(t, "계약금액\\s*(?:총액)?\\s*\\(\\s*원\\s*\\)"),  // 계약금액(총액)(원) NN
+                ratioPct(t),                                              // 매출액 대비(%) NN.NN
+                wonAfter(t, "최근\\s*매출액\\s*\\(\\s*원\\s*\\)"),          // 최근 매출액(원) NN
+                counterparty(t),                                          // 계약상대방 XXX
+                period(t));                                               // 계약기간 시작~종료
+    }
+
+    /** 라벨 정규식 바로 뒤에 오는 정수 금액(콤마 포함)을 원(long)으로. 없으면 empty. */
+    private static java.util.OptionalLong wonAfter(String text, String labelRegex) {
+        Matcher m = Pattern.compile(labelRegex + "\\s*([0-9][0-9,]+)").matcher(text);
+        if (m.find()) {
+            try {
+                return java.util.OptionalLong.of(Long.parseLong(m.group(1).replace(",", "")));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return java.util.OptionalLong.empty();
+    }
+
+    /** "매출액 대비(%) 3.66" → 3.66. 미기재("-")·없음이면 null. */
+    private static Double ratioPct(String text) {
+        Matcher m = Pattern.compile("매출액\\s*대비\\s*\\(\\s*%\\s*\\)\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)").matcher(text);
+        if (m.find()) {
+            try {
+                return Double.parseDouble(m.group(1).replace(",", ""));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return null;
+    }
+
+    /** "계약상대방 WAA EUROPE - 최근 매출액…" → "WAA EUROPE". 못 찾으면 null. */
+    private static String counterparty(String text) {
+        Matcher m = Pattern.compile("계약상대방\\s+([^-]{1,40}?)\\s*(?:-|최근\\s*매출액|주요사업|회사와)").matcher(text);
+        if (m.find()) {
+            String v = m.group(1).trim();
+            return v.isEmpty() ? null : v;
+        }
+        return null;
+    }
+
+    /** "계약기간 시작일 2025-08-19 종료일 2028-06-28" → "2025-08-19 ~ 2028-06-28". 정정 공시는 마지막(정정후) 값. */
+    private static String period(String text) {
+        Matcher m = Pattern.compile("시작일\\s*:?\\s*(\\d{4}-\\d{2}-\\d{2})\\s*종료일\\s*:?\\s*(\\d{4}-\\d{2}-\\d{2})").matcher(text);
+        String last = null;
+        while (m.find()) {
+            last = m.group(1) + " ~ " + m.group(2);
+        }
+        return last;
+    }
+
+    /** 수주공급계약 알림용 핵심값. 없는 항목은 비어있음/ null. */
+    public record ContractInfo(
+            java.util.OptionalLong contractWon,
+            Double salesRatioPct,
+            java.util.OptionalLong recentRevenueWon,
+            String counterparty,
+            String period) {}
+
+    /** 본문에서 핵심 라벨(계약금액·최근매출액·매출액대비 등) → 값 Map을 추출. 규모 계산에 쓰인다. */
+    public Map<String, String> extractFields(byte[] zipBytes) {
+        return extractFieldsFromText(toPlainText(zipBytes));
+    }
+
+    private Map<String, String> extractFieldsFromText(String plainText) {
         Map<String, String> extracted = new LinkedHashMap<>();
         for (String label : LABELS) {
             Pattern pattern = Pattern.compile(label + "\\s*[:\\-]?\\s*(.{1,100})");
@@ -43,6 +141,12 @@ public class DocumentParser {
                 extracted.put(label, matcher.group(1).trim());
             }
         }
+        return extracted;
+    }
+
+    public String extractSummary(byte[] zipBytes) {
+        String plainText = toPlainText(zipBytes);
+        Map<String, String> extracted = extractFieldsFromText(plainText);
 
         StringBuilder sb = new StringBuilder();
         if (!extracted.isEmpty()) {
@@ -62,22 +166,87 @@ public class DocumentParser {
     }
 
     private byte[] unzip(byte[] zipBytes) {
+        if (!looksLikeZip(zipBytes)) {
+            String preview = new String(zipBytes, 0, Math.min(zipBytes.length, 200), StandardCharsets.UTF_8)
+                    .replaceAll("\\s+", " ").trim();
+            log.warn("DART가 ZIP이 아닌 응답을 반환 ({}바이트, 앞부분: {})", zipBytes.length, preview);
+        }
+
+        // 폴백(최대 엔트리 선택)을 위해 모든 엔트리를 한 번 순회하며 (이름, 내용)을 수집한다.
+        List<Entry> textEntries = new ArrayList<>();
+        List<Entry> otherEntries = new ArrayList<>();
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                if (entry.getName().endsWith(".xml") || entry.getName().endsWith(".html")) {
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    zis.transferTo(baos);
-                    return baos.toByteArray();
+            ZipEntry zipEntry;
+            while ((zipEntry = zis.getNextEntry()) != null) {
+                if (zipEntry.isDirectory()) continue;
+                String name = zipEntry.getName();
+                if (hasExtension(name, BINARY_EXTS)) continue;   // 이미지·PDF 등은 본문 후보에서 제외
+
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                zis.transferTo(baos);
+                Entry entry = new Entry(name, baos.toByteArray());
+                if (hasExtension(name, TEXT_EXTS)) {
+                    textEntries.add(entry);
+                } else {
+                    otherEntries.add(entry);
                 }
             }
-            throw new RuntimeException("ZIP 내 xml/html 파일을 찾을 수 없음");
-        } catch (RuntimeException e) {
-            throw e;
         } catch (Exception e) {
             throw new RuntimeException("ZIP 해제 실패", e);
         }
+
+        // 1순위: 텍스트 확장자 엔트리 중 가장 먼저 만난 것.
+        if (!textEntries.isEmpty()) {
+            return textEntries.get(0).content;
+        }
+
+        // 2순위 폴백: 비바이너리 엔트리 중 가장 큰 것 (DART 본문은 대개 최대 크기).
+        Entry largest = otherEntries.stream()
+                .max((a, b) -> Integer.compare(a.content.length, b.content.length))
+                .orElse(null);
+        if (largest != null) {
+            log.info("ZIP에 텍스트 확장자 엔트리 없음 — 최대 엔트리로 폴백: {} ({}바이트)",
+                    largest.name, largest.content.length);
+            return largest.content;
+        }
+
+        // 본문 후보가 전혀 없음 (빈 ZIP / 디렉터리·이미지뿐). 진단을 위해 엔트리 목록을 남긴다.
+        throw new RuntimeException("ZIP 내 본문 파일을 찾을 수 없음 — 엔트리: " + describeAll(zipBytes));
     }
+
+    /** 응답 바이트가 ZIP 로컬 파일 헤더 시그니처로 시작하는지 확인. */
+    private static boolean looksLikeZip(byte[] bytes) {
+        if (bytes.length < ZIP_SIGNATURE.length) return false;
+        for (int i = 0; i < ZIP_SIGNATURE.length; i++) {
+            if (bytes[i] != ZIP_SIGNATURE[i]) return false;
+        }
+        return true;
+    }
+
+    private static boolean hasExtension(String name, String[] exts) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        for (String ext : exts) {
+            if (lower.endsWith(ext)) return true;
+        }
+        return false;
+    }
+
+    /** 진단용: ZIP 내 모든 엔트리의 이름·크기를 다시 한 번 훑어 "name(bytes)" 목록으로 만든다. */
+    private static String describeAll(byte[] zipBytes) {
+        List<String> entries = new ArrayList<>();
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
+            ZipEntry e;
+            while ((e = zis.getNextEntry()) != null) {
+                long size = e.getSize();
+                entries.add(e.getName() + (size >= 0 ? "(" + size + "B)" : ""));
+            }
+        } catch (Exception ignored) {
+            // 진단 경로이므로 실패해도 무시
+        }
+        return entries.isEmpty() ? "(없음)" : entries.stream().collect(Collectors.joining(", "));
+    }
+
+    private record Entry(String name, byte[] content) {}
 
     private String decodeWithFallback(byte[] bytes) {
         String utf8 = new String(bytes, StandardCharsets.UTF_8);

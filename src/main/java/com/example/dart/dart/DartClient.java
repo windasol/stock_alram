@@ -22,6 +22,10 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class DartClient {
 
@@ -32,6 +36,8 @@ public class DartClient {
     private final String apiKey;
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
+    /** 같은 회사 공시가 연속으로 와도 재무 API를 반복 호출하지 않도록 매출액을 회사별로 캐시. */
+    private final Map<String, OptionalLong> revenueCache = new ConcurrentHashMap<>();
 
     public DartClient(String apiKey) {
         this.apiKey = apiKey;
@@ -81,19 +87,116 @@ public class DartClient {
                     .build();
 
             HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-
-            String contentType = response.headers().firstValue("Content-Type").orElse("");
-            if (contentType.contains("application/json")) {
-                String body = new String(response.body());
-                log.error("document.xml 요청 실패 (JSON 응답): {}", body);
-                throw new DartException("document.xml 조회 실패: " + body);
-            }
-
-            return response.body();
+            return interpretDocumentResponse(response.body(), rceptNo);
         } catch (DartException e) {
             throw e;
         } catch (Exception e) {
             throw new DartException("document.xml 다운로드 실패: " + rceptNo, e);
+        }
+    }
+
+    /**
+     * document.xml 응답 바이트를 해석한다.
+     *
+     * 성공 응답은 ZIP 바이너리(PK 시그니처)다 — content-type은 부정확하므로
+     * (성공=application/x-msdownload, 에러=application/xml) 본문 시그니처로 판별한다.
+     * ZIP이 아니면 DART 에러 응답(XML)이므로 {@code <status>}를 파싱해 일시·영구를 구분한다.
+     *
+     * @return 정상 ZIP 바이트
+     * @throws DocumentNotReadyException status 014(원문 미공개) — 재조회로 회복 가능
+     * @throws DartException 그 외 에러
+     */
+    static byte[] interpretDocumentResponse(byte[] body, String rceptNo) {
+        if (looksLikeZip(body)) {
+            return body;
+        }
+
+        String text = new String(body, StandardCharsets.UTF_8);
+        String status = extractTag(text, "status");
+        String message = extractTag(text, "message");
+
+        // 014: 원문이 아직 공개되지 않음 — 영구 실패가 아니라 잠시 뒤 재조회하면 되는 상태.
+        if ("014".equals(status)) {
+            throw new DocumentNotReadyException(
+                    "원문 미공개 (status=014, " + rceptNo + "): " + message);
+        }
+
+        log.error("document.xml 조회 실패 (status={}): {}", status, message.isEmpty() ? text : message);
+        throw new DartException("document.xml 조회 실패 (status=" + status + "): " + message);
+    }
+
+    /** 응답 바이트가 ZIP 로컬 파일 헤더 시그니처(PK\x03\x04)로 시작하는지 확인. */
+    private static boolean looksLikeZip(byte[] bytes) {
+        return bytes != null && bytes.length >= 4
+                && bytes[0] == 0x50 && bytes[1] == 0x4B && bytes[2] == 0x03 && bytes[3] == 0x04;
+    }
+
+    /** 단순 XML 태그 본문 추출: {@code <tag>값</tag>} → "값". 없으면 빈 문자열. */
+    private static String extractTag(String xml, String tag) {
+        Matcher m = Pattern.compile("<" + tag + ">(.*?)</" + tag + ">").matcher(xml);
+        return m.find() ? m.group(1).trim() : "";
+    }
+
+    /**
+     * 최근 연간 매출액(원)을 OpenDART 재무 API(단일회사 주요계정)에서 조회한다.
+     *
+     * 공시 원문(document.xml)은 게시 직후 한동안 받을 수 없지만(status 014), 재무 API는 lag가 없어
+     * 계약금액 대비 매출 비율을 즉시 계산할 수 있다. 연결재무제표(CFS) 우선, 없으면 별도(OFS).
+     * 올해 사업보고서는 아직 없으므로 직전연도부터 한 해 전까지 차례로 시도한다.
+     */
+    public OptionalLong recentRevenueWon(String corpCode) {
+        if (corpCode == null || corpCode.isBlank()) return OptionalLong.empty();
+        return revenueCache.computeIfAbsent(corpCode, c -> {
+            int year = LocalDate.now().getYear();
+            for (int y = year - 1; y >= year - 2; y--) {
+                OptionalLong rev = revenueFor(c, y);
+                if (rev.isPresent()) return rev;
+            }
+            return OptionalLong.empty();
+        });
+    }
+
+    private OptionalLong revenueFor(String corpCode, int year) {
+        String url = BASE_URL + "/fnlttSinglAcnt.json"
+                + "?crtfc_key=" + enc(apiKey)
+                + "&corp_code=" + enc(corpCode)
+                + "&bsns_year=" + year
+                + "&reprt_code=11011";   // 11011 = 사업보고서(연간)
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(15))
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            JsonNode root = mapper.readTree(response.body());
+            if (!"000".equals(root.path("status").asText())) return OptionalLong.empty();
+
+            Long cfs = null, ofs = null;   // 연결 / 별도
+            for (JsonNode n : root.path("list")) {
+                String acc = n.path("account_nm").asText();
+                if (!(acc.contains("매출액") || acc.equals("영업수익"))) continue;
+                String amt = n.path("thstrm_amount").asText().replaceAll("[,\\s]", "");
+                if (amt.isEmpty() || "-".equals(amt)) continue;
+                try {
+                    long v = Long.parseLong(amt);
+                    if ("CFS".equals(n.path("fs_div").asText())) {
+                        if (cfs == null) cfs = v;
+                    } else if (ofs == null) {
+                        ofs = v;
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            Long pick = cfs != null ? cfs : ofs;
+            if (pick != null) {
+                log.info("매출액 조회 ({}년, corp_code={}): {}원", year, corpCode, pick);
+                return OptionalLong.of(pick);
+            }
+            return OptionalLong.empty();
+        } catch (Exception e) {
+            log.warn("매출액 조회 실패 (corp_code={}, year={}): {}", corpCode, year, e.toString());
+            return OptionalLong.empty();
         }
     }
 

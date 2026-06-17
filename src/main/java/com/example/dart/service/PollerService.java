@@ -2,6 +2,7 @@ package com.example.dart.service;
 
 import com.example.dart.config.AppConfig;
 import com.example.dart.dart.DartClient;
+import com.example.dart.dart.DocumentNotReadyException;
 import com.example.dart.filter.NewsFilter;
 import com.example.dart.model.Disclosure;
 import com.example.dart.notify.AlertComposer;
@@ -18,35 +19,46 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 주기적으로 DART 최신 공시를 폴링해 호재를 골라 알림을 보낸다.
- * 흐름: 신규 공시 → Stage 1 제목 필터 → Stage 2 본문 필터 → 메시지 조립 → 전송.
+ *
+ * 공시는 속도가 생명이라 2단계로 알린다:
+ *  1) 제목 필터 통과 + 교차중복 아님 → 헤더를 감지 즉시 전송 (본문 조회 없음).
+ *  2) 규모 분석(본문·계약금액·매출/시총 대비)은 별도 스레드에서 보강 메시지로 후송 —
+ *     폴링 루프를 막지 않아 다음 공시 처리가 지연되지 않는다.
+ * (기존 본문 필터 게이트는 제거 — 소규모·조건부 계약도 일단 알리고 후속에서 규모를 표시한다.)
  */
 public class PollerService {
 
     private static final Logger log = LoggerFactory.getLogger(PollerService.class);
 
+    /**
+     * DART 원문(document.xml)은 목록 등재보다 수 분~수 시간 늦게 공개된다(그 전엔 status 014).
+     * 감지 직후엔 거의 항상 미공개이므로, 원문이 풀릴 때까지 일정 간격으로 재조회한다.
+     */
+    private static final long ENRICH_RETRY_DELAY_SEC = 120;   // 2분 간격
+    private static final int ENRICH_MAX_ATTEMPTS = 10;        // 최대 10회 ≈ 20분 커버
+
     private final DartClient dartClient;
     private final NewsFilter newsFilter;
     private final Notifier notifier;
-    private final DocumentService documentService;
     private final AlertComposer alertComposer;
     private final SeenStore seenStore;
     private final SeenStore disclosureKeys;
     private final AppConfig config;
     private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService enrichmentPool;
 
     public PollerService(DartClient dartClient, NewsFilter newsFilter,
-                         Notifier notifier, DocumentService documentService,
-                         AlertComposer alertComposer, SeenStore seenStore,
-                         SeenStore disclosureKeys, AppConfig config) {
+                         Notifier notifier, AlertComposer alertComposer,
+                         SeenStore seenStore, SeenStore disclosureKeys, AppConfig config) {
         this.dartClient = dartClient;
         this.newsFilter = newsFilter;
         this.notifier = notifier;
-        this.documentService = documentService;
         this.alertComposer = alertComposer;
         this.seenStore = seenStore;
         this.disclosureKeys = disclosureKeys;
         this.config = config;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "dart-poller"));
+        this.enrichmentPool = Executors.newScheduledThreadPool(2, r -> new Thread(r, "dart-enrich"));
     }
 
     public void start() {
@@ -56,12 +68,17 @@ public class PollerService {
 
     public void stop() {
         scheduler.shutdown();
+        enrichmentPool.shutdown();
         try {
             if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
                 scheduler.shutdownNow();
             }
+            if (!enrichmentPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                enrichmentPool.shutdownNow();
+            }
         } catch (InterruptedException e) {
             scheduler.shutdownNow();
+            enrichmentPool.shutdownNow();
             Thread.currentThread().interrupt();
         }
         log.info("폴링 중지 완료");
@@ -79,38 +96,54 @@ public class PollerService {
         }
     }
 
-    /** 신규 공시 1건 처리: 필터 통과 시 알림 전송. */
+    /** 신규 공시 1건 처리: 제목 필터 통과 시 헤더 즉시 전송 + 규모 분석 후송. */
     private void handle(Disclosure d) {
         // Stage 1: 공시 제목 필터 (빠름, 네트워크 없음)
         Optional<NewsFilter.TitleMatch> match = newsFilter.matchTitle(d.reportNm());
         if (match.isEmpty()) return;
+        NewsFilter.TitleMatch m = match.get();
 
-        // Stage 2: 본문 필터 (수주공급계약 한정 — 조건부 계약, 매출액 비율)
-        if (rejectedByBody(d, match.get())) return;
-
-        // KIND 폴러가 먼저 알린 공시면 건너뛴다 — add가 원자적이라 한쪽만 true를 받는다.
-        if (!disclosureKeys.add(DisclosureKeys.of(d.corpName(), d.reportNm()))) {
-            log.info("교차 중복 제외 (KIND 선행 알림): {} - {}", d.corpName(), d.reportNm());
+        // 교차 중복: add가 원자적이라 먼저 잡은 쪽만 true를 받는다. true면 DART가 먼저이니 DART가
+        // 헤더+규모 분석(DART 원문)을 책임진다. false면 KIND가 먼저이고, KIND 폴러가 헤더와 규모 분석(KIND
+        // 뷰어 본문)을 모두 담당하므로 — 각 소스가 자기 본문으로 보강 — DART는 여기서 손을 뗀다.
+        boolean firstAlert = disclosureKeys.add(DisclosureKeys.of(d.rceptDt(), d.corpName(), d.reportNm()));
+        if (!firstAlert) {
+            log.info("KIND 선행 — KIND가 헤더·규모 분석 담당, DART 처리 생략: {} - {}", d.corpName(), d.reportNm());
             return;
         }
 
+        // 1단계: 감지 즉시 헤더 전송
         log.info("호재 공시 감지 [{}|{}|{}]: {} - {}",
-                d.marketName(), match.get().category(), match.get().matchedKeyword(), d.corpName(), d.reportNm());
-        notifier.send(alertComposer.compose(d, match.get()));
+                d.marketName(), m.category(), m.matchedKeyword(), d.corpName(), d.reportNm());
+        notifier.send(alertComposer.composeHeader(d, m));
+
+        // 2단계: 규모 분석 보강 — 폴링 루프를 막지 않게 비동기로 후송
+        scheduleEnrichment(d, 1);
     }
 
-    private boolean rejectedByBody(Disclosure d, NewsFilter.TitleMatch match) {
-        try {
-            String bodyText = documentService.toPlainText(d.rceptNo());
-            Optional<String> reject = newsFilter.bodyRejectReason(bodyText, match);
-            if (reject.isPresent()) {
-                log.info("본문 필터 제외 [{}]: {} - {}", reject.get(), d.corpName(), d.reportNm());
-                return true;
+    /**
+     * 규모 분석 후속 메시지를 보강해 전송한다. 원문이 아직 공개되지 않으면(014)
+     * {@link DocumentNotReadyException}이 올라오므로, 일정 간격으로 재시도한다.
+     */
+    private void scheduleEnrichment(Disclosure d, int attempt) {
+        enrichmentPool.submit(() -> {
+            try {
+                notifier.send(alertComposer.composeFollowup(d));
+            } catch (DocumentNotReadyException e) {
+                if (attempt < ENRICH_MAX_ATTEMPTS) {
+                    log.info("원문 미공개 — {}초 뒤 재조회 ({}/{}): {} - {}",
+                            ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.corpName(), d.reportNm());
+                    enrichmentPool.schedule(() -> scheduleEnrichment(d, attempt + 1),
+                            ENRICH_RETRY_DELAY_SEC, TimeUnit.SECONDS);
+                } else {
+                    log.warn("원문 미공개 — 재조회 {}회 모두 실패, 규모 분석 생략: {} - {}",
+                            ENRICH_MAX_ATTEMPTS, d.corpName(), d.reportNm());
+                    notifier.send(String.format("📊 **시총·매출 대비** | %s — %s\n원문 미공개 — 규모 분석 생략",
+                            d.corpName(), d.reportNm()));
+                }
+            } catch (Exception e) {
+                log.warn("보강 알림 전송 실패: {} - {}", d.corpName(), d.reportNm(), e);
             }
-        } catch (Exception e) {
-            // 본문 조회 실패 시 제목 기준으로 알림 (놓치지 않음)
-            log.warn("본문 조회 실패, 제목 기준으로 알림: {} - {}", d.corpName(), d.reportNm());
-        }
-        return false;
+        });
     }
 }
