@@ -63,8 +63,9 @@ public class KindAlertComposer {
             }
         }
 
-        // 📈 핵심정보 한 줄 — 있는 항목만.
+        // 📈 핵심정보 한 줄 — 시총·매출 원시값 + 계약 부가정보(있는 것만).
         List<String> info = new ArrayList<>();
+        marketCap.ifPresent(v -> info.add("시총 " + KoreanMoney.format(v)));
         c.recentRevenueWon().ifPresent(rev -> info.add("매출액 " + KoreanMoney.format(rev)));
         if (c.counterparty() != null) info.add("계약상대방 " + c.counterparty());
         if (c.period() != null) info.add("계약기간 " + c.period());

@@ -107,8 +107,16 @@ public class PollerService {
         // 헤더+규모 분석(DART 원문)을 책임진다. false면 KIND가 먼저이고, KIND 폴러가 헤더와 규모 분석(KIND
         // 뷰어 본문)을 모두 담당하므로 — 각 소스가 자기 본문으로 보강 — DART는 여기서 손을 뗀다.
         boolean firstAlert = disclosureKeys.add(DisclosureKeys.of(d.rceptDt(), d.corpName(), d.reportNm()));
+        boolean contract = NewsFilter.CATEGORY_CONTRACT.equals(m.category());
         if (!firstAlert) {
-            log.info("KIND 선행 — KIND가 헤더·규모 분석 담당, DART 처리 생략: {} - {}", d.corpName(), d.reportNm());
+            // KIND가 헤더를 보냈다. 계약이면 KIND가 규모 분석(뷰어 본문)까지 담당하므로 DART는 빠진다.
+            // 비계약이면 KIND엔 매출 출처(corp_code)가 없으므로 시총·매출만은 DART가 보강한다.
+            if (contract) {
+                log.info("KIND 선행 — KIND가 헤더·규모 분석 담당, DART 생략: {} - {}", d.corpName(), d.reportNm());
+            } else {
+                log.info("KIND 선행(비계약) — 시총·매출만 DART가 보강: {} - {}", d.corpName(), d.reportNm());
+                scheduleScaleOnly(d);
+            }
             return;
         }
 
@@ -117,8 +125,27 @@ public class PollerService {
                 d.marketName(), m.category(), m.matchedKeyword(), d.corpName(), d.reportNm());
         notifier.send(alertComposer.composeHeader(d, m));
 
-        // 2단계: 규모 분석 보강 — 폴링 루프를 막지 않게 비동기로 후송
-        scheduleEnrichment(d, 1);
+        // 2단계: 보강 — 폴링 루프를 막지 않게 비동기로 후송.
+        // 수주공급계약은 계약금액 대비 매출·시총(원문 필요), 그 외 호재는 회사 규모(시총·매출)만.
+        if (contract) {
+            scheduleEnrichment(d, 1);
+        } else {
+            scheduleScaleOnly(d);
+        }
+    }
+
+    /**
+     * 계약이 아닌 호재용 — 회사 규모(시총·매출)만 보강해 전송한다. 원문을 거치지 않아 014·재시도가 없다.
+     * KIND 선행 비계약 공시도 매출 출처(corp_code)가 DART에만 있으므로 이 경로로 보강한다.
+     */
+    private void scheduleScaleOnly(Disclosure d) {
+        enrichmentPool.submit(() -> {
+            try {
+                notifier.send(alertComposer.composeScaleOnly(d));
+            } catch (Exception e) {
+                log.warn("시총·매출 보강 실패 — 헤더 알림은 이미 전송됨: {} - {}", d.corpName(), d.reportNm(), e);
+            }
+        });
     }
 
     /**

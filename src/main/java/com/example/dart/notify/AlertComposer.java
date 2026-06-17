@@ -62,6 +62,7 @@ public class AlertComposer {
      */
     public String composeFollowup(Disclosure d) {
         String rceptNo = d.rceptNo();
+        OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
         StringBuilder sb = new StringBuilder(
                 String.format("📊 **시총·매출 대비** | %s — %s", d.corpName(), d.reportNm()));
         try {
@@ -88,8 +89,7 @@ public class AlertComposer {
                     sb.append(String.format(" · 매출 대비 %.1f%%", pct));
                 }
 
-                // 시총 대비 % — 종목코드로 시가총액 조회.
-                OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
+                // 시총 대비 % — 종목코드로 조회한 시가총액 대비.
                 if (cap.isPresent() && cap.getAsLong() > 0) {
                     double r = won * 100.0 / cap.getAsLong();
                     log.info("시총 대비 {}% (시총 {}원)", String.format("%.1f", r), cap.getAsLong());
@@ -99,8 +99,9 @@ public class AlertComposer {
                 log.info("규모 분석 [{} - {}] 계약금액 미추출", d.corpName(), d.reportNm());
             }
 
-            // 📈 핵심정보 한 줄 — 있는 항목만 깔끔하게.
+            // 📈 핵심정보 한 줄 — 시총·매출 원시값 + 계약 부가정보(있는 것만).
             List<String> info = new ArrayList<>();
+            cap.ifPresent(v -> info.add("시총 " + KoreanMoney.format(v)));
             revenue.ifPresent(rev -> info.add("매출액 " + KoreanMoney.format(rev)));
             if (c.counterparty() != null) info.add("계약상대방 " + c.counterparty());
             if (c.period() != null) info.add("계약기간 " + c.period());
@@ -113,6 +114,22 @@ public class AlertComposer {
             log.warn("규모 분석 실패 — 헤더 알림은 이미 전송됨: {} - {}", d.corpName(), d.reportNm(), e);
             sb.append("\n(상세 내역 조회 실패)");
         }
+        return sb.toString();
+    }
+
+    /**
+     * 계약이 아닌 호재(자기주식취득·배당·소각 등)용 — 대비 비율은 의미가 없으므로 회사 규모(시총·매출)만 보여준다.
+     * 원문(document.xml)을 거치지 않고 종목코드→시총, corp_code→매출(재무 API)만 쓰므로 lag·재시도가 없다.
+     */
+    public String composeScaleOnly(Disclosure d) {
+        OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
+        OptionalLong revenue = dartClient.recentRevenueWon(d.corpCode());
+        StringBuilder sb = new StringBuilder(
+                String.format("📊 **시총·매출** | %s — %s", d.corpName(), d.reportNm()));
+        List<String> info = new ArrayList<>();
+        cap.ifPresent(v -> info.add("시총 " + KoreanMoney.format(v)));
+        revenue.ifPresent(rev -> info.add("매출액 " + KoreanMoney.format(rev)));
+        if (!info.isEmpty()) sb.append("\n📈 ").append(String.join(" · ", info));
         return sb.toString();
     }
 
