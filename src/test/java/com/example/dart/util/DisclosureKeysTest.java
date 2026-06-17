@@ -23,6 +23,13 @@ class DisclosureKeysTest {
         assertEquals(
                 DisclosureKeys.of(D, "셀트리온", "fda승인"),
                 DisclosureKeys.of(D, "셀트리온", "FDA승인"));
+        // DART는 "주요사항보고서(…)"로 감싸지만 KIND는 안쪽 형태만 준다 — 같은 키가 돼야 교차 중복이 잡힌다.
+        assertEquals(
+                DisclosureKeys.of(D, "와이즈넛", "주요사항보고서(자기주식취득결정)"),
+                DisclosureKeys.of(D, "와이즈넛", "자기주식 취득 결정"));
+        assertEquals(
+                DisclosureKeys.of(D, "와이즈넛", "[기재정정]주요사항보고서(주식소각결정)"),
+                DisclosureKeys.of(D, "와이즈넛", "주식소각결정"));
     }
 
     @Test
