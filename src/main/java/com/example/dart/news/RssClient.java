@@ -8,6 +8,7 @@ import org.jsoup.parser.Parser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -82,10 +83,32 @@ public class RssClient {
             }
             log.debug("RSS 조회 완료 ({}, {}건)", feed.name(), result.size());
             return result;
+        } catch (IOException e) {
+            // 연결·DNS 일시 오류(회사망 프록시 경유 시 간헐 발생) — 다음 폴링에 자연 회복되므로
+            // 스택트레이스 없이 한 줄로만 남긴다. 피드 하나가 죽어도 나머지는 계속 돈다.
+            log.warn("RSS 조회 실패 ({}) — 연결 오류: {}", feed.name(), describe(e));
+            return Collections.emptyList();
         } catch (Exception e) {
+            // 파싱 버그 등 예기치 못한 오류는 원인 파악을 위해 전체 스택을 남긴다.
             log.warn("RSS 조회 중 오류 ({})", feed.name(), e);
             return Collections.emptyList();
         }
+    }
+
+    /** 예외를 "타입: 메시지 ← 근본원인타입" 한 줄로 요약(네트워크 오류 로그용). */
+    private static String describe(Throwable e) {
+        StringBuilder sb = new StringBuilder(e.getClass().getSimpleName());
+        if (e.getMessage() != null && !e.getMessage().isBlank()) {
+            sb.append(": ").append(e.getMessage());
+        }
+        Throwable cause = e.getCause();
+        if (cause != null && cause != e) {
+            sb.append(" ← ").append(cause.getClass().getSimpleName());
+            if (cause.getMessage() != null && !cause.getMessage().isBlank()) {
+                sb.append(": ").append(cause.getMessage());
+            }
+        }
+        return sb.toString();
     }
 
     private static NewsArticle toArticle(RssFeed feed, Element item) {
