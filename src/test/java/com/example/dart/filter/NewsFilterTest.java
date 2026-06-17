@@ -36,9 +36,15 @@ class NewsFilterTest {
     void 주주환원_매칭() {
         assertCategory("주주환원", "주요사항보고서(자기주식취득결정)");
         assertCategory("주주환원", "주요사항보고서(주식소각결정)");
-        assertCategory("주주환원", "주요사항보고서(현금ㆍ현물배당결정)");
-        assertCategory("주주환원", "주요사항보고서(무상증자결정)");
-        assertCategory("주주환원", "주요사항보고서(주식분할결정)");
+        assertCategory("주주환원", "주요사항보고서(이익소각결정)");
+    }
+
+    @Test
+    void 주주환원_저영향_공시_제외() {
+        // 배당·무상증자·분할은 주가 영향이 미미해 제외(노이즈)
+        assertRejected("주요사항보고서(현금ㆍ현물배당결정)");
+        assertRejected("주요사항보고서(무상증자결정)");
+        assertRejected("주요사항보고서(주식분할결정)");
     }
 
     @Test
