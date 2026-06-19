@@ -7,6 +7,9 @@ import com.example.dart.kind.KindAlertComposer;
 import com.example.dart.kind.KindClient;
 import com.example.dart.kind.KindDocumentClient;
 import com.example.dart.kind.KindPollerService;
+import com.example.dart.kis.KisAlertComposer;
+import com.example.dart.kis.KisClient;
+import com.example.dart.kis.KisPollerService;
 import com.example.dart.news.GoogleNewsFeeds;
 import com.example.dart.news.NaverNewsClient;
 import com.example.dart.news.NewsAlertComposer;
@@ -59,7 +62,12 @@ public class App {
         DocumentParser documentParser = new DocumentParser();
         DocumentService documentService = new DocumentService(dartClient, documentParser);
         StockQuoteClient quoteClient = new StockQuoteClient();
-        AlertComposer alertComposer = new AlertComposer(documentService, newsFilter, quoteClient, dartClient);
+        // KIND 소스 — DART가 먼저 잡은 계약을 KIND 뷰어 본문으로 즉시 보강하는 빠른 경로에서 쓰고,
+        // KIND 폴러에서도 같은 인스턴스를 재사용한다. KIND 비활성 시 null이면 빠른 경로는 즉시 폴백한다.
+        KindClient kindClient = config.kindEnabled() ? new KindClient() : null;
+        KindDocumentClient kindDocumentClient = config.kindEnabled() ? new KindDocumentClient() : null;
+        AlertComposer alertComposer = new AlertComposer(documentService, newsFilter, quoteClient, dartClient,
+                kindClient, kindDocumentClient, documentParser);
 
         Notifier notifier = createNotifier(config, null);
 
@@ -94,13 +102,37 @@ public class App {
         KindPollerService kindPollerService;
         if (config.kindEnabled()) {
             kindPollerService = new KindPollerService(
-                    new KindClient(), newsFilter, notifier, new KindAlertComposer(),
-                    new KindDocumentClient(), documentParser, quoteClient,
+                    kindClient, newsFilter, notifier, new KindAlertComposer(),
+                    kindDocumentClient, documentParser, quoteClient,
                     new SeenStore(Path.of("seen_kind.txt")), disclosureKeys, config);
             kindPollerService.start();
         } else {
             kindPollerService = null;
             log.info("KIND 폴링 비활성화 (KIND_ENABLED=false)");
+        }
+
+        // KIS 변동성 폴러 — 거래량 폭증(평소 대비 RVOL) + 급등 종목을 정찰. 키는 시스템 환경변수로 주입.
+        // 전용 채널이 설정되면 분리(공시·뉴스와 성격이 다른 시세 반응 신호라 섞지 않는다), 아니면 공시 채널 공유.
+        KisPollerService kisPollerService;
+        Notifier kisNotifier = notifier;
+        boolean separateKisChannel = false;
+        if (config.kisEnabled()) {
+            String kisChannelId = config.kisChannelId();
+            if (kisChannelId != null) {
+                kisNotifier = createNotifier(config, kisChannelId);
+                separateKisChannel = true;
+                kisNotifier.start();
+                kisNotifier.send("🚨 변동성 급등 알림이 시작되었습니다.");
+                log.info("KIS 알림 채널 분리 (channel/room: {})", kisChannelId);
+            }
+            kisPollerService = new KisPollerService(
+                    new KisClient(config.kisAppKey(), config.kisAppSecret(),
+                            config.kisMarketDivCode(), Path.of("kis_token.txt")),
+                    kisNotifier, new KisAlertComposer(), config);
+            kisPollerService.start();
+        } else {
+            kisPollerService = null;
+            log.info("KIS 변동성 폴링 비활성화 (KIS_APP_KEY/KIS_APP_SECRET 미설정)");
         }
 
         // 뉴스 폴러 — 공시 폴러와 별도 스레드에서 병렬 동작, Notifier만 공유.
@@ -132,13 +164,18 @@ public class App {
             log.info("뉴스 폴링 비활성화 (NEWS_ENABLED=false)");
         }
 
+        // 람다 캡처용 final 참조 (kisNotifier는 위에서 재할당될 수 있어 effectively final이 아님).
+        final Notifier kisNotifierRef = kisNotifier;
+        final boolean separateKisChannelRef = separateKisChannel;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("종료 신호 수신, 서비스 중지 중...");
             pollerService.stop();
             if (kindPollerService != null) kindPollerService.stop();
+            if (kisPollerService != null) kisPollerService.stop();
             if (newsPollerService != null) newsPollerService.stop();
             notifier.stop();
             if (newsNotifier != notifier) newsNotifier.stop();
+            if (separateKisChannelRef) kisNotifierRef.stop();
             log.info("봇 종료 완료");
         }));
     }

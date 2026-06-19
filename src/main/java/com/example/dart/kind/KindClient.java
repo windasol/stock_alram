@@ -1,5 +1,6 @@
 package com.example.dart.kind;
 
+import com.example.dart.util.DisclosureKeys;
 import com.example.dart.util.TrustStores;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -14,6 +15,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -67,6 +69,24 @@ public class KindClient {
             throw new IllegalStateException("KIND 응답 코드 " + response.statusCode());
         }
         return parse(response.body());
+    }
+
+    /**
+     * 같은 공시의 KIND 접수번호(acptNo)를 회사명+제목으로 찾는다 — DART 폴러가 먼저 잡은 계약을
+     * KIND 뷰어 본문으로 즉시 보강할 때, DART rcept_no는 KIND acptNo와 다르므로(접수번호 체계가 별개)
+     * 교차중복과 동일한 정규화 키({@link DisclosureKeys})로 오늘 목록에서 매칭한다.
+     *
+     * @param date 공시 게시일(yyyyMMdd) — DART rcept_dt. 같은 날짜를 양쪽 키에 동일하게 써서 회사·제목만으로 비교.
+     * @return 일치하는 acptNo (아직 KIND 미게시 등으로 없으면 empty). 네트워크 실패는 호출자에게 전파.
+     */
+    public Optional<String> findAcptNo(String date, String company, String title) throws Exception {
+        String target = DisclosureKeys.of(date, company, title);
+        for (KindDisclosure d : fetchToday()) {
+            if (DisclosureKeys.of(date, d.company(), d.title()).equals(target)) {
+                return Optional.of(d.acptNo());
+            }
+        }
+        return Optional.empty();
     }
 
     /** @throws IllegalStateException 응답에 공시 테이블이 없으면 (차단·점검 페이지 의심) */

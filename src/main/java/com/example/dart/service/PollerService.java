@@ -37,6 +37,13 @@ public class PollerService {
     private static final long ENRICH_RETRY_DELAY_SEC = 120;   // 2분 간격
     private static final int ENRICH_MAX_ATTEMPTS = 10;        // 최대 10회 ≈ 20분 커버
 
+    /**
+     * 빠른 경로(KIND 뷰어 본문) — DART가 먼저 잡은 계약도 헤더 직후 수초 내 %를 받게 한다.
+     * KIND가 아직 목록에 안 올렸을 수 있어 짧게 재시도하고, 그래도 못 구하면 DART 원문 경로로 폴백한다.
+     */
+    private static final long FAST_RETRY_DELAY_SEC = 10;
+    private static final int FAST_MAX_ATTEMPTS = 3;           // ≈ 20초 커버
+
     private final DartClient dartClient;
     private final NewsFilter newsFilter;
     private final Notifier notifier;
@@ -126,12 +133,36 @@ public class PollerService {
         notifier.send(alertComposer.composeHeader(d, m));
 
         // 2단계: 보강 — 폴링 루프를 막지 않게 비동기로 후송.
-        // 수주공급계약은 계약금액 대비 매출·시총(원문 필요), 그 외 호재는 회사 규모(시총·매출)만.
+        // 수주공급계약은 계약금액 대비 매출·시총(빠른 KIND 본문 우선, 실패 시 DART 원문), 그 외 호재는 회사 규모(시총·매출)만.
         if (contract) {
-            scheduleEnrichment(d, 1);
+            scheduleFastEnrichment(d, 1);
         } else {
             scheduleScaleOnly(d);
         }
+    }
+
+    /**
+     * 빠른 규모 분석 — KIND 뷰어 본문으로 즉시 보강한다(DART 원문 지연 회피). DART가 먼저 감지한 계약도
+     * 헤더 직후 수초 내 %를 받게 한다. KIND가 아직 목록에 없거나 본문 조회가 실패하면 짧게 재시도하고,
+     * 끝내 못 구하면 기존 DART 원문 경로({@link #scheduleEnrichment})로 폴백한다.
+     */
+    private void scheduleFastEnrichment(Disclosure d, int attempt) {
+        enrichmentPool.submit(() -> {
+            try {
+                notifier.send(alertComposer.composeFollowupFast(d));
+            } catch (Exception e) {
+                if (attempt < FAST_MAX_ATTEMPTS) {
+                    log.info("빠른 KIND 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
+                            FAST_RETRY_DELAY_SEC, attempt, FAST_MAX_ATTEMPTS, d.corpName(), d.reportNm(), e.toString());
+                    enrichmentPool.schedule(() -> scheduleFastEnrichment(d, attempt + 1),
+                            FAST_RETRY_DELAY_SEC, TimeUnit.SECONDS);
+                } else {
+                    log.info("빠른 KIND 보강 {}회 실패 — DART 원문 경로로 폴백: {} - {}",
+                            FAST_MAX_ATTEMPTS, d.corpName(), d.reportNm());
+                    scheduleEnrichment(d, 1);
+                }
+            }
+        });
     }
 
     /**

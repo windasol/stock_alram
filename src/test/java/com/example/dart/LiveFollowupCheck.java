@@ -2,6 +2,8 @@ package com.example.dart;
 
 import com.example.dart.dart.DartClient;
 import com.example.dart.filter.NewsFilter;
+import com.example.dart.kind.KindClient;
+import com.example.dart.kind.KindDocumentClient;
 import com.example.dart.model.Disclosure;
 import com.example.dart.notify.AlertComposer;
 import com.example.dart.parse.DocumentParser;
@@ -31,9 +33,11 @@ class LiveFollowupCheck {
         String key = m.group(1).trim();
 
         DartClient dartClient = new DartClient(key);
-        DocumentService documentService = new DocumentService(dartClient, new DocumentParser());
+        DocumentParser documentParser = new DocumentParser();
+        DocumentService documentService = new DocumentService(dartClient, documentParser);
         NewsFilter newsFilter = new NewsFilter();
-        AlertComposer composer = new AlertComposer(documentService, newsFilter, new StockQuoteClient(), dartClient);
+        AlertComposer composer = new AlertComposer(documentService, newsFilter, new StockQuoteClient(), dartClient,
+                new KindClient(), new KindDocumentClient(), documentParser);
 
         Disclosure[] tests = {
                 // 대한전선 (코스피 Y), 에너토크 (코스닥 K) — 둘 다 원문 ZIP 정상
@@ -48,6 +52,13 @@ class LiveFollowupCheck {
             Optional<NewsFilter.TitleMatch> match = newsFilter.matchTitle(d.reportNm());
             out.append("\n========== ").append(d.corpName()).append(" ==========\n");
             if (match.isEmpty()) { out.append("matchTitle 매칭안됨\n"); continue; }
+            out.append("--- 빠른 경로(KIND 본문) ---\n");
+            try {
+                out.append(composer.composeFollowupFast(d)).append("\n");
+            } catch (Exception e) {
+                out.append("빠른 경로 실패(폴백 대상): ").append(e).append("\n");
+            }
+            out.append("--- 폴백 경로(DART 원문) ---\n");
             out.append(composer.composeFollowup(d)).append("\n");
         }
         Files.writeString(Path.of("build", "followup-out.txt"), out.toString());

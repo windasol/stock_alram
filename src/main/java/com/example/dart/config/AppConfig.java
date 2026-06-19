@@ -37,7 +37,18 @@ public record AppConfig(
         List<String> newsGoogleKeywords,
         int newsGooglePollIntervalSec,
         boolean kindEnabled,
-        int kindPollIntervalSec
+        int kindPollIntervalSec,
+        String kisAppKey,
+        String kisAppSecret,
+        int kisPollIntervalSec,
+        double kisMinChangePct,
+        double kisMinRvol,
+        long kisMinTradeAmountWon,
+        long kisMinPrice,
+        int kisCooldownMin,
+        String kisMarketDivCode,
+        String webexKisRoomId,
+        String discordKisChannelId
 ) {
 
     /**
@@ -127,11 +138,27 @@ public record AppConfig(
         return naverClientId != null && !naverClientId.isBlank();
     }
 
+    /** KIS 변동성 정찰 사용 여부 — 앱키·시크릿이 모두 설정된 경우에만 (별도 플래그 불필요). */
+    public boolean kisEnabled() {
+        return kisAppKey != null && !kisAppKey.isBlank()
+                && kisAppSecret != null && !kisAppSecret.isBlank();
+    }
+
     /** 뉴스 전용 채널/룸 ID. 미설정이면 null — 공시와 같은 채널 사용. */
     public String newsChannelId() {
         String id = switch (notifier) {
             case "discord" -> discordNewsChannelId;
             case "webex"   -> webexNewsRoomId;
+            default        -> null;
+        };
+        return (id == null || id.isBlank()) ? null : id;
+    }
+
+    /** KIS 변동성 전용 채널/룸 ID. 미설정이면 null — 공시와 같은 채널 사용. */
+    public String kisChannelId() {
+        String id = switch (notifier) {
+            case "discord" -> discordKisChannelId;
+            case "webex"   -> webexKisRoomId;
             default        -> null;
         };
         return (id == null || id.isBlank()) ? null : id;
@@ -178,6 +205,26 @@ public record AppConfig(
         boolean kindEnabled = Boolean.parseBoolean(resolveOrDefault(dotenv, "KIND_ENABLED", "true"));
         int kindPollIntervalSec = Integer.parseInt(resolveOrDefault(dotenv, "KIND_POLL_INTERVAL_SEC", "15"));
 
+        // KIS(한국투자증권) 변동성 급등 정찰 — 키는 .env가 아닌 시스템 환경변수로 주입(resolve가 env 우선).
+        // 앱키·시크릿이 있으면 자동 활성(네이버와 동일 패턴) — 별도 ENABLED 플래그 불필요.
+        String kisAppKey    = resolve(dotenv, "KIS_APP_KEY");
+        String kisAppSecret = resolve(dotenv, "KIS_APP_SECRET");
+        int kisPollIntervalSec    = Integer.parseInt(resolveOrDefault(dotenv, "KIS_POLL_INTERVAL_SEC", "60"));
+        // "확실히 터진" 것만 — 임계는 높게. 모두 동시 충족해야 알림.
+        double kisMinChangePct    = Double.parseDouble(resolveOrDefault(dotenv, "KIS_MIN_CHANGE_PCT", "8"));     // 등락률 +8%↑
+        double kisMinRvol         = Double.parseDouble(resolveOrDefault(dotenv, "KIS_MIN_RVOL", "4"));           // 평소 4배↑
+        long kisMinTradeAmountWon = Long.parseLong(resolveOrDefault(dotenv, "KIS_MIN_TRADE_AMOUNT_WON", "5000000000")); // 거래대금 50억↑
+        long kisMinPrice          = Long.parseLong(resolveOrDefault(dotenv, "KIS_MIN_PRICE", "1000"));           // 1,000원↑(동전주 제외)
+        int kisCooldownMin        = Integer.parseInt(resolveOrDefault(dotenv, "KIS_COOLDOWN_MIN", "60"));        // 같은 종목 재알림 간격
+        // 거래량순위 조회 시장구분 — J: KRX만, NX: NXT(넥스트레이드)만, UN: 통합(KRX+NXT 합산).
+        // 기본 J(KRX). UN/NX는 NXT 거래·연장세션까지 잡지만, 이 거래량순위 TR이 계좌에서 UN을 거부하면
+        // (rt_cd=2 "INVALID FID_COND_MRKT_DIV_CODE") 알림이 안 나간다 — KIS API에 NXT 데이터 사용이 열린
+        // 계좌에서만 UN/NX로 설정한다. UN/NX 설정 시 폴러가 NXT 거래시간(08:00~20:00)으로 자동 확장된다.
+        String kisMarketDivCode   = resolveOrDefault(dotenv, "KIS_MARKET_DIV_CODE", "J").trim().toUpperCase();
+        // KIS 변동성 전용 채널(선택) — 미설정이면 공시 채널 공유. 뉴스 채널 분리와 동일 패턴.
+        String webexKisRoomId      = resolve(dotenv, "WEBEX_KIS_ROOM_ID");
+        String discordKisChannelId = resolve(dotenv, "DISCORD_KIS_CHANNEL_ID");
+
         // 공통 필수
         if (dartApiKey == null || dartApiKey.isBlank()) {
             throw new IllegalStateException("DART_API_KEY 환경변수가 설정되지 않았습니다.");
@@ -213,6 +260,14 @@ public record AppConfig(
             throw new IllegalStateException("뉴스 폴링이 활성화됐지만 키워드가 모두 비어 있습니다.");
         }
 
+        // KIS 키: 하나만 있으면 설정 실수이므로 즉시 실패. 둘 다 있으면 자동 활성, 둘 다 없으면 비활성.
+        boolean hasKisKey    = kisAppKey != null && !kisAppKey.isBlank();
+        boolean hasKisSecret = kisAppSecret != null && !kisAppSecret.isBlank();
+        if (hasKisKey != hasKisSecret) {
+            throw new IllegalStateException(
+                    "KIS_APP_KEY와 KIS_APP_SECRET은 둘 다 설정하거나 둘 다 비워야 합니다.");
+        }
+
         return new AppConfig(dartApiKey, notifier, webexBotToken, webexRoomId, webexNewsRoomId,
                 discordBotToken, discordChannelId, discordNewsChannelId,
                 pollInterval, corpCls, pblntfTy,
@@ -222,7 +277,10 @@ public record AppConfig(
                 newsKeywords, newsBadKeywords, newsMacroKeywords,
                 newsMacroTopics, newsMacroTriggers, newsFlipKeywords, newsExcludeKeywords,
                 newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin,
-                newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec);
+                newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec,
+                kisAppKey, kisAppSecret, kisPollIntervalSec,
+                kisMinChangePct, kisMinRvol, kisMinTradeAmountWon, kisMinPrice, kisCooldownMin,
+                kisMarketDivCode, webexKisRoomId, discordKisChannelId);
     }
 
     private static List<String> parseCsv(String csv) {

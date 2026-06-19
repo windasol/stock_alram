@@ -83,6 +83,21 @@ class DocumentParserTest {
     }
 
     @Test
+    void 계약상대방_라벨_두_형태와_비공개를_처리한다() {
+        // 실제 공시 평문 형식 — 라벨이 "계약상대방"(에너토크)·"계약상대"(대한전선·한화오션) 둘 다 쓰인다.
+        assertEquals("WAA EUROPE", parser.extractContractFromText(
+                "3. 계약상대방 WAA EUROPE - 최근 매출액(원) - 주요사업 무역").counterparty());
+        assertEquals("한국전력공사", parser.extractContractFromText(
+                "3. 계약상대 한국전력공사 - 회사와의 관계 - 4. 판매ㆍ공급지역 대한민국").counterparty());
+        // 공백 포함 다단어 상대방도 통째로 추출한다.
+        assertEquals("아시아 지역 선주", parser.extractContractFromText(
+                "3. 계약상대 아시아 지역 선주 - 회사와의 관계 - 4. 판매ㆍ공급지역 아시아").counterparty());
+        // 비공개("-")는 추출하지 않는다(미기재 정상).
+        assertNull(parser.extractContractFromText(
+                "3. 계약상대방 - 회사와의 관계 - 4. 판매ㆍ공급지역").counterparty());
+    }
+
+    @Test
     void 명시비율이_있으면_그대로_쓴다() {
         // 공시가 매출액대비 30%로 적었으면(거래소 표준 지표) 연환산 없이 그대로 표시 — 다년 계약이어도 변형 안 함.
         assertEquals("매출 대비 30.0%",

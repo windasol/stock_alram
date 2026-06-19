@@ -100,9 +100,14 @@ public class DocumentParser {
         return null;
     }
 
-    /** "계약상대방 WAA EUROPE - 최근 매출액…" → "WAA EUROPE". 못 찾으면 null. */
+    /**
+     * "계약상대방 WAA EUROPE - 최근 매출액…" → "WAA EUROPE". 못 찾으면 null.
+     * 라벨은 공시마다 "계약상대방"(에너토크)·"계약상대"(대한전선·한화오션) 둘 다 쓰므로 '방'을 선택적으로 둔다.
+     * 콜론 표기도 흡수한다. 값이 "-"(비공개)면 매칭되지 않아 null — 미기재로 정상 처리된다.
+     */
     private static String counterparty(String text) {
-        Matcher m = Pattern.compile("계약상대방\\s+([^-]{1,40}?)\\s*(?:-|최근\\s*매출액|주요사업|회사와)").matcher(text);
+        Matcher m = Pattern.compile(
+                "계약상대(?:방)?\\s*[:：]?\\s+([^-]{1,40}?)\\s*(?:-|최근\\s*매출액|주요\\s*사업|회사와)").matcher(text);
         if (m.find()) {
             String v = m.group(1).trim();
             return v.isEmpty() ? null : v;
