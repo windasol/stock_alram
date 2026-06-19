@@ -9,6 +9,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -79,6 +80,27 @@ class DocumentParserTest {
         // KIND 본문은 보통 EUC-KR — UTF-8 디코딩 시 치환문자가 나오면 EUC-KR로 폴백한다.
         byte[] eucKr = "<p>계약상대방 한국전력공사</p>".getBytes(java.nio.charset.Charset.forName("EUC-KR"));
         assertTrue(parser.htmlToPlainText(eucKr).contains("계약상대방 한국전력공사"));
+    }
+
+    @Test
+    void 명시비율이_있으면_그대로_쓴다() {
+        // 공시가 매출액대비 30%로 적었으면(거래소 표준 지표) 연환산 없이 그대로 표시 — 다년 계약이어도 변형 안 함.
+        assertEquals("매출 대비 30.0%",
+                DocumentParser.salesRatioLabel(1L, java.util.OptionalLong.empty(), 30.0));
+    }
+
+    @Test
+    void 명시비율_없으면_계약금액_매출_총비율() {
+        // 명시값이 없을 때만 계약금액÷매출액으로 총비율 계산 (연환산 없음).
+        assertEquals("매출 대비 90.0%",
+                DocumentParser.salesRatioLabel(45_000_000_000L, java.util.OptionalLong.of(50_000_000_000L), null));
+        assertEquals("매출 대비 50.0%",
+                DocumentParser.salesRatioLabel(50_000_000_000L, java.util.OptionalLong.of(100_000_000_000L), null));
+    }
+
+    @Test
+    void 명시비율도_매출도_없으면_null() {
+        assertNull(DocumentParser.salesRatioLabel(50_000_000_000L, java.util.OptionalLong.empty(), null));
     }
 
     @Test

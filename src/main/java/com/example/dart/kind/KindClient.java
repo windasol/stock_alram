@@ -92,6 +92,12 @@ public class KindClient {
             Element marketIcon = tds.get(1).selectFirst("img");
             // 목록 화면은 긴 제목을 말줄임하므로 전체 제목이 담긴 title 속성을 우선 사용
             String title = titleLink.hasAttr("title") ? titleLink.attr("title") : titleLink.text();
+            // KIND는 정정 표시를 title 속성이 아니라 링크 텍스트의 <font>[정정]</font>로만 넣는다.
+            // title 속성만 쓰면 정정 여부가 사라지므로(DART의 "[기재정정]"과 달리), 링크 텍스트에서
+            // 정정을 감지해 접두어로 복원한다 — 이래야 알림이 "[정정]"으로 표기된다.
+            if (!title.contains("정정") && titleLink.text().contains("정정")) {
+                title = "[정정]" + title;
+            }
 
             result.add(new KindDisclosure(
                     tds.get(0).text().trim(),

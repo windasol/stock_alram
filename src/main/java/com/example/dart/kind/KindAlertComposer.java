@@ -25,8 +25,10 @@ public class KindAlertComposer {
 
     /** 1단계 — 감지 즉시 전송할 헤더. 본문 조회 없음(가장 빠름). */
     public String compose(KindDisclosure d, NewsFilter.TitleMatch match) {
+        boolean correction = NewsFilter.isCorrection(d.title());
         return String.format(
-                "⚡ **%s · %s** | %s — %s\n공시 %s · 감지 %s · 제출인 %s · KIND 선행\n%s",
+                "%s **%s%s · %s** | %s — %s\n공시 %s · 감지 %s · 제출인 %s · KIND 선행\n%s",
+                correction ? "🔁" : "⚡", correction ? "[정정] " : "",
                 match.category(), d.market(), d.company(), d.title(),
                 d.time(), DETECT_TIME_FMT.format(ZonedDateTime.now(KST)),
                 d.submitter(), d.detailUrl());
@@ -42,22 +44,20 @@ public class KindAlertComposer {
      */
     public String composeFollowup(KindDisclosure d, DocumentParser.ContractInfo c, OptionalLong marketCap) {
         StringBuilder sb = new StringBuilder(
-                String.format("📊 **시총·매출 대비** | %s — %s", d.company(), d.title()));
+                String.format("📊 **%s시총·매출 대비** | %s — %s",
+                        NewsFilter.isCorrection(d.title()) ? "[정정] " : "", d.company(), d.title()));
 
         if (c.contractWon().isPresent()) {
             long won = c.contractWon().getAsLong();
             sb.append("\n💰 계약금액 ").append(KoreanMoney.format(won));
 
-            // 매출 대비 % — 공시 명시값 우선, 없으면 계약금액÷매출액.
-            Double pct = c.salesRatioPct();
-            if (pct == null && c.recentRevenueWon().isPresent() && c.recentRevenueWon().getAsLong() > 0) {
-                pct = won * 100.0 / c.recentRevenueWon().getAsLong();
-            }
-            if (pct != null) {
-                sb.append(String.format(" · 매출 대비 %.1f%%", pct));
+            // 매출 대비 % — 공시 명시값(거래소 표준) 우선, 없으면 계약금액÷매출액. 연환산은 안 함(공시값과 일치).
+            String salesLabel = DocumentParser.salesRatioLabel(won, c.recentRevenueWon(), c.salesRatioPct());
+            if (salesLabel != null) {
+                sb.append(" · ").append(salesLabel);
             }
 
-            // 시총 대비 % — 뷰어에서 읽은 종목코드로 조회한 시가총액 대비.
+            // 시총 대비 % — 뷰어에서 읽은 종목코드로 조회한 시가총액 대비(딜 규모 vs 회사 가치라 총액 기준).
             if (marketCap.isPresent() && marketCap.getAsLong() > 0) {
                 sb.append(String.format(" · 시총 대비 %.1f%%", won * 100.0 / marketCap.getAsLong()));
             }

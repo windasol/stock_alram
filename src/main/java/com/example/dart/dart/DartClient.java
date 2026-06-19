@@ -36,8 +36,15 @@ public class DartClient {
     private final String apiKey;
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
-    /** 같은 회사 공시가 연속으로 와도 재무 API를 반복 호출하지 않도록 매출액을 회사별로 캐시. */
-    private final Map<String, OptionalLong> revenueCache = new ConcurrentHashMap<>();
+    /**
+     * 같은 회사 공시가 연속으로 와도 재무 API를 반복 호출하지 않도록 매출액을 회사별로 캐시.
+     * 단, 새 사업보고서·정정(소급재작성)이 하루 안에 반영되도록 조회일을 함께 저장해 매일 갱신한다.
+     * 만료가 없으면 장기 실행 인스턴스가 옛 매출(예: 사업보고서 제출 전 담긴 전년도 값)을 계속 우려먹는다.
+     */
+    private final Map<String, CachedRevenue> revenueCache = new ConcurrentHashMap<>();
+
+    /** 매출액 캐시 항목 — 조회일(asOf)이 오늘이 아니면 만료로 보고 다시 조회한다. */
+    private record CachedRevenue(LocalDate asOf, OptionalLong value) {}
 
     public DartClient(String apiKey) {
         this.apiKey = apiKey;
@@ -146,14 +153,23 @@ public class DartClient {
      */
     public OptionalLong recentRevenueWon(String corpCode) {
         if (corpCode == null || corpCode.isBlank()) return OptionalLong.empty();
-        return revenueCache.computeIfAbsent(corpCode, c -> {
-            int year = LocalDate.now().getYear();
-            for (int y = year - 1; y >= year - 2; y--) {
-                OptionalLong rev = revenueFor(c, y);
-                if (rev.isPresent()) return rev;
+        LocalDate today = LocalDate.now();
+        CachedRevenue cached = revenueCache.get(corpCode);
+        if (cached != null && cached.asOf().equals(today)) {
+            return cached.value();
+        }
+        // 직전연도 사업보고서부터 시도 — 아직 미제출이면 그 전년도로 폴백.
+        int year = today.getYear();
+        OptionalLong rev = OptionalLong.empty();
+        for (int y = year - 1; y >= year - 2; y--) {
+            OptionalLong r = revenueFor(corpCode, y);
+            if (r.isPresent()) {
+                rev = r;
+                break;
             }
-            return OptionalLong.empty();
-        });
+        }
+        revenueCache.put(corpCode, new CachedRevenue(today, rev));
+        return rev;
     }
 
     private OptionalLong revenueFor(String corpCode, int year) {

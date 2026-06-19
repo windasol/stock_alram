@@ -105,10 +105,20 @@ class NewsFilterTest {
     }
 
     @Test
-    void 정정_해지_철회_제외() {
-        assertRejected("[기재정정]단일판매ㆍ공급계약체결");
-        assertRejected("[첨부정정]단일판매ㆍ공급계약체결");
+    void 호재_정정은_통과하되_정정으로_표기() {
+        // 정정 공시도 알리되 헤더에 "[정정]" 태그로 구분한다 — 더 이상 차단하지 않는다.
+        assertCategory("수주공급계약", "[기재정정]단일판매ㆍ공급계약체결");
+        assertCategory("수주공급계약", "[첨부정정]단일판매ㆍ공급계약체결");
+        assertTrue(NewsFilter.isCorrection("[기재정정]단일판매ㆍ공급계약체결"));
+        assertTrue(NewsFilter.isCorrection("[첨부정정]단일판매ㆍ공급계약체결"));
+        assertFalse(NewsFilter.isCorrection("단일판매ㆍ공급계약체결"));
+    }
+
+    @Test
+    void 해지_철회는_정정이어도_제외() {
+        // 정정이어도 악재(해지·철회)면 여전히 차단된다.
         assertRejected("단일판매ㆍ공급계약해지");
+        assertRejected("[기재정정]단일판매ㆍ공급계약해지");
         assertRejected("주요사항보고서(자기주식취득신탁계약해지결정)");
         assertRejected("주요사항보고서(신규시설투자철회)");
     }

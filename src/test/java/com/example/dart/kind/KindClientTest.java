@@ -45,6 +45,23 @@ class KindClientTest {
                 () -> KindClient.parse("<html><body>점검 중입니다</body></html>"));
     }
 
+    @Test
+    void 정정은_제목_접두어로_복원된다() {
+        // KIND는 정정 표시를 title 속성이 아닌 링크 텍스트의 <font>[정정]</font>에만 넣는다.
+        // title 속성을 우선 쓰더라도 정정 여부가 사라지지 않도록 "[정정]" 접두어를 복원해야 한다.
+        String html = "<table class='list'><tbody>"
+                + "<tr><td class='first txc'>14:53</td>"
+                + "<td><img class='legend' alt='코스닥'> <a href='#' onclick=\"x\" title='DXVX'>DXVX</a></td>"
+                + "<td><a href='#viewer' onclick=\"openDisclsViewer('20260619000578','')\""
+                + " title='단일판매ㆍ공급계약체결'><font color='#FF8040'>[정정]</font>단일판매ㆍ공급계약체결</a></td>"
+                + "<td>디엑스앤브이엑스</td></tr>"
+                + "</tbody></table>";
+
+        KindDisclosure d = KindClient.parse(html).get(0);
+        assertEquals("[정정]단일판매ㆍ공급계약체결", d.title());
+        assertTrue(com.example.dart.filter.NewsFilter.isCorrection(d.title()));
+    }
+
     private static String loadSample() throws IOException {
         try (InputStream in = KindClientTest.class.getResourceAsStream("/kind_today_sample.html")) {
             if (in == null) throw new IOException("kind_today_sample.html 리소스를 찾을 수 없습니다");

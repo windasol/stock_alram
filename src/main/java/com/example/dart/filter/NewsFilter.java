@@ -34,12 +34,13 @@ public class NewsFilter {
     // ── Stage 1 : 공시 제목 필터 ─────────────────────────────────────────
 
     /**
-     * 호재처럼 보이지만 취소·보정·철회 공시.
+     * 호재처럼 보이지만 취소·철회 등 악재/무효 공시.
      * 정규화된 제목에 하나라도 포함되면 즉시 제외.
-     * "정정"이 "[기재정정]", "[첨부정정]" 등 모든 정정 변형을 커버한다.
+     *
+     * "정정"은 더 이상 제외하지 않는다 — 정정 공시도 알리되 헤더에 "[정정]" 태그로 구분한다
+     * ({@link #isCorrection}). 단 "[기재정정]계약해지"처럼 정정이어도 악재면 아래 "해지" 등으로 여전히 차단된다.
      */
     private static final List<String> GLOBAL_EXCLUDES = List.of(
-            "정정",   // 기존 공시 수정본 — 중복 알림 방지
             "해지",   // 계약 해지 = 악재
             "철회", "취소", "중단", "취하", "반려"
     );
@@ -216,6 +217,14 @@ public class NewsFilter {
      */
     public static String normalize(String s) {
         return NORMALIZE_PATTERN.matcher(s).replaceAll("").toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * 정정 공시 여부 — "[기재정정]", "[첨부정정]" 등 모든 정정 변형을 커버한다.
+     * 알림 헤더에 "[정정]" 태그를 붙일지 판단하는 데 쓴다(신규 호재만큼 큰 건이 아님을 구분).
+     */
+    public static boolean isCorrection(String reportNm) {
+        return reportNm != null && normalize(reportNm).contains("정정");
     }
 
     private static List<String> normalizeAll(List<String> keywords) {

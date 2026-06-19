@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -117,6 +118,25 @@ public class DocumentParser {
             last = m.group(1) + " ~ " + m.group(2);
         }
         return last;
+    }
+
+    /**
+     * 매출 대비 표시 문자열. 공시 명시 비율(statedPct = 거래소 표준 지표: 계약총액 ÷ 최근 연매출)을 그대로 쓰고,
+     * 없으면 계약금액 ÷ 매출액으로 계산한다.
+     *
+     * 연환산(÷계약연수)은 하지 않는다 — 공시·시장이 쓰는 공식 수치를 변형하면 공시에 적힌 값과 어긋나
+     * "틀린 값"처럼 보이고, 계약기간 시작이 과거인 정정·장기계약에선 경과분까지 나뉘어 더 왜곡된다.
+     * 다년 여부는 계약기간을 별도(📈 줄)로 표시해 확인한다.
+     *
+     * @return 비율을 못 구하면 null
+     */
+    public static String salesRatioLabel(long contractWon, OptionalLong revenue, Double statedPct) {
+        Double totalPct = statedPct;
+        if (totalPct == null && revenue.isPresent() && revenue.getAsLong() > 0) {
+            totalPct = contractWon * 100.0 / revenue.getAsLong();
+        }
+        if (totalPct == null) return null;
+        return String.format("매출 대비 %.1f%%", totalPct);
     }
 
     /** 수주공급계약 알림용 핵심값. 없는 항목은 비어있음/ null. */

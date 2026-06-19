@@ -48,8 +48,10 @@ public class AlertComposer {
 
     /** 1단계 — 감지 즉시 전송할 헤더. 본문 조회 없음(가장 빠름). */
     public String composeHeader(Disclosure d, NewsFilter.TitleMatch match) {
+        boolean correction = NewsFilter.isCorrection(d.reportNm());
         return String.format(
-                "📋 **%s · %s** | %s — %s\n접수 %s · 감지 %s · 제출인 %s\n%s\n_규모 분석 보강 중…_",
+                "%s **%s%s · %s** | %s — %s\n접수 %s · 감지 %s · 제출인 %s\n%s\n_규모 분석 보강 중…_",
+                correction ? "🔁" : "📋", correction ? "[정정] " : "",
                 match.category(), d.marketName(), d.corpName(), d.reportNm(),
                 formatDate(d.rceptDt()), DETECT_TIME_FMT.format(ZonedDateTime.now(KST)),
                 d.flrNm(), dartUrl(d.rceptNo()));
@@ -64,7 +66,8 @@ public class AlertComposer {
         String rceptNo = d.rceptNo();
         OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
         StringBuilder sb = new StringBuilder(
-                String.format("📊 **시총·매출 대비** | %s — %s", d.corpName(), d.reportNm()));
+                String.format("📊 **%s시총·매출 대비** | %s — %s",
+                        NewsFilter.isCorrection(d.reportNm()) ? "[정정] " : "", d.corpName(), d.reportNm()));
         try {
             DocumentParser.ContractInfo c = documentService.contractInfo(rceptNo);
 
@@ -79,17 +82,14 @@ public class AlertComposer {
                         d.corpName(), d.reportNm(), won, KoreanMoney.format(won));
                 sb.append("\n💰 계약금액 ").append(KoreanMoney.format(won));
 
-                // 매출 대비 % — 공시 명시값 우선, 없으면 계약금액÷매출액.
-                Double pct = c.salesRatioPct();
-                if (pct == null && revenue.isPresent() && revenue.getAsLong() > 0) {
-                    pct = won * 100.0 / revenue.getAsLong();
-                }
-                if (pct != null) {
-                    log.info("매출 대비 {}%", String.format("%.1f", pct));
-                    sb.append(String.format(" · 매출 대비 %.1f%%", pct));
+                // 매출 대비 % — 공시 명시값(거래소 표준) 우선, 없으면 계약금액÷매출액. 연환산은 안 함(공시값과 일치).
+                String salesLabel = DocumentParser.salesRatioLabel(won, revenue, c.salesRatioPct());
+                if (salesLabel != null) {
+                    log.info("규모 분석 {}", salesLabel);
+                    sb.append(" · ").append(salesLabel);
                 }
 
-                // 시총 대비 % — 종목코드로 조회한 시가총액 대비.
+                // 시총 대비 % — 종목코드로 조회한 시가총액 대비(딜 규모 vs 회사 가치라 총액 기준).
                 if (cap.isPresent() && cap.getAsLong() > 0) {
                     double r = won * 100.0 / cap.getAsLong();
                     log.info("시총 대비 {}% (시총 {}원)", String.format("%.1f", r), cap.getAsLong());
@@ -125,7 +125,8 @@ public class AlertComposer {
         OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
         OptionalLong revenue = dartClient.recentRevenueWon(d.corpCode());
         StringBuilder sb = new StringBuilder(
-                String.format("📊 **시총·매출** | %s — %s", d.corpName(), d.reportNm()));
+                String.format("📊 **%s시총·매출** | %s — %s",
+                        NewsFilter.isCorrection(d.reportNm()) ? "[정정] " : "", d.corpName(), d.reportNm()));
         List<String> info = new ArrayList<>();
         cap.ifPresent(v -> info.add("시총 " + KoreanMoney.format(v)));
         revenue.ifPresent(rev -> info.add("매출액 " + KoreanMoney.format(rev)));
