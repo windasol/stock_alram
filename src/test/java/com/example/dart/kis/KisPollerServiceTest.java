@@ -3,8 +3,7 @@ package com.example.dart.kis;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalTime;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,23 +38,25 @@ class KisPollerServiceTest {
     }
 
     @Test
-    void 섹터_요약은_종목수_비율_내림차순() {
-        Map<String, String> byCode = new LinkedHashMap<>();
-        byCode.put("001", "반도체와반도체장비");
-        byCode.put("002", "반도체와반도체장비");
-        byCode.put("003", "제약");
-        byCode.put("004", "미분류");
+    void 섹터_요약은_종목수_비율_내림차순_종목등락률_포함() {
+        List<KisPollerService.Gainer> gainers = List.of(
+                new KisPollerService.Gainer("에이종목", "전기전자", 12.0),
+                new KisPollerService.Gainer("비종목", "전기전자", 25.0),
+                new KisPollerService.Gainer("씨종목", "제약", 11.0),
+                new KisPollerService.Gainer("디종목", "미분류", 30.0));
 
-        String msg = KisPollerService.composeSectorSummary(byCode, "정규장", LocalTime.of(14, 30));
+        String msg = KisPollerService.composeSectorSummary(gainers, "정규장", LocalTime.of(14, 30));
 
         // 헤더: 세션·시각·전체 종목 수
         assertTrue(msg.contains("정규장 14:30"), msg);
         assertTrue(msg.contains("급등 4종목 기준"), msg);
-        // 1위 반도체 2종목 = 50%, 2·3위는 25%씩
-        assertTrue(msg.contains("1. 반도체와반도체장비  50% (2종목)"), msg);
+        // 1위 전기전자 2종목 = 50%, 2·3위는 25%씩
+        assertTrue(msg.contains("1. 전기전자  50% (2종목)"), msg);
+        // 섹터 안 종목은 등락률 내림차순 — 비종목(+25.0%)이 에이종목(+12.0%)보다 앞
+        assertTrue(msg.contains("비종목 +25.0%, 에이종목 +12.0%"), msg);
         // 동률(제약·미분류 각 1종목)은 업종명 사전순 — "미분류" < "제약"
-        int unclassified = msg.indexOf("미분류");
-        int pharma = msg.indexOf("제약");
-        assertTrue(unclassified > 0 && pharma > unclassified, msg);
+        assertTrue(msg.indexOf("미분류") < msg.indexOf("제약"), msg);
+        // 종목별 등락률이 부호와 함께 표기
+        assertTrue(msg.contains("디종목 +30.0%"), msg);
     }
 }

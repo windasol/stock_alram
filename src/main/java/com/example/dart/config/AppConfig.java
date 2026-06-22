@@ -216,8 +216,8 @@ public record AppConfig(
         // (rt_cd=2 "INVALID FID_COND_MRKT_DIV_CODE") 알림이 안 나간다 — KIS API에 NXT 데이터 사용이 열린
         // 계좌에서만 UN/NX로 설정한다. UN/NX 설정 시 폴러가 NXT 거래시간(08:00~20:00)으로 자동 확장된다.
         String kisMarketDivCode   = resolveOrDefault(dotenv, "KIS_MARKET_DIV_CODE", "J").trim().toUpperCase();
-        // 급등 종목들의 KRX 업종을 집계해 N분마다 섹터 요약을 보낸다. 0이면 비활성. 기본 30분.
-        int kisSectorSummaryMin   = Integer.parseInt(resolveOrDefault(dotenv, "KIS_SECTOR_SUMMARY_MIN", "30"));
+        // 급등 종목들의 KRX 업종을 집계해 N분마다 섹터 요약을 보낸다. 0이면 비활성. 기본 10분.
+        int kisSectorSummaryMin   = Integer.parseInt(resolveOrDefault(dotenv, "KIS_SECTOR_SUMMARY_MIN", "10"));
         // KIS 변동성 전용 채널(선택) — 미설정이면 공시 채널 공유. 뉴스 채널 분리와 동일 패턴.
         String webexKisRoomId      = resolve(dotenv, "WEBEX_KIS_ROOM_ID");
         String discordKisChannelId = resolve(dotenv, "DISCORD_KIS_CHANNEL_ID");

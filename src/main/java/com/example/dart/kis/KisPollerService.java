@@ -14,11 +14,13 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -68,8 +70,11 @@ public class KisPollerService {
 
     /** 종목코드 → 마지막 알림 시각. 쿨다운 내 재알림 억제. */
     private final Map<String, Instant> lastAlert = new ConcurrentHashMap<>();
-    /** 오늘 급등한 종목코드 → KRX 업종명. 섹터 요약 집계용(쿨다운과 무관하게 누적). 자정에 리셋. */
-    private final Map<String, String> sectorByCode = new ConcurrentHashMap<>();
+    /**
+     * 오늘 급등한 종목코드 → 최신 순위 항목(종목명·등락률). 섹터 요약 집계용(쿨다운 무관). 자정 리셋.
+     * 업종은 여기 담지 않고 요약 시점마다 새로 조회한다(캐시 안 함 — 10분 주기로 최신 분류 반영).
+     */
+    private final Map<String, VolumeRankItem> gainers = new ConcurrentHashMap<>();
     /** 누적 기준 날짜 — 날이 바뀌면 sectorByCode를 비운다. */
     private volatile LocalDate currentDay;
     private final ScheduledExecutorService scheduler;
@@ -147,7 +152,7 @@ public class KisPollerService {
         String session = nxtMode ? sessionLabel(now.toLocalTime()) : "정규장";
         for (VolumeRankItem it : items) {
             if (!isBigGainer(it, minChangePct)) continue;
-            recordSector(it);  // 섹터 요약 누적 — 쿨다운으로 알림이 억제돼도 집계엔 포함한다.
+            recordGainer(it);  // 섹터 요약 누적 — 쿨다운으로 알림이 억제돼도 집계엔 포함한다.
             if (!cooledDown(it.code(), nowInstant)) continue;
             lastAlert.put(it.code(), nowInstant);
             log.info("급등 [{} {} {}]: {}%", session, it.name(), it.code(), it.changePct());
@@ -159,19 +164,17 @@ public class KisPollerService {
         }
     }
 
-    /** 급등 종목의 업종을 한 번만 조회해 누적한다(같은 코드는 캐시). 업종 미상이면 "미분류". */
-    private void recordSector(VolumeRankItem it) {
+    /** 급등 종목을 누적한다 — 종목명·등락률을 최신값으로 갱신(업종은 요약 시점에 조회). */
+    private void recordGainer(VolumeRankItem it) {
         if (sectorSummaryMin <= 0) return;
-        if (sectorByCode.containsKey(it.code())) return;
-        String sector = client.sectorOf(it.code());
-        sectorByCode.put(it.code(), (sector == null || sector.isBlank()) ? UNCLASSIFIED : sector);
+        gainers.put(it.code(), it);
     }
 
-    /** 날이 바뀌면 누적 섹터 집계를 비운다(매일 0시 기준 새 집계). */
+    /** 날이 바뀌면 누적 급등 집계를 비운다(매일 0시 기준 새 집계). */
     private void rolloverIfNewDay(LocalDate today) {
         if (!today.equals(currentDay)) {
             currentDay = today;
-            sectorByCode.clear();
+            gainers.clear();
         }
     }
 
@@ -181,14 +184,21 @@ public class KisPollerService {
         if (!isMarketOpen(now)) return;
         rolloverIfNewDay(now.toLocalDate());
 
-        Map<String, String> snapshot = new HashMap<>(sectorByCode);
+        List<VolumeRankItem> snapshot = new ArrayList<>(gainers.values());
         if (snapshot.isEmpty()) {
             log.info("섹터 요약 건너뜀 — 아직 급등 종목 없음");
             return;
         }
+        // 업종은 요약 시점에 종목마다 새로 조회한다(캐시 안 함). 실패·미상이면 "미분류".
+        List<Gainer> resolved = new ArrayList<>(snapshot.size());
+        for (VolumeRankItem it : snapshot) {
+            String s = client.sectorOf(it.code());
+            String sector = (s == null || s.isBlank()) ? UNCLASSIFIED : s;
+            resolved.add(new Gainer(it.name(), sector, it.changePct()));
+        }
         String session = nxtMode ? sessionLabel(now.toLocalTime()) : "정규장";
-        String msg = composeSectorSummary(snapshot, session, now.toLocalTime());
-        log.info("섹터 요약 발송 ({}종목)", snapshot.size());
+        String msg = composeSectorSummary(resolved, session, now.toLocalTime());
+        log.info("섹터 요약 발송 ({}종목)", resolved.size());
         try {
             notifier.send(msg);
         } catch (Exception e) {
@@ -198,29 +208,40 @@ public class KisPollerService {
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.
-     * 비율 = 해당 업종 종목 수 / 전체 급등 종목 수. 상위 10개 업종까지 표시. (순수 함수 — 테스트용)
+     * 업종별로 비율(해당 업종 종목 수 / 전체 급등 종목 수)과 함께 소속 종목·등락률(% 내림차순)을 나열한다.
+     * 상위 10개 업종까지 표시. (순수 함수 — 테스트용)
      */
-    static String composeSectorSummary(Map<String, String> sectorByCode, String session, LocalTime time) {
-        int total = sectorByCode.size();
-        Map<String, Integer> counts = new HashMap<>();
-        for (String sector : sectorByCode.values()) {
-            counts.merge(sector, 1, Integer::sum);
+    static String composeSectorSummary(Collection<Gainer> gainers, String session, LocalTime time) {
+        int total = gainers.size();
+        Map<String, List<Gainer>> bySector = new HashMap<>();
+        for (Gainer g : gainers) {
+            bySector.computeIfAbsent(g.sector(), k -> new ArrayList<>()).add(g);
         }
-        List<Map.Entry<String, Integer>> ranked = new ArrayList<>(counts.entrySet());
-        ranked.sort(Comparator.comparingInt((Map.Entry<String, Integer> e) -> e.getValue()).reversed()
+        List<Map.Entry<String, List<Gainer>>> ranked = new ArrayList<>(bySector.entrySet());
+        ranked.sort(Comparator
+                .comparingInt((Map.Entry<String, List<Gainer>> e) -> e.getValue().size()).reversed()
                 .thenComparing(Map.Entry::getKey));
 
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("📊 **섹터 요약** | %s %s%n급등 %d종목 기준%n",
+        sb.append(String.format("📊 **섹터 요약** | %s %s%n급등 %d종목 기준",
                 session, SUMMARY_TIME_FMT.format(time), total));
         int rank = 1;
-        for (Map.Entry<String, Integer> e : ranked) {
-            int pct = (int) Math.round(e.getValue() * 100.0 / total);
-            sb.append(String.format("%d. %s  %d%% (%d종목)%n", rank++, e.getKey(), pct, e.getValue()));
+        for (Map.Entry<String, List<Gainer>> e : ranked) {
+            List<Gainer> list = e.getValue();
+            list.sort(Comparator.comparingDouble(Gainer::changePct).reversed());
+            int pct = (int) Math.round(list.size() * 100.0 / total);
+            String stocks = list.stream()
+                    .map(g -> String.format("%s %+.1f%%", g.name(), g.changePct()))
+                    .collect(Collectors.joining(", "));
+            sb.append(String.format("%n%d. %s  %d%% (%d종목)%n   %s",
+                    rank++, e.getKey(), pct, list.size(), stocks));
             if (rank > 10) break;
         }
-        return sb.toString().stripTrailing();
+        return sb.toString();
     }
+
+    /** 섹터 요약 표시 단위 — 종목명·KRX 업종·등락률(%). 업종은 요약 시점에 조회해 채운다. */
+    record Gainer(String name, String sector, double changePct) {}
 
     /** 감지 시각이 속한 시장 세션 라벨 — 정규장 vs NXT 프리/애프터마켓 구분(알림 표시용). (순수 함수 — 테스트용) */
     static String sessionLabel(LocalTime t) {
