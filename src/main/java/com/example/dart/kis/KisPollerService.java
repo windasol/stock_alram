@@ -75,8 +75,10 @@ public class KisPollerService {
      * 업종은 여기 담지 않고 요약 시점마다 새로 조회한다(캐시 안 함 — 10분 주기로 최신 분류 반영).
      */
     private final Map<String, VolumeRankItem> gainers = new ConcurrentHashMap<>();
-    /** 누적 기준 날짜 — 날이 바뀌면 sectorByCode를 비운다. */
+    /** 누적 기준 날짜 — 날이 바뀌면 gainers를 비운다. */
     private volatile LocalDate currentDay;
+    /** 직전 폴링 시점의 장 개장 여부 — 개장→마감 전이를 감지해 마감 요약을 1회 보낸다. */
+    private volatile boolean wasOpen = false;
     private final ScheduledExecutorService scheduler;
 
     private int consecutiveFailures = 0;
@@ -132,7 +134,9 @@ public class KisPollerService {
             return;
         }
         ZonedDateTime now = ZonedDateTime.now(KST);
-        if (!isMarketOpen(now)) return;
+        boolean open = isMarketOpen(now);
+        maybeFinalSummary(now, open);  // 개장→마감 전이면 마감 요약 1건
+        if (!open) return;
         rolloverIfNewDay(now.toLocalDate());
 
         List<VolumeRankItem> items;
@@ -178,27 +182,45 @@ public class KisPollerService {
         }
     }
 
-    /** 누적된 급등 종목들의 업종을 집계해 섹터 요약 1건을 발송한다. 누적이 없으면 건너뛴다. */
+    /** 주기 요약(10분) — 장중에만. 누적된 급등 종목들의 업종을 집계해 1건 발송. */
     private void summarize() {
         ZonedDateTime now = ZonedDateTime.now(KST);
         if (!isMarketOpen(now)) return;
         rolloverIfNewDay(now.toLocalDate());
+        String session = nxtMode ? sessionLabel(now.toLocalTime()) : "정규장";
+        sendSectorSummary(session, now.toLocalTime());
+    }
 
+    /**
+     * 개장→마감 전이를 감지해 마감 시점 누적으로 최종 요약을 1회 보낸다.
+     * 주기 요약 경계가 마감 시각과 어긋나도 그날의 마지막 그림은 마감 기준으로 남긴다.
+     */
+    private void maybeFinalSummary(ZonedDateTime now, boolean open) {
+        if (wasOpen && !open) {
+            log.info("장 마감 감지 — 마감 섹터 요약 발송");
+            sendSectorSummary("🔔 장마감", now.toLocalTime());
+        }
+        wasOpen = open;
+    }
+
+    /**
+     * 누적 급등 종목의 업종을 이 시점에 새로 조회(캐시 안 함)해 섹터 요약 1건을 발송한다.
+     * 누적이 없으면 건너뛴다. 주기 요약·마감 요약이 공유한다.
+     */
+    private void sendSectorSummary(String session, LocalTime time) {
+        if (sectorSummaryMin <= 0) return;
         List<VolumeRankItem> snapshot = new ArrayList<>(gainers.values());
         if (snapshot.isEmpty()) {
-            log.info("섹터 요약 건너뜀 — 아직 급등 종목 없음");
+            log.info("섹터 요약 건너뜀 — 급등 종목 없음 ({})", session);
             return;
         }
-        // 업종은 요약 시점에 종목마다 새로 조회한다(캐시 안 함). 실패·미상이면 "미분류".
         List<Gainer> resolved = new ArrayList<>(snapshot.size());
         for (VolumeRankItem it : snapshot) {
             String s = client.sectorOf(it.code());
-            String sector = (s == null || s.isBlank()) ? UNCLASSIFIED : s;
-            resolved.add(new Gainer(it.name(), sector, it.changePct()));
+            resolved.add(new Gainer(it.name(), (s == null || s.isBlank()) ? UNCLASSIFIED : s, it.changePct()));
         }
-        String session = nxtMode ? sessionLabel(now.toLocalTime()) : "정규장";
-        String msg = composeSectorSummary(resolved, session, now.toLocalTime());
-        log.info("섹터 요약 발송 ({}종목)", resolved.size());
+        String msg = composeSectorSummary(resolved, session, time);
+        log.info("섹터 요약 발송 ({}종목, {})", resolved.size(), session);
         try {
             notifier.send(msg);
         } catch (Exception e) {

@@ -38,4 +38,33 @@ class StockQuoteClientTest {
         assertTrue(client.parseCurrentPrice("{\"datas\":[]}").isEmpty());
         assertTrue(client.parseCurrentPrice("not json").isEmpty());
     }
+
+    @Test
+    void NXT_연장세션이_열려있으면_overPrice를_쓴다() {
+        // 애프터마켓 진행 중 — closePrice(정규장 종가)는 고정, 실시간가는 overPrice.
+        String json = "{ \"datas\": [ {"
+                + " \"closePrice\": \"353,500\","
+                + " \"overMarketPriceInfo\": { \"overMarketStatus\": \"OPEN\", \"overPrice\": \"355,000\" }"
+                + " } ] }";
+        assertEquals(355_000L, client.parseCurrentPrice(json).getAsLong());
+    }
+
+    @Test
+    void 연장세션이_닫혀있으면_closePrice를_쓴다() {
+        // 정규장 — 연장세션 CLOSED면 closePrice가 실시간가.
+        String json = "{ \"datas\": [ {"
+                + " \"closePrice\": \"353,500\","
+                + " \"overMarketPriceInfo\": { \"overMarketStatus\": \"CLOSED\", \"overPrice\": \"0\" }"
+                + " } ] }";
+        assertEquals(353_500L, client.parseCurrentPrice(json).getAsLong());
+    }
+
+    @Test
+    void 연장세션_열려도_overPrice가_없으면_closePrice로_폴백() {
+        String json = "{ \"datas\": [ {"
+                + " \"closePrice\": \"353,500\","
+                + " \"overMarketPriceInfo\": { \"overMarketStatus\": \"OPEN\", \"overPrice\": \"\" }"
+                + " } ] }";
+        assertEquals(353_500L, client.parseCurrentPrice(json).getAsLong());
+    }
 }

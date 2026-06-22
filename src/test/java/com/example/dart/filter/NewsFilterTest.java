@@ -205,6 +205,15 @@ class NewsFilterTest {
     }
 
     @Test
+    void 자기주식취득_결정은_알리고_결과보고서는_제외() {
+        assertCategory("주주환원", "자기주식취득결정");
+        assertCategory("주주환원", "주요사항보고서(자기주식취득결정)");
+        // 결과보고서는 사후 확인 공시 — 제외.
+        assertRejected("자기주식취득결과보고서");
+        assertRejected("자기주식 소각 결과보고서");
+    }
+
+    @Test
     void 자기주식취득결정만_취득금액_대상() {
         // 직접 취득결정 — 취득금액 덧붙임 대상.
         assertTrue(NewsFilter.isTreasuryAcquisition("주요사항보고서(자기주식취득결정)"));

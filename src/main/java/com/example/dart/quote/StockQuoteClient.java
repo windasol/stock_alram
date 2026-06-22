@@ -87,18 +87,41 @@ public class StockQuoteClient {
         }
     }
 
-    /** realtime 응답 datas[0].closePrice("357,000")를 원(long)으로 파싱. */
+    /**
+     * realtime 응답에서 현재가(원)를 파싱한다.
+     *
+     * 정규장 종가(closePrice)는 NXT 연장세션(프리 08:00~09:00·애프터 15:30~20:00) 동안 고정돼,
+     * 그 시간대엔 모든 샘플이 같은 값 → 등락률 0%로 잘못 찍힌다. 그래서 연장세션이 열려 있으면
+     * (overMarketPriceInfo.overMarketStatus=OPEN) 그 시간대 실시간가(overPrice)를 우선 쓴다.
+     * 정규장(09:00~15:30)엔 연장세션이 닫혀 있어 closePrice가 실시간가다.
+     */
     OptionalLong parseCurrentPrice(String json) {
         try {
             JsonNode datas = mapper.readTree(json).path("datas");
             if (datas.isArray() && !datas.isEmpty()) {
-                String price = datas.get(0).path("closePrice").asText("").replaceAll("[,\\s]", "");
-                if (!price.isEmpty()) return OptionalLong.of(Long.parseLong(price));
+                JsonNode d = datas.get(0);
+                JsonNode over = d.path("overMarketPriceInfo");
+                if ("OPEN".equals(over.path("overMarketStatus").asText())) {
+                    OptionalLong overWon = wonOf(over.path("overPrice").asText(""));
+                    if (overWon.isPresent()) return overWon;   // NXT 프리·애프터마켓 실시간가
+                }
+                return wonOf(d.path("closePrice").asText(""));  // 정규장 실시간가(=종가 필드)
             }
         } catch (Exception e) {
             log.warn("현재가 JSON 파싱 실패", e);
         }
         return OptionalLong.empty();
+    }
+
+    /** "355,000" → 355000. 콤마·공백 제거 후 long. 빈 값·파싱 실패면 empty. */
+    private static OptionalLong wonOf(String raw) {
+        String v = raw.replaceAll("[,\\s]", "");
+        if (v.isEmpty()) return OptionalLong.empty();
+        try {
+            return OptionalLong.of(Long.parseLong(v));
+        } catch (NumberFormatException e) {
+            return OptionalLong.empty();
+        }
     }
 
     /** integration 응답의 totalInfos[code=marketValue].value("1,970조 1,959억")를 원으로 파싱. */

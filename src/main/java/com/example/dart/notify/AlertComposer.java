@@ -183,11 +183,17 @@ public class AlertComposer {
                 String.format("📊 **%s시총·매출** | %s — %s",
                         NewsFilter.isCorrection(d.reportNm()) ? "[정정] " : "", d.corpName(), d.reportNm()));
         // 자기주식취득결정이면 취득금액을 KIND 뷰어 본문에서 즉시 뽑아 한 줄 덧붙인다(직접취득결정만).
+        // 시총이 있으면 취득금액÷시총(=자사주 매입 강도)도 함께 표시한다.
         if (NewsFilter.isTreasuryAcquisition(d.reportNm())) {
             treasuryAcquisitionAmount(d).ifPresent(won -> {
                 log.info("자기주식 취득금액 [{} - {}] {}원 ({})",
                         d.corpName(), d.reportNm(), won, KoreanMoney.format(won));
                 sb.append("\n💰 취득금액 ").append(KoreanMoney.format(won));
+                if (cap.isPresent() && cap.getAsLong() > 0) {
+                    double r = won * 100.0 / cap.getAsLong();
+                    log.info("자기주식 시총 대비 {}% (시총 {}원)", String.format("%.1f", r), cap.getAsLong());
+                    sb.append(String.format(" · 시총 대비 %.1f%%", r));
+                }
             });
         }
         List<String> info = new ArrayList<>();
