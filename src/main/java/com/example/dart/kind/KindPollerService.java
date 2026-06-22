@@ -171,9 +171,11 @@ public class KindPollerService {
                 d.market(), match.get().category(), match.get().matchedKeyword(), d.company(), d.title());
         // 1단계: 감지 즉시 헤더
         notifier.send(alertComposer.compose(d, match.get()));
-        // 2단계: 수주공급계약만 KIND 뷰어 본문으로 규모 분석(계약금액 대비)을 후송한다.
-        // 비계약 호재의 시총·매출은 매출 출처(corp_code)가 DART에만 있어 DART 폴러가 보강하므로 여기선 생략.
-        if (NewsFilter.CATEGORY_CONTRACT.equals(match.get().category())) {
+        // 2단계: 비정정 수주공급계약만 KIND 뷰어 본문으로 규모 분석(계약금액 대비)을 후송한다.
+        // 비계약·정정 호재의 시총·매출은 매출 출처(corp_code)가 DART에만 있어 DART 폴러가 보강하므로 여기선 생략.
+        // (정정 본문은 정정전/정정후가 섞여 계약금액 파싱이 틀리므로 비율 분석 자체를 건너뛴다.)
+        if (NewsFilter.CATEGORY_CONTRACT.equals(match.get().category())
+                && !NewsFilter.isCorrection(d.title())) {
             scheduleEnrichment(d, 1);
         }
     }

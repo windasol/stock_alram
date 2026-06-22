@@ -24,6 +24,9 @@ public class StockQuoteClient {
 
     private static final Logger log = LoggerFactory.getLogger(StockQuoteClient.class);
     private static final String API = "https://m.stock.naver.com/api/stock/%s/integration";
+    /** 실시간 현재가 — 공시 후 주가 추적용 경량 폴링 엔드포인트(키 불필요). */
+    private static final String REALTIME_API =
+            "https://polling.finance.naver.com/api/realtime/domestic/stock/%s";
 
     private final HttpClient httpClient;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -57,6 +60,45 @@ public class StockQuoteClient {
             log.warn("시총 조회 중 오류 (code={})", stockCode, e);
             return OptionalLong.empty();
         }
+    }
+
+    /**
+     * 종목 현재가(원). 코드 없음·조회 실패·파싱 실패 시 empty — 추적을 멈추지 않는다.
+     * 공시 후 주가 추적이 30초 간격으로 반복 호출하므로, 시총 조회와 달리 가벼운 실시간 엔드포인트를 쓴다.
+     */
+    public OptionalLong currentPriceWon(String stockCode) {
+        if (stockCode == null || stockCode.isBlank()) return OptionalLong.empty();
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(String.format(REALTIME_API, stockCode)))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("User-Agent", "Mozilla/5.0")
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.warn("현재가 조회 실패 (code={}): status={}", stockCode, response.statusCode());
+                return OptionalLong.empty();
+            }
+            return parseCurrentPrice(response.body());
+        } catch (Exception e) {
+            log.warn("현재가 조회 중 오류 (code={})", stockCode, e);
+            return OptionalLong.empty();
+        }
+    }
+
+    /** realtime 응답 datas[0].closePrice("357,000")를 원(long)으로 파싱. */
+    OptionalLong parseCurrentPrice(String json) {
+        try {
+            JsonNode datas = mapper.readTree(json).path("datas");
+            if (datas.isArray() && !datas.isEmpty()) {
+                String price = datas.get(0).path("closePrice").asText("").replaceAll("[,\\s]", "");
+                if (!price.isEmpty()) return OptionalLong.of(Long.parseLong(price));
+            }
+        } catch (Exception e) {
+            log.warn("현재가 JSON 파싱 실패", e);
+        }
+        return OptionalLong.empty();
     }
 
     /** integration 응답의 totalInfos[code=marketValue].value("1,970조 1,959억")를 원으로 파싱. */

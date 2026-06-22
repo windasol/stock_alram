@@ -227,6 +227,17 @@ public class NewsFilter {
         return reportNm != null && normalize(reportNm).contains("정정");
     }
 
+    /**
+     * 자기주식취득 "결정" 공시 여부 — 직접취득결정만. 취득금액을 알림에 덧붙일 대상을 가른다.
+     * 신탁계약(별도 서식 — 계약금액)·처분·해지·취소는 제외해 직접 취득결정만 잡는다.
+     */
+    public static boolean isTreasuryAcquisition(String reportNm) {
+        if (reportNm == null) return false;
+        String n = normalize(reportNm);
+        return n.contains("자기주식") && n.contains("취득") && n.contains("결정")
+                && !n.contains("신탁") && !n.contains("처분") && !n.contains("해지") && !n.contains("취소");
+    }
+
     private static List<String> normalizeAll(List<String> keywords) {
         return keywords.stream().map(NewsFilter::normalize).filter(s -> !s.isEmpty()).toList();
     }

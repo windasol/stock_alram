@@ -61,7 +61,7 @@ public class AlertComposer {
     public String composeHeader(Disclosure d, NewsFilter.TitleMatch match) {
         boolean correction = NewsFilter.isCorrection(d.reportNm());
         return String.format(
-                "%s **%s%s · %s** | %s — %s\n접수 %s · 감지 %s · 제출인 %s\n%s\n_규모 분석 보강 중…_",
+                "%s **%s%s · %s** | %s — %s\n접수 %s · 감지 %s · 제출인 %s\n%s",
                 correction ? "🔁" : "📋", correction ? "[정정] " : "",
                 match.category(), d.marketName(), d.corpName(), d.reportNm(),
                 formatDate(d.rceptDt()), DETECT_TIME_FMT.format(ZonedDateTime.now(KST)),
@@ -182,11 +182,37 @@ public class AlertComposer {
         StringBuilder sb = new StringBuilder(
                 String.format("📊 **%s시총·매출** | %s — %s",
                         NewsFilter.isCorrection(d.reportNm()) ? "[정정] " : "", d.corpName(), d.reportNm()));
+        // 자기주식취득결정이면 취득금액을 KIND 뷰어 본문에서 즉시 뽑아 한 줄 덧붙인다(직접취득결정만).
+        if (NewsFilter.isTreasuryAcquisition(d.reportNm())) {
+            treasuryAcquisitionAmount(d).ifPresent(won -> {
+                log.info("자기주식 취득금액 [{} - {}] {}원 ({})",
+                        d.corpName(), d.reportNm(), won, KoreanMoney.format(won));
+                sb.append("\n💰 취득금액 ").append(KoreanMoney.format(won));
+            });
+        }
         List<String> info = new ArrayList<>();
         cap.ifPresent(v -> info.add("시총 " + KoreanMoney.format(v)));
         revenue.ifPresent(rev -> info.add("매출액 " + KoreanMoney.format(rev)));
         if (!info.isEmpty()) sb.append("\n📈 ").append(String.join(" · ", info));
         return sb.toString();
+    }
+
+    /**
+     * 자기주식취득결정 본문에서 취득금액을 KIND 뷰어 본문으로 즉시 조회한다(DART 원문 014 지연 회피).
+     * KIND 미설정·미게시·파싱 실패면 empty — 금액 줄만 빠지고 시총·매출 알림은 정상 발송된다.
+     */
+    private OptionalLong treasuryAcquisitionAmount(Disclosure d) {
+        if (kindClient == null || kindDocClient == null) return OptionalLong.empty();
+        try {
+            String acptNo = kindClient.findAcptNo(d.rceptDt(), d.corpName(), d.reportNm()).orElse(null);
+            if (acptNo == null) return OptionalLong.empty();
+            KindDocumentClient.KindDocument doc = kindDocClient.fetch(acptNo);
+            return documentParser.acquisitionAmountWon(documentParser.htmlToPlainText(doc.bodyHtml()));
+        } catch (Exception e) {
+            log.info("자기주식 취득금액 조회 실패(금액 줄 생략): {} - {} ({})",
+                    d.corpName(), d.reportNm(), e.toString());
+            return OptionalLong.empty();
+        }
     }
 
     private static String dartUrl(String rceptNo) {

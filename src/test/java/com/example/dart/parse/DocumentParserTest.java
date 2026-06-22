@@ -76,6 +76,25 @@ class DocumentParserTest {
     }
 
     @Test
+    void 자기주식취득결정_본문에서_취득금액을_추출한다() {
+        // 직접취득결정 서식 — "취득예정금액(원)" 라벨과 숫자 사이에 표 칸("보통주식")이 끼어든다.
+        String html = "<html><body><table>"
+                + "<tr><td>취득예정금액(원)</td><td>보통주식</td><td>30,000,000,000</td></tr>"
+                + "</table></body></html>";
+        String text = parser.htmlToPlainText(html.getBytes(StandardCharsets.UTF_8));
+        assertEquals(30_000_000_000L, parser.acquisitionAmountWon(text).getAsLong());
+    }
+
+    @Test
+    void 취득금액_라벨_변형과_미기재를_처리한다() {
+        // "취득금액(원)" 표기도 인식.
+        assertEquals(5_000_000_000L,
+                parser.acquisitionAmountWon("취득금액(원) 5,000,000,000").getAsLong());
+        // 값이 "-"(미기재)면 추출 없음.
+        assertTrue(parser.acquisitionAmountWon("취득예정금액(원) 보통주식 - 기타주식 -").isEmpty());
+    }
+
+    @Test
     void htmlToPlainText는_EUC_KR도_디코딩한다() {
         // KIND 본문은 보통 EUC-KR — UTF-8 디코딩 시 치환문자가 나오면 EUC-KR로 폴백한다.
         byte[] eucKr = "<p>계약상대방 한국전력공사</p>".getBytes(java.nio.charset.Charset.forName("EUC-KR"));

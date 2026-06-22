@@ -24,6 +24,7 @@ import com.example.dart.notify.Notifier;
 import com.example.dart.notify.WebexService;
 import com.example.dart.parse.DocumentParser;
 import com.example.dart.quote.StockQuoteClient;
+import com.example.dart.service.DisclosurePriceTracker;
 import com.example.dart.service.DocumentService;
 import com.example.dart.service.PollerService;
 import com.example.dart.util.SeenStore;
@@ -93,9 +94,13 @@ public class App {
         // DART와 KIND가 같은 공시를 각각 게시하므로, 공유 키 저장소로 먼저 잡은 쪽만 알린다.
         SeenStore disclosureKeys = new SeenStore(Path.of("seen_disclosure_keys.txt"));
 
+        // 공시 후 주가 추적(통계) — 호재 공시 감지 시각 기준 10분간 주가 변동을 기록·요약한다.
+        DisclosurePriceTracker priceTracker = new DisclosurePriceTracker(
+                quoteClient, notifier, Path.of("disclosure_price_stats.jsonl"));
+
         PollerService pollerService = new PollerService(
                 dartClient, newsFilter, notifier, alertComposer,
-                seenStore, disclosureKeys, config);
+                seenStore, disclosureKeys, config, priceTracker);
         pollerService.start();
 
         // KIND 폴러 — 거래소 공시는 KIND에 먼저 게시되는 경우가 많아 가장 빠른 공시 소스.
@@ -122,7 +127,7 @@ public class App {
                 kisNotifier = createNotifier(config, kisChannelId);
                 separateKisChannel = true;
                 kisNotifier.start();
-                kisNotifier.send("🚨 변동성 급등 알림이 시작되었습니다.");
+                kisNotifier.send("🚨 급등 알림이 시작되었습니다.");
                 log.info("KIS 알림 채널 분리 (channel/room: {})", kisChannelId);
             }
             kisPollerService = new KisPollerService(
@@ -170,6 +175,7 @@ public class App {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("종료 신호 수신, 서비스 중지 중...");
             pollerService.stop();
+            priceTracker.stop();
             if (kindPollerService != null) kindPollerService.stop();
             if (kisPollerService != null) kisPollerService.stop();
             if (newsPollerService != null) newsPollerService.stop();

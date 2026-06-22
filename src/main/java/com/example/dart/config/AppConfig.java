@@ -42,11 +42,9 @@ public record AppConfig(
         String kisAppSecret,
         int kisPollIntervalSec,
         double kisMinChangePct,
-        double kisMinRvol,
-        long kisMinTradeAmountWon,
-        long kisMinPrice,
         int kisCooldownMin,
         String kisMarketDivCode,
+        int kisSectorSummaryMin,
         String webexKisRoomId,
         String discordKisChannelId
 ) {
@@ -210,17 +208,16 @@ public record AppConfig(
         String kisAppKey    = resolve(dotenv, "KIS_APP_KEY");
         String kisAppSecret = resolve(dotenv, "KIS_APP_SECRET");
         int kisPollIntervalSec    = Integer.parseInt(resolveOrDefault(dotenv, "KIS_POLL_INTERVAL_SEC", "60"));
-        // "확실히 터진" 것만 — 임계는 높게. 모두 동시 충족해야 알림.
-        double kisMinChangePct    = Double.parseDouble(resolveOrDefault(dotenv, "KIS_MIN_CHANGE_PCT", "8"));     // 등락률 +8%↑
-        double kisMinRvol         = Double.parseDouble(resolveOrDefault(dotenv, "KIS_MIN_RVOL", "4"));           // 평소 4배↑
-        long kisMinTradeAmountWon = Long.parseLong(resolveOrDefault(dotenv, "KIS_MIN_TRADE_AMOUNT_WON", "5000000000")); // 거래대금 50억↑
-        long kisMinPrice          = Long.parseLong(resolveOrDefault(dotenv, "KIS_MIN_PRICE", "1000"));           // 1,000원↑(동전주 제외)
+        // 전일 종가 대비 등락률 하한 — 이 % 이상 오른 종목만 알린다(거래량·거래대금·주가 조건 없음).
+        double kisMinChangePct    = Double.parseDouble(resolveOrDefault(dotenv, "KIS_MIN_CHANGE_PCT", "10"));    // 등락률 +10%↑
         int kisCooldownMin        = Integer.parseInt(resolveOrDefault(dotenv, "KIS_COOLDOWN_MIN", "60"));        // 같은 종목 재알림 간격
-        // 거래량순위 조회 시장구분 — J: KRX만, NX: NXT(넥스트레이드)만, UN: 통합(KRX+NXT 합산).
-        // 기본 J(KRX). UN/NX는 NXT 거래·연장세션까지 잡지만, 이 거래량순위 TR이 계좌에서 UN을 거부하면
+        // 등락률순위 조회 시장구분 — J: KRX만, NX: NXT(넥스트레이드)만, UN: 통합(KRX+NXT 합산).
+        // 기본 J(KRX). UN/NX는 NXT 거래·연장세션까지 잡지만, 이 등락률순위 TR이 계좌에서 UN을 거부하면
         // (rt_cd=2 "INVALID FID_COND_MRKT_DIV_CODE") 알림이 안 나간다 — KIS API에 NXT 데이터 사용이 열린
         // 계좌에서만 UN/NX로 설정한다. UN/NX 설정 시 폴러가 NXT 거래시간(08:00~20:00)으로 자동 확장된다.
         String kisMarketDivCode   = resolveOrDefault(dotenv, "KIS_MARKET_DIV_CODE", "J").trim().toUpperCase();
+        // 급등 종목들의 KRX 업종을 집계해 N분마다 섹터 요약을 보낸다. 0이면 비활성. 기본 30분.
+        int kisSectorSummaryMin   = Integer.parseInt(resolveOrDefault(dotenv, "KIS_SECTOR_SUMMARY_MIN", "30"));
         // KIS 변동성 전용 채널(선택) — 미설정이면 공시 채널 공유. 뉴스 채널 분리와 동일 패턴.
         String webexKisRoomId      = resolve(dotenv, "WEBEX_KIS_ROOM_ID");
         String discordKisChannelId = resolve(dotenv, "DISCORD_KIS_CHANNEL_ID");
@@ -279,8 +276,8 @@ public record AppConfig(
                 newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin,
                 newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec,
                 kisAppKey, kisAppSecret, kisPollIntervalSec,
-                kisMinChangePct, kisMinRvol, kisMinTradeAmountWon, kisMinPrice, kisCooldownMin,
-                kisMarketDivCode, webexKisRoomId, discordKisChannelId);
+                kisMinChangePct, kisCooldownMin,
+                kisMarketDivCode, kisSectorSummaryMin, webexKisRoomId, discordKisChannelId);
     }
 
     private static List<String> parseCsv(String csv) {

@@ -203,4 +203,15 @@ class NewsFilterTest {
         assertTrue(custom.matchTitle("수주공시(자율공시)").isEmpty());
         assertTrue(custom.matchTitle("단일판매ㆍ공급계약체결").isPresent());
     }
+
+    @Test
+    void 자기주식취득결정만_취득금액_대상() {
+        // 직접 취득결정 — 취득금액 덧붙임 대상.
+        assertTrue(NewsFilter.isTreasuryAcquisition("주요사항보고서(자기주식취득결정)"));
+        assertTrue(NewsFilter.isTreasuryAcquisition("자기주식 취득 결정"));
+        // 신탁계약(계약금액 서식)·처분·해지는 제외.
+        assertFalse(NewsFilter.isTreasuryAcquisition("자기주식취득 신탁계약 체결 결정"));
+        assertFalse(NewsFilter.isTreasuryAcquisition("자기주식처분결정"));
+        assertFalse(NewsFilter.isTreasuryAcquisition("자기주식취득 신탁계약 해지 결정"));
+    }
 }

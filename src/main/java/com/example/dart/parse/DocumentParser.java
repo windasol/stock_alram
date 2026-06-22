@@ -76,6 +76,24 @@ public class DocumentParser {
                 period(t));                                               // 계약기간 시작~종료
     }
 
+    /**
+     * 자기주식취득 결정 본문에서 취득(예정)금액(원)을 뽑는다 — 직접취득결정 알림에 금액 한 줄을 덧붙이는 용도.
+     * 서식 표기는 "취득예정금액(원)" 우선, 일부는 "취득금액(원)". 라벨과 숫자 사이에 "보통주식" 같은
+     * 표 칸 텍스트가 끼어들 수 있으므로 숫자 직전까지 비숫자 약간을 허용한다. 6자리 이상(콤마 포함) 금액만.
+     */
+    public OptionalLong acquisitionAmountWon(String t) {
+        for (String label : new String[]{"취득\\s*예정\\s*금액", "취득\\s*금액"}) {
+            Matcher m = Pattern.compile(label + "\\s*\\(\\s*원\\s*\\)[^0-9]{0,12}([0-9][0-9,]{5,})").matcher(t);
+            if (m.find()) {
+                try {
+                    return OptionalLong.of(Long.parseLong(m.group(1).replace(",", "")));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        return OptionalLong.empty();
+    }
+
     /** 라벨 정규식 바로 뒤에 오는 정수 금액(콤마 포함)을 원(long)으로. 없으면 empty. */
     private static java.util.OptionalLong wonAfter(String text, String labelRegex) {
         Matcher m = Pattern.compile(labelRegex + "\\s*([0-9][0-9,]+)").matcher(text);

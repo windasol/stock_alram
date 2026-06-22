@@ -51,12 +51,14 @@ public class PollerService {
     private final SeenStore seenStore;
     private final SeenStore disclosureKeys;
     private final AppConfig config;
+    private final DisclosurePriceTracker priceTracker;
     private final ScheduledExecutorService scheduler;
     private final ScheduledExecutorService enrichmentPool;
 
     public PollerService(DartClient dartClient, NewsFilter newsFilter,
                          Notifier notifier, AlertComposer alertComposer,
-                         SeenStore seenStore, SeenStore disclosureKeys, AppConfig config) {
+                         SeenStore seenStore, SeenStore disclosureKeys, AppConfig config,
+                         DisclosurePriceTracker priceTracker) {
         this.dartClient = dartClient;
         this.newsFilter = newsFilter;
         this.notifier = notifier;
@@ -64,6 +66,7 @@ public class PollerService {
         this.seenStore = seenStore;
         this.disclosureKeys = disclosureKeys;
         this.config = config;
+        this.priceTracker = priceTracker;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "dart-poller"));
         this.enrichmentPool = Executors.newScheduledThreadPool(2, r -> new Thread(r, "dart-enrich"));
     }
@@ -110,18 +113,25 @@ public class PollerService {
         if (match.isEmpty()) return;
         NewsFilter.TitleMatch m = match.get();
 
+        // 공시 후 주가 추적(통계) — 호재 공시면 감지 시각 기준 10분간 주가 변동을 기록한다.
+        // DART는 종목코드를 즉시 보유하므로 교차중복(DART/KIND 선행) 여부와 무관하게 여기서 추적한다.
+        priceTracker.track(d, m.category());
+
         // 교차 중복: add가 원자적이라 먼저 잡은 쪽만 true를 받는다. true면 DART가 먼저이니 DART가
         // 헤더+규모 분석(DART 원문)을 책임진다. false면 KIND가 먼저이고, KIND 폴러가 헤더와 규모 분석(KIND
         // 뷰어 본문)을 모두 담당하므로 — 각 소스가 자기 본문으로 보강 — DART는 여기서 손을 뗀다.
         boolean firstAlert = disclosureKeys.add(DisclosureKeys.of(d.rceptDt(), d.corpName(), d.reportNm()));
         boolean contract = NewsFilter.CATEGORY_CONTRACT.equals(m.category());
+        // 정정 공시는 본문에 정정전/정정후 값이 섞여 계약금액 파싱이 틀리므로(비율 % 신뢰 불가)
+        // 계약이어도 비율 분석을 생략하고 비계약 호재처럼 시총·매출만 보강한다.
+        boolean correction = NewsFilter.isCorrection(d.reportNm());
         if (!firstAlert) {
-            // KIND가 헤더를 보냈다. 계약이면 KIND가 규모 분석(뷰어 본문)까지 담당하므로 DART는 빠진다.
-            // 비계약이면 KIND엔 매출 출처(corp_code)가 없으므로 시총·매출만은 DART가 보강한다.
-            if (contract) {
+            // KIND가 헤더를 보냈다. 비정정 계약이면 KIND가 규모 분석(뷰어 본문)까지 담당하므로 DART는 빠진다.
+            // 비계약·정정이면 KIND엔 매출 출처(corp_code)가 없으므로 시총·매출만은 DART가 보강한다.
+            if (contract && !correction) {
                 log.info("KIND 선행 — KIND가 헤더·규모 분석 담당, DART 생략: {} - {}", d.corpName(), d.reportNm());
             } else {
-                log.info("KIND 선행(비계약) — 시총·매출만 DART가 보강: {} - {}", d.corpName(), d.reportNm());
+                log.info("KIND 선행(비계약·정정) — 시총·매출만 DART가 보강: {} - {}", d.corpName(), d.reportNm());
                 scheduleScaleOnly(d);
             }
             return;
@@ -133,8 +143,9 @@ public class PollerService {
         notifier.send(alertComposer.composeHeader(d, m));
 
         // 2단계: 보강 — 폴링 루프를 막지 않게 비동기로 후송.
-        // 수주공급계약은 계약금액 대비 매출·시총(빠른 KIND 본문 우선, 실패 시 DART 원문), 그 외 호재는 회사 규모(시총·매출)만.
-        if (contract) {
+        // 비정정 수주공급계약은 계약금액 대비 매출·시총(빠른 KIND 본문 우선, 실패 시 DART 원문),
+        // 그 외 호재·정정은 회사 규모(시총·매출)만.
+        if (contract && !correction) {
             scheduleFastEnrichment(d, 1);
         } else {
             scheduleScaleOnly(d);

@@ -26,4 +26,16 @@ class StockQuoteClientTest {
         assertTrue(client.parseMarketCap("{\"totalInfos\":[]}").isEmpty());
         assertTrue(client.parseMarketCap("not json").isEmpty());
     }
+
+    @Test
+    void realtime_JSON에서_현재가를_파싱한다() {
+        String json = "{ \"datas\": [ { \"closePrice\": \"357,000\", \"fluctuationsRatio\": \"0.85\" } ] }";
+        assertEquals(357_000L, client.parseCurrentPrice(json).getAsLong());
+    }
+
+    @Test
+    void datas가_비면_현재가_empty() {
+        assertTrue(client.parseCurrentPrice("{\"datas\":[]}").isEmpty());
+        assertTrue(client.parseCurrentPrice("not json").isEmpty());
+    }
 }
