@@ -11,18 +11,15 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 뉴스 알림 필터. 키워드 분류(NewsKeywordClassifier)를 통과한 기사에서
- * 노이즈만 거른다 — 제외 키워드, 오래된 기사, 유사 제목 중복, 시황 키워드 쿨다운.
+ * 뉴스 알림 필터. 속보로 판정된 기사에서 노이즈만 거른다 — 제외 키워드, 오래된 기사, 유사 제목 중복.
  *
  * 같은 이슈를 여러 매체가 거의 같은 제목으로 쏟아내므로, 최근 알림 보낸 제목과
  * 토큰 유사도가 높은 기사는 시간창(24시간) 안에서 1회만 알린다. 같은 기사가 여러
@@ -34,12 +31,11 @@ import java.util.regex.Pattern;
  * 유사도는 오버랩 계수(교집합/작은쪽)에 최소 공유 토큰 수 가드를 더해, 한쪽 제목이
  * 길어져도 중복을 잡되 짧은 제목이 회사명만 겹쳐 오병합되는 것은 막는다.
  *
- * 시황 뉴스는 같은 이슈의 새 전개("이란 공습 1보, 2보, 반응…")가 제목을 바꿔가며
- * 이어지므로, 유사도 필터에 더해 같은 키워드는 쿨다운 시간당 1회만 알린다.
- *
  * 알림 보낸 제목 기억은 파일로 영속화한다. 소스 수정·배포로 재시작이 잦은데, 메모리에만
  * 두면 재시작 때마다 기억이 비워져 하루 종일 피드에 남는 같은 기사를 재시작 직후마다
  * 다시 알리기 때문이다 (같은 이슈를 매체별로 다른 URL로 받아 SeenStore로는 못 막는다).
+ *
+ * 시황 등 키워드 분류는 제거됐다 — 알림 게이트는 속보 말머리(BreakingNews)뿐이다.
  *
  * 단일 폴러 스레드에서만 호출되는 것을 전제로 한다 (동기화 없음).
  */
@@ -81,9 +77,7 @@ public class NewsArticleFilter {
 
     private final List<String> excludeKeywords;
     private final Duration maxAge;
-    private final Duration macroCooldown;
     private final Deque<AlertedTitle> recentAlerts = new ArrayDeque<>();
-    private final Map<String, Instant> lastMacroAlert = new HashMap<>();
 
     /** 알림 보낸 제목 토큰 영속 파일. null이면 영속화 없이 메모리로만 동작(테스트용). */
     private final Path titlesFile;
@@ -92,27 +86,25 @@ public class NewsArticleFilter {
     /**
      * @param excludeKeywords 제목에 포함되면 제외할 키워드 (대소문자 무시)
      * @param maxAge          이보다 오래된 기사는 제외 — 첫 실행 시 과거 기사 알림 폭주 방지
-     * @param macroCooldown   시황 뉴스의 같은 키워드 재알림 최소 간격
      */
-    public NewsArticleFilter(List<String> excludeKeywords, Duration maxAge, Duration macroCooldown) {
-        this(excludeKeywords, maxAge, macroCooldown, null);
+    public NewsArticleFilter(List<String> excludeKeywords, Duration maxAge) {
+        this(excludeKeywords, maxAge, null);
     }
 
     /**
      * @param titlesFile 알림 보낸 제목 기억을 영속화할 파일 (재시작 시 중복 억제 유지). null이면 메모리만.
      */
-    public NewsArticleFilter(List<String> excludeKeywords, Duration maxAge, Duration macroCooldown, Path titlesFile) {
+    public NewsArticleFilter(List<String> excludeKeywords, Duration maxAge, Path titlesFile) {
         this.excludeKeywords = excludeKeywords.stream()
                 .map(k -> k.toLowerCase(Locale.ROOT))
                 .toList();
         this.maxAge = maxAge;
-        this.macroCooldown = macroCooldown;
         this.titlesFile = titlesFile;
         if (titlesFile != null) load();
     }
 
     /** @return 제외 사유. 알림 대상이면 empty. */
-    public Optional<String> rejectReason(NewsArticle article, NewsKeywordClassifier.Match match, Instant now) {
+    public Optional<String> rejectReason(NewsArticle article, Instant now) {
         String title = article.title().toLowerCase(Locale.ROOT);
         for (String ex : excludeKeywords) {
             if (title.contains(ex)) return Optional.of("제외 키워드: " + ex);
@@ -121,13 +113,6 @@ public class NewsArticleFilter {
         if (article.publishedAt() != null
                 && article.publishedAt().toInstant().isBefore(now.minus(maxAge))) {
             return Optional.of("오래된 기사 (" + maxAge.toMinutes() + "분 초과)");
-        }
-
-        if (NewsKeywordClassifier.SENTIMENT_MACRO.equals(match.sentiment())) {
-            Instant last = lastMacroAlert.get(match.keyword());
-            if (last != null && last.isAfter(now.minus(macroCooldown))) {
-                return Optional.of("시황 쿨다운 (" + match.keyword() + ", " + macroCooldown.toMinutes() + "분)");
-            }
         }
 
         prune(now);
@@ -141,14 +126,11 @@ public class NewsArticleFilter {
     }
 
     /** 알림 전송 직전에 호출 — 이후 같은 이슈의 타 매체 기사·후속 보도를 억제한다. */
-    public void markAlerted(NewsArticle article, NewsKeywordClassifier.Match match, Instant now) {
+    public void markAlerted(NewsArticle article, Instant now) {
         prune(now);
         Set<String> tokens = tokenize(article.title());
         recentAlerts.addLast(new AlertedTitle(tokens, now));
         appendTitle(now, tokens);
-        if (NewsKeywordClassifier.SENTIMENT_MACRO.equals(match.sentiment())) {
-            lastMacroAlert.put(match.keyword(), now);
-        }
     }
 
     /**

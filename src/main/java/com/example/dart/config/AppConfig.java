@@ -31,6 +31,7 @@ public record AppConfig(
         List<String> newsMacroTriggers,
         List<String> newsFlipKeywords,
         List<String> newsExcludeKeywords,
+        List<String> newsBreakingKeywords,
         List<String> newsRssFeeds,
         int newsMaxAgeMin,
         int newsMacroCooldownMin,
@@ -88,6 +89,14 @@ public record AppConfig(
     private static final String DEFAULT_NEWS_FLIP_KEYWORDS =
             "철회,취소,무산,불발,실패,중단,보류,연기,부결,불승인,해제,모면,무혐의,반환,"
             + "승소,무죄,해소,흑자,무효";
+
+    /**
+     * 속보 말머리 키워드 — 제목이 이 중 하나를 괄호류([]·<>·()·【】)로 감싸 달면 알림.
+     * 매체마다 표기가 달라(속보·긴급·특보…) 설정으로 조정한다. 보도 차수([1보]·[2보]…)는
+     * 코드에서 자동 인식한다. 종합·단독·특종은 속보성이 아니라 기본에서 뺐다 — 필요하면 추가.
+     */
+    private static final String DEFAULT_NEWS_BREAKING_KEYWORDS =
+            "속보,긴급,특보,플래시,브레이킹";
 
     /**
      * 검증된 언론사 속보 RSS — "이름|URL" 콤마 구분. 포털 색인 없이 발행 즉시 잡힌다.
@@ -194,6 +203,8 @@ public record AppConfig(
         List<String> newsMacroTriggers = parseCsv(resolveOrDefault(dotenv, "NEWS_MACRO_TRIGGERS", DEFAULT_NEWS_MACRO_TRIGGERS));
         List<String> newsFlipKeywords  = parseCsv(resolveOrDefault(dotenv, "NEWS_FLIP_KEYWORDS", DEFAULT_NEWS_FLIP_KEYWORDS));
         List<String> newsExcludeKeywords = parseCsv(resolve(dotenv, "NEWS_EXCLUDE_KEYWORDS"));
+        List<String> newsBreakingKeywords = parseCsv(
+                resolveOrDefault(dotenv, "NEWS_BREAKING_KEYWORDS", DEFAULT_NEWS_BREAKING_KEYWORDS));
         List<String> newsRssFeeds = parseCsv(resolveOrDefault(dotenv, "NEWS_RSS_FEEDS", DEFAULT_NEWS_RSS_FEEDS));
         int newsMaxAgeMin = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_MAX_AGE_MIN", "30"));
         int newsMacroCooldownMin = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_MACRO_COOLDOWN_MIN", "10"));
@@ -277,6 +288,7 @@ public record AppConfig(
                 newsPollInterval, newsRssPollInterval,
                 newsKeywords, newsBadKeywords, newsMacroKeywords,
                 newsMacroTopics, newsMacroTriggers, newsFlipKeywords, newsExcludeKeywords,
+                newsBreakingKeywords,
                 newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin,
                 newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec,
                 kisAppKey, kisAppSecret, kisPollIntervalSec,

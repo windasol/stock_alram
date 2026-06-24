@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit;
  *  - 네이버    : 키워드 검색. RSS에 없는 매체를 잡는 보완망. 일 25,000회 한도라 긴 주기.
  *
  * 빠른 소스가 먼저 알린 이슈는 유사 제목 중복 필터가 느린 소스의 같은 기사를 자동 억제한다.
- * 흐름: 신규 기사(링크 기준) → 키워드 분류(호재/악재/시황) → 노이즈 필터 → 조립 → 전송.
+ * 흐름: 신규 기사(링크 기준) → 속보 말머리 감지 → 노이즈 필터 → 조립 → 전송.
  */
 public class NewsPollerService {
 
@@ -33,7 +33,7 @@ public class NewsPollerService {
     private final List<RssFeed> rssFeeds;
     private final List<RssFeed> googleFeeds;
     private final NaverNewsClient newsClient;
-    private final NewsKeywordClassifier classifier;
+    private final BreakingNews breakingNews;
     private final NewsArticleFilter articleFilter;
     private final Notifier notifier;
     private final NewsAlertComposer alertComposer;
@@ -42,14 +42,14 @@ public class NewsPollerService {
     private final ScheduledExecutorService scheduler;
 
     public NewsPollerService(RssClient rssClient, List<RssFeed> rssFeeds, List<RssFeed> googleFeeds,
-                             NaverNewsClient newsClient, NewsKeywordClassifier classifier,
+                             NaverNewsClient newsClient, BreakingNews breakingNews,
                              NewsArticleFilter articleFilter, Notifier notifier,
                              NewsAlertComposer alertComposer, SeenStore seenStore, AppConfig config) {
         this.rssClient = rssClient;
         this.rssFeeds = rssFeeds;
         this.googleFeeds = googleFeeds;
         this.newsClient = newsClient;
-        this.classifier = classifier;
+        this.breakingNews = breakingNews;
         this.articleFilter = articleFilter;
         this.notifier = notifier;
         this.alertComposer = alertComposer;
@@ -101,21 +101,20 @@ public class NewsPollerService {
 
     private void pollFeeds(List<RssFeed> feeds, String label) {
         try {
-            int fresh = 0, matched = 0, alerted = 0;
+            int fresh = 0, breaking = 0, alerted = 0;
             for (RssFeed feed : feeds) {
                 for (NewsArticle article : rssClient.fetch(feed)) {
                     if (seenStore.contains(article.link())) continue;
                     seenStore.add(article.link());
                     fresh++;
-                    // 피드는 전체 기사 스트림 — 키워드 미매칭은 그냥 버린다.
-                    Optional<NewsKeywordClassifier.Match> match = classifier.classify(article.title());
-                    if (match.isEmpty()) continue;
-                    matched++;
-                    if (handle(article, match.get())) alerted++;
+                    // 피드는 전체 기사 스트림 — 속보 말머리가 없으면 그냥 버린다.
+                    if (!breakingNews.isBreaking(article.title())) continue;
+                    breaking++;
+                    if (handle(article)) alerted++;
                 }
             }
             if (fresh > 0) {
-                log.info("{} 폴링: 신규 {}건 → 키워드 매칭 {}건 → 알림 {}건", label, fresh, matched, alerted);
+                log.info("{} 폴링: 신규 {}건 → 속보 {}건 → 알림 {}건", label, fresh, breaking, alerted);
             }
         } catch (Exception e) {
             log.error("{} 폴링 중 오류 발생", label, e);
@@ -124,22 +123,20 @@ public class NewsPollerService {
 
     private void pollNaver() {
         try {
-            int fresh = 0, matched = 0, alerted = 0;
+            int fresh = 0, breaking = 0, alerted = 0;
             for (String keyword : config.allNewsKeywords()) {
                 for (NewsArticle article : newsClient.search(keyword)) {
                     if (seenStore.contains(article.link())) continue;
                     seenStore.add(article.link());
                     fresh++;
-                    // 검색어가 넓어서(임상, 적자 등) 제목 분류를 통과한 기사만 알린다 —
-                    // 검색어 기준 폴백은 무관한 기사까지 알림을 보내게 된다.
-                    Optional<NewsKeywordClassifier.Match> match = classifier.classify(article.title());
-                    if (match.isEmpty()) continue;
-                    matched++;
-                    if (handle(article, match.get())) alerted++;
+                    // 검색어가 넓어서(임상, 적자 등) 속보 말머리가 붙은 기사만 알린다.
+                    if (!breakingNews.isBreaking(article.title())) continue;
+                    breaking++;
+                    if (handle(article)) alerted++;
                 }
             }
             if (fresh > 0) {
-                log.info("네이버 폴링: 신규 {}건 → 키워드 매칭 {}건 → 알림 {}건", fresh, matched, alerted);
+                log.info("네이버 폴링: 신규 {}건 → 속보 {}건 → 알림 {}건", fresh, breaking, alerted);
             }
         } catch (Exception e) {
             log.error("네이버 뉴스 폴링 중 오류 발생", e);
@@ -147,16 +144,16 @@ public class NewsPollerService {
     }
 
     /** @return 알림을 보냈으면 true. */
-    private boolean handle(NewsArticle article, NewsKeywordClassifier.Match match) {
+    private boolean handle(NewsArticle article) {
         Instant now = Instant.now();
-        Optional<String> reject = articleFilter.rejectReason(article, match, now);
+        Optional<String> reject = articleFilter.rejectReason(article, now);
         if (reject.isPresent()) {
             log.info("뉴스 필터 제외 [{}]: {}", reject.get(), article.title());
             return false;
         }
-        articleFilter.markAlerted(article, match, now);
-        log.info("{} 뉴스 감지 [{}|{}]: {}", match.sentiment(), match.keyword(), article.source(), article.title());
-        notifier.send(alertComposer.compose(article, match));
+        articleFilter.markAlerted(article, now);
+        log.info("속보 뉴스 감지 [{}]: {}", article.source(), article.title());
+        notifier.send(alertComposer.compose(article));
         return true;
     }
 }

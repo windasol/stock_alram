@@ -10,11 +10,11 @@ import com.example.dart.kind.KindPollerService;
 import com.example.dart.kis.KisAlertComposer;
 import com.example.dart.kis.KisClient;
 import com.example.dart.kis.KisPollerService;
+import com.example.dart.news.BreakingNews;
 import com.example.dart.news.GoogleNewsFeeds;
 import com.example.dart.news.NaverNewsClient;
 import com.example.dart.news.NewsAlertComposer;
 import com.example.dart.news.NewsArticleFilter;
-import com.example.dart.news.NewsKeywordClassifier;
 import com.example.dart.news.NewsPollerService;
 import com.example.dart.news.RssClient;
 import com.example.dart.news.RssFeed;
@@ -87,7 +87,7 @@ public class App {
                 : "📋 공시 알림이 시작되었습니다.");
         if (separateNewsChannel) {
             newsNotifier.start();
-            newsNotifier.send("📰 뉴스 알림이 시작되었습니다. (🟢 호재 / 🔴 악재 / 🌐 시황)");
+            newsNotifier.send("🚨 속보 뉴스 알림이 시작되었습니다. (속보·긴급 기사만 알려드려요)");
             log.info("뉴스 알림 채널 분리 (channel/room: {})", newsChannelId);
         }
 
@@ -157,18 +157,15 @@ public class App {
             if (newsClient == null) {
                 log.info("네이버 검색 보완망 비활성화 (NAVER_CLIENT_ID/SECRET 미설정) — RSS만 사용");
             }
-            NewsKeywordClassifier classifier = new NewsKeywordClassifier(
-                    config.newsKeywords(), config.newsBadKeywords(), config.newsMacroKeywords(),
-                    config.newsMacroTopics(), config.newsMacroTriggers(), config.newsFlipKeywords());
             NewsArticleFilter articleFilter = new NewsArticleFilter(
                     config.newsExcludeKeywords(), Duration.ofMinutes(config.newsMaxAgeMin()),
-                    Duration.ofMinutes(config.newsMacroCooldownMin()),
                     Path.of("seen_news_titles.txt"));
             SeenStore newsSeenStore = new SeenStore(Path.of("seen_news.txt"));
+            BreakingNews breakingNews = new BreakingNews(config.newsBreakingKeywords());
             newsPollerService = new NewsPollerService(
                     new RssClient(), RssFeed.parseList(config.newsRssFeeds()),
                     GoogleNewsFeeds.of(config.newsGoogleKeywords()),
-                    newsClient, classifier, articleFilter, newsNotifier,
+                    newsClient, breakingNews, articleFilter, newsNotifier,
                     new NewsAlertComposer(), newsSeenStore, config);
             newsPollerService.start();
         } else {
