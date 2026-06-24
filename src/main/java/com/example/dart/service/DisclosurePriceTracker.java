@@ -200,14 +200,21 @@ public class DisclosurePriceTracker {
     private String composeMessage(Tracking t, long endPrice, long elapsedSec,
                                   double endPct, double mfePct, long peakSec, long peakPrice,
                                   double maePct, long troughSec, long troughPrice, String pattern) {
+        // 기간 라벨은 실제 경과시간으로 — 마감(20:00)에 걸려 일찍 끝나면 "10분"이 아닐 수 있다.
+        String dur = formatDuration(elapsedSec);
+        String trend = endPct >= 0 ? "📈" : "📉";
         return String.format(
                 "📊 **공시 후 %s 주가** | %s — %s\n"
-                        + "시작 %,d원 → 종료 %,d원 (%+.1f%%)\n"
-                        + "🔺 고점 %+.1f%% %,d원 (%s) · 🔽 저점 %+.1f%% %,d원 (%s)\n"
+                        + "시작가 %,d원 → %s 뒤 %,d원\n"
+                        + "%s %s 등락률 %+.1f%%\n"
+                        + "🔺 고점 %+.1f%% %,d원 (%s)\n"
+                        + "🔽 저점 %+.1f%% %,d원 (%s)\n"
                         + "패턴: %s",
-                formatDuration(elapsedSec), t.d.corpName(), t.d.reportNm(),
-                t.baseline, endPrice, endPct,
-                mfePct, peakPrice, formatDuration(peakSec), maePct, troughPrice, formatDuration(troughSec),
+                dur, t.d.corpName(), t.d.reportNm(),
+                t.baseline, dur, endPrice,
+                trend, dur, endPct,
+                mfePct, peakPrice, formatDuration(peakSec),
+                maePct, troughPrice, formatDuration(troughSec),
                 pattern);
     }
 
