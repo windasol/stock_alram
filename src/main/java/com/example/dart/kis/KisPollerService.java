@@ -2,6 +2,7 @@ package com.example.dart.kis;
 
 import com.example.dart.config.AppConfig;
 import com.example.dart.llm.LlmClient;
+import com.example.dart.market.UsFuturesClient;
 import com.example.dart.notify.Notifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -89,6 +90,8 @@ public class KisPollerService {
     private final LlmClient llm;
     /** 장 흐름 분석 리포트 주기(분). 0이면 비활성. */
     private final int reportIntervalMin;
+    /** 리포트 '대외 여건'용 미국 선물 조회기. 실패해도 국내 리포트는 계속된다. */
+    private final UsFuturesClient usFutures = new UsFuturesClient();
 
     /** 종목코드 → 마지막 알림 시각. 쿨다운 내 재알림 억제. */
     private final Map<String, Instant> lastAlert = new ConcurrentHashMap<>();
@@ -401,7 +404,12 @@ public class KisPollerService {
             return;
         }
 
-        String narrative = llm.chat(REPORT_SYSTEM_PROMPT, REPORT_USER_PROMPT + "\n\n" + facts);
+        // 대외 여건(미국 선물)을 맨 앞에 덧붙인다 — 있으면 LLM이 국내 흐름과 엮어 서술한다.
+        // 국내 데이터가 있어야만 리포트를 내므로(위 게이트), 선물은 보조 정보로만 더한다.
+        String usFuturesLine = usFutures.summaryLine();
+        String factsBlock = usFuturesLine != null ? usFuturesLine + "\n\n" + facts : facts.toString();
+
+        String narrative = llm.chat(REPORT_SYSTEM_PROMPT, REPORT_USER_PROMPT + "\n\n" + factsBlock);
         if (narrative == null) return;  // LLM 실패(네트워크·키·모델·타임아웃) — 이미 로깅됨, 리포트만 거른다
         String msg = String.format("📈 **장 흐름 분석** | %s %s%n%n%s",
                 sess.label, SUMMARY_TIME_FMT.format(time), narrative);
@@ -415,11 +423,13 @@ public class KisPollerService {
 
     private static final String REPORT_SYSTEM_PROMPT =
             "너는 한국 주식시장 분석가다. 아래 '실측 데이터'만 근거로 장 흐름을 한국어로 요약한다. "
-            + "데이터에 없는 숫자·종목·섹터를 절대 지어내지 마라. 과장·투자권유 없이 사실 위주로, "
+            + "데이터에 없는 숫자·종목·섹터를 절대 지어내지 마라. 미국 선물 등 대외 여건이 주어지면 "
+            + "국내 자금 흐름과 연결해 설명한다. 과장·투자권유 없이 사실 위주로, "
             + "어느 섹터로 자금이 몰리는지와 전반적 시장 분위기를 4~6문장으로 간결하게 쓴다.";
 
     private static final String REPORT_USER_PROMPT =
-            "다음은 지금 시점의 거래대금 섹터 랭킹과 급등 종목 섹터 분포다. 이걸 바탕으로 장 흐름을 요약해줘.";
+            "다음은 지금 시점의 미국 선물 등락률, 거래대금 섹터 랭킹, 급등 종목 섹터 분포다. "
+            + "이걸 바탕으로 장 흐름을 요약해줘.";
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.
