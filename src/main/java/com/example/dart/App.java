@@ -94,9 +94,17 @@ public class App {
         // DART와 KIND가 같은 공시를 각각 게시하므로, 공유 키 저장소로 먼저 잡은 쪽만 알린다.
         SeenStore disclosureKeys = new SeenStore(Path.of("seen_disclosure_keys.txt"));
 
+        // KIS 클라이언트 — 급등 폴러와 주가추적(NXT 호가 보완)이 같은 인스턴스를 공유한다.
+        // 토큰은 분당 1회 발급 한도라 인스턴스를 나누면 안 된다. KIS 미설정이면 null이고, 그땐
+        // 주가추적은 호가 없이 체결가/종가만으로 동작한다.
+        KisClient kisClient = config.kisEnabled()
+                ? new KisClient(config.kisAppKey(), config.kisAppSecret(),
+                        config.kisMarketDivCode(), config.kisPaper(), Path.of("kis_token.txt"))
+                : null;
+
         // 공시 후 주가 추적(통계) — 호재 공시 감지 시각 기준 10분간 주가 변동을 기록·요약한다.
         DisclosurePriceTracker priceTracker = new DisclosurePriceTracker(
-                quoteClient, notifier, Path.of("disclosure_price_stats.jsonl"));
+                quoteClient, kisClient, notifier, Path.of("disclosure_price_stats.jsonl"));
 
         PollerService pollerService = new PollerService(
                 dartClient, newsFilter, notifier, alertComposer,
@@ -131,9 +139,8 @@ public class App {
                 log.info("KIS 알림 채널 분리 (channel/room: {})", kisChannelId);
             }
             kisPollerService = new KisPollerService(
-                    new KisClient(config.kisAppKey(), config.kisAppSecret(),
-                            config.kisMarketDivCode(), Path.of("kis_token.txt")),
-                    kisNotifier, new KisAlertComposer(), config);
+                    kisClient,   // 주가추적과 공유 — 토큰 분당 1회 발급 한도 때문에 인스턴스를 나누지 않는다.
+                    kisNotifier, new KisAlertComposer(), config, Path.of("kis_sectors.txt"));
             kisPollerService.start();
         } else {
             kisPollerService = null;

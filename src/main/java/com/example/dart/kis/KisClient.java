@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalLong;
 
 /**
  * 한국투자증권(KIS) Open API 클라이언트 — 급등 정찰에 쓰는 "등락률순위" 조회만 담당한다.
@@ -25,18 +26,26 @@ import java.util.List;
  * 토큰은 유효기간 1일이고 잦은 재발급은 한도(분당 1회)·알림톡 발송을 유발하므로, 파일에 영속화해
  * 재시작 후에도 살아있는 토큰을 재사용한다.
  *
- * 실전 도메인만 사용한다(모의투자는 순위분석 미지원). 시세·순위 조회는 계좌번호가 필요 없다.
+ * 도메인: 실전(openapi:9443) / 모의(openapivts:29443). 모의투자 앱키는 실전 도메인에서 시세조회(inquire-price)가
+ * EGW02004("실전 도메인은 모의 앱키로 호출 불가")로 거부되므로, 키 종류에 맞는 도메인을 써야 한다(paper 플래그).
+ * 시세·순위·업종 조회는 두 도메인 모두 실제 시장 데이터를 주며 계좌번호가 필요 없다.
  */
 public class KisClient {
 
     private static final Logger log = LoggerFactory.getLogger(KisClient.class);
 
-    private static final String BASE_URL = "https://openapi.koreainvestment.com:9443";
+    private static final String REAL_BASE_URL  = "https://openapi.koreainvestment.com:9443";
+    private static final String PAPER_BASE_URL = "https://openapivts.koreainvestment.com:29443";
     private static final String TOKEN_PATH = "/oauth2/tokenP";
     private static final String FLUCTUATION_RANK_PATH = "/uapi/domestic-stock/v1/ranking/fluctuation";
     private static final String TR_FLUCTUATION_RANK = "FHPST01700000";
+    private static final String VOLUME_RANK_PATH = "/uapi/domestic-stock/v1/quotations/volume-rank";
+    private static final String TR_VOLUME_RANK = "FHPST01710000";
     private static final String INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price";
     private static final String TR_INQUIRE_PRICE = "FHKST01010100";
+    private static final String INQUIRE_ASKING_PRICE_PATH =
+            "/uapi/domestic-stock/v1/quotations/inquire-asking-price";
+    private static final String TR_INQUIRE_ASKING_PRICE = "FHKST01010200";
 
     /** 토큰 만료 이만큼 전에 미리 재발급한다. */
     private static final Duration TOKEN_REFRESH_MARGIN = Duration.ofMinutes(10);
@@ -45,6 +54,8 @@ public class KisClient {
     private final String appSecret;
     /** 등락률순위 조회 시장구분 — J: KRX, NX: NXT, UN: 통합(KRX+NXT). NXT 거래시간(연장세션)까지 잡으려면 UN. */
     private final String marketDivCode;
+    /** API 도메인 — 모의투자 앱키면 모의 도메인, 실전 앱키면 실전 도메인. */
+    private final String baseUrl;
     private final HttpClient httpClient;
     private final ObjectMapper mapper = new ObjectMapper();
     private final Path tokenFile;
@@ -52,10 +63,11 @@ public class KisClient {
     private String token;
     private Instant tokenExpiry = Instant.EPOCH;
 
-    public KisClient(String appKey, String appSecret, String marketDivCode, Path tokenFile) {
+    public KisClient(String appKey, String appSecret, String marketDivCode, boolean paper, Path tokenFile) {
         this.appKey = appKey;
         this.appSecret = appSecret;
         this.marketDivCode = (marketDivCode == null || marketDivCode.isBlank()) ? "J" : marketDivCode;
+        this.baseUrl = paper ? PAPER_BASE_URL : REAL_BASE_URL;
         this.tokenFile = tokenFile;
         this.httpClient = HttpClient.newBuilder()
                 .sslContext(TrustStores.systemDefault())
@@ -69,14 +81,20 @@ public class KisClient {
         return marketDivCode;
     }
 
+    /** 기본 시장구분(생성자 주입값)으로 등락률순위를 조회한다. */
+    public List<VolumeRankItem> topGainers() {
+        return topGainers(marketDivCode);
+    }
+
     /**
      * 등락률순위 — 전일 종가 대비 등락률(prdy_ctrt) 상위 종목을 내림차순으로 받아온다(최대 30건).
-     * 시장구분(marketDivCode)에 따라 KRX·NXT·통합에서 조회한다. 거래량·거래대금·주가 하한은 두지 않고
+     * 시장구분(J: KRX, NX: NXT, UN: 통합)에 따라 조회한다. 거래량·거래대금·주가 하한은 두지 않고
      * "오늘 많이 오른 종목"만 본다 — 임계 필터는 폴러가 등락률로만 적용한다.
+     * 시간대별(정규장/NXT 애프터마켓)로 시장구분을 바꿔 호출할 수 있게 인자로 받는다.
      *
      * @return 급등 판단에 쓸 값만 담은 목록. 실패 시 빈 목록.
      */
-    public List<VolumeRankItem> topGainers() {
+    public List<VolumeRankItem> topGainers(String marketDivCode) {
         try {
             String query = "FID_COND_MRKT_DIV_CODE=" + marketDivCode  // J: KRX, NX: NXT, UN: 통합(KRX+NXT)
                     + "&FID_COND_SCR_DIV_CODE=20170"
@@ -94,7 +112,7 @@ public class KisClient {
                     + "&FID_RSFL_RATE2=";
 
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(BASE_URL + FLUCTUATION_RANK_PATH + "?" + query))
+                    .uri(URI.create(baseUrl + FLUCTUATION_RANK_PATH + "?" + query))
                     .timeout(Duration.ofSeconds(15))
                     .header("authorization", "Bearer " + token())
                     .header("appkey", appKey)
@@ -114,6 +132,47 @@ public class KisClient {
     }
 
     /**
+     * 거래대금순위 — 당일 누적 거래대금(acml_tr_pbmn) 상위 종목을 내림차순으로 받아온다(최대 30건).
+     * "지금 어느 섹터가 활발한가"를 거래대금으로 보려는 용도라 등락률 조건 없이 거래대금이 큰 종목만 본다.
+     * 시장구분(J: KRX, NX: NXT, UN: 통합)에 따라 조회 — 시간대별로 폴러가 맞춰 호출한다.
+     *
+     * @return 거래대금 상위 종목 목록. 실패 시 빈 목록.
+     */
+    public List<TradingValueItem> topByTradingValue(String marketDivCode) {
+        try {
+            String query = "FID_COND_MRKT_DIV_CODE=" + marketDivCode  // J: KRX, NX: NXT, UN: 통합
+                    + "&FID_COND_SCR_DIV_CODE=20171"
+                    + "&FID_INPUT_ISCD=0000"                  // 전체 종목
+                    + "&FID_DIV_CLS_CODE=0"                   // 0: 전체(보통주+우선주)
+                    + "&FID_BLNG_CLS_CODE=3"                  // 3: 거래금액(거래대금)순
+                    + "&FID_TRGT_CLS_CODE=111111111"
+                    + "&FID_TRGT_EXLS_CLS_CODE=0000000000"
+                    + "&FID_INPUT_PRICE_1=1000"               // 동전주 제외(1,000원 이상)
+                    + "&FID_INPUT_PRICE_2="
+                    + "&FID_VOL_CNT="
+                    + "&FID_INPUT_DATE_1=";
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + VOLUME_RANK_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_VOLUME_RANK)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            return parseVolumeRank(response.body());
+        } catch (Exception e) {
+            log.warn("KIS 거래대금순위 조회 실패: {}", e.toString());
+            return List.of();
+        }
+    }
+
+    /**
      * 종목의 KRX 표준 업종명(bstp_kor_isnm)을 조회한다 — 섹터 요약 분류용.
      * 업종은 거래소(KRX/NXT)와 무관하므로 시장구분은 "J"(KRX) 고정으로 충분하다.
      *
@@ -123,7 +182,7 @@ public class KisClient {
         try {
             String query = "FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=" + code;
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(BASE_URL + INQUIRE_PRICE_PATH + "?" + query))
+                    .uri(URI.create(baseUrl + INQUIRE_PRICE_PATH + "?" + query))
                     .timeout(Duration.ofSeconds(15))
                     .header("authorization", "Bearer " + token())
                     .header("appkey", appKey)
@@ -142,15 +201,76 @@ public class KisClient {
         }
     }
 
+    /**
+     * NXT 호가창의 매도1·매수1 중간값(원)을 조회한다 — 공시 후 주가추적이 NXT 세션 중 체결이 뜸해
+     * 체결가가 멈췄을 때, 호가로 움직임을 보완하는 용도다.
+     * 호가는 그 시장이 열려 있을 때만 존재하므로 시장구분은 NXT("NX") 고정으로 호출한다
+     * (NXT 연장세션엔 KRX가 닫혀 있어 살아있는 호가창은 NXT뿐).
+     *
+     * @return 매도1·매수1이 모두 유효하면 중간값. 호가 없음·미상장·조회 실패 시 empty(추적을 멈추지 않는다).
+     */
+    public OptionalLong nxtAskingMidWon(String code) {
+        try {
+            String query = "FID_COND_MRKT_DIV_CODE=NX&FID_INPUT_ISCD=" + code;
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + INQUIRE_ASKING_PRICE_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_INQUIRE_ASKING_PRICE)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            return parseAskingMid(response.body());
+        } catch (Exception e) {
+            log.warn("KIS NXT 호가 조회 실패 ({}): {}", code, e.toString());
+            return OptionalLong.empty();
+        }
+    }
+
     /** 현재가 조회 응답에서 업종명(bstp_kor_isnm)만 추출한다. (네트워크 분리 — 테스트용 패키지 가시성) */
     static String parseSector(String json) {
         try {
             JsonNode root = new ObjectMapper().readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) return "";
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                // 비정상 응답을 조용히 삼키면 전 종목이 '미분류'로 떨어지는 원인을 못 찾는다 — rt_cd/msg를 드러낸다.
+                // (예: EGW00201 초당 거래건수 초과 = 유량제한, 권한 미보유 등)
+                log.warn("KIS 업종 조회 비정상 응답: rt_cd={} msg={}",
+                        root.path("rt_cd").asText(), root.path("msg1").asText());
+                return "";
+            }
             return root.path("output").path("bstp_kor_isnm").asText("").trim();
         } catch (Exception e) {
             log.warn("KIS 업종 파싱 실패: {}", e.toString());
             return "";
+        }
+    }
+
+    /**
+     * 호가 조회 응답에서 매도1호가(askp1)·매수1호가(bidp1)를 뽑아 중간값(원)을 계산한다.
+     * 둘 다 양수일 때만 의미가 있다 — 한쪽이라도 0(호가 비어있음·장 닫힘·미상장)이면 empty.
+     * (네트워크 분리 — 테스트용 패키지 가시성)
+     */
+    static OptionalLong parseAskingMid(String json) {
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                log.warn("KIS 호가 조회 비정상 응답: rt_cd={} msg={}",
+                        root.path("rt_cd").asText(), root.path("msg1").asText());
+                return OptionalLong.empty();
+            }
+            JsonNode out = root.path("output1");
+            long ask = parseLong(out.path("askp1").asText());
+            long bid = parseLong(out.path("bidp1").asText());
+            if (ask <= 0 || bid <= 0) return OptionalLong.empty();
+            return OptionalLong.of((ask + bid) / 2);
+        } catch (Exception e) {
+            log.warn("KIS 호가 파싱 실패: {}", e.toString());
+            return OptionalLong.empty();
         }
     }
 
@@ -160,8 +280,16 @@ public class KisClient {
         try {
             JsonNode root = new ObjectMapper().readTree(json);
             if (!"0".equals(root.path("rt_cd").asText())) {
-                log.warn("KIS 등락률순위 비정상 응답: rt_cd={} msg={}",
-                        root.path("rt_cd").asText(), root.path("msg1").asText());
+                String rtCd = root.path("rt_cd").asText();
+                String msg = root.path("msg1").asText();
+                // 시장구분 거부(rt_cd=2, INVALID FID_COND_MRKT_DIV_CODE)는 설정 오류라 영원히 빈 결과만 내므로
+                // error로 격상해 로그에서 눈에 띄게 한다(예: KIS_MARKET_DIV_CODE=UN 미허용 계정).
+                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
+                    log.error("KIS 등락률순위 시장구분 거부: rt_cd={} msg={} — KIS_MARKET_DIV_CODE 설정 확인(J/NX/UN)",
+                            rtCd, msg);
+                } else {
+                    log.warn("KIS 등락률순위 비정상 응답: rt_cd={} msg={}", rtCd, msg);
+                }
                 return result;
             }
             for (JsonNode n : root.path("output")) {
@@ -176,6 +304,39 @@ public class KisClient {
             }
         } catch (Exception e) {
             log.warn("KIS 등락률순위 파싱 실패: {}", e.toString());
+        }
+        return result;
+    }
+
+    /**
+     * 거래대금순위 응답 JSON을 파싱한다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성)
+     * volume-rank의 종목코드 필드는 mksc_shrn_iscd, 거래대금은 acml_tr_pbmn(원).
+     */
+    static List<TradingValueItem> parseVolumeRank(String json) {
+        List<TradingValueItem> result = new ArrayList<>();
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                String rtCd = root.path("rt_cd").asText();
+                String msg = root.path("msg1").asText();
+                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
+                    log.error("KIS 거래대금순위 시장구분 거부: rt_cd={} msg={} — 시장구분(J/NX/UN) 확인", rtCd, msg);
+                } else {
+                    log.warn("KIS 거래대금순위 비정상 응답: rt_cd={} msg={}", rtCd, msg);
+                }
+                return result;
+            }
+            for (JsonNode n : root.path("output")) {
+                String code = n.path("mksc_shrn_iscd").asText("").trim();
+                if (code.isEmpty()) continue;
+                result.add(new TradingValueItem(
+                        code,
+                        n.path("hts_kor_isnm").asText("").trim(),
+                        parseLong(n.path("acml_tr_pbmn").asText()),
+                        parseDouble(n.path("prdy_ctrt").asText())));
+            }
+        } catch (Exception e) {
+            log.warn("KIS 거래대금순위 파싱 실패: {}", e.toString());
         }
         return result;
     }
@@ -198,7 +359,7 @@ public class KisClient {
                 .toString();
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(BASE_URL + TOKEN_PATH))
+                .uri(URI.create(baseUrl + TOKEN_PATH))
                 .timeout(Duration.ofSeconds(15))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))

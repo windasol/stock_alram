@@ -1,8 +1,13 @@
 package com.example.dart.service;
 
+import com.example.dart.quote.StockQuoteClient.PriceSnapshot;
 import org.junit.jupiter.api.Test;
 
+import java.util.OptionalLong;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DisclosurePriceTrackerTest {
 
@@ -41,5 +46,35 @@ class DisclosurePriceTrackerTest {
         assertEquals("3분", DisclosurePriceTracker.formatDuration(180));
         assertEquals("2분 10초", DisclosurePriceTracker.formatDuration(130));
         assertEquals("0초", DisclosurePriceTracker.formatDuration(0));
+    }
+
+    // isStaleNxt(snapshot, lastExec) — 호가 보완을 쓸지 가르는 핵심 판정.
+
+    @Test
+    void 정규장이면_호가_보완_안함() {
+        // (a) NXT 세션이 아니면 체결가가 그대로라도 호가를 쓰지 않는다.
+        PriceSnapshot regular = new PriceSnapshot(OptionalLong.of(10_000), false, false);
+        assertFalse(DisclosurePriceTracker.isStaleNxt(regular, 10_000));
+    }
+
+    @Test
+    void NXT_체결가가_변했으면_호가_보완_안함() {
+        // (b) 직전 체결가(9,900)와 다른 새 체결가(10,000) → 신규 체결 발생 → 체결가 사용.
+        PriceSnapshot moved = new PriceSnapshot(OptionalLong.of(10_000), true, true);
+        assertFalse(DisclosurePriceTracker.isStaleNxt(moved, 9_900));
+    }
+
+    @Test
+    void NXT_체결가가_정체면_호가_보완() {
+        // (c) 직전 체결가와 같은 값 → 신규 체결 없음(정체) → 호가로 보완.
+        PriceSnapshot stuck = new PriceSnapshot(OptionalLong.of(10_000), true, true);
+        assertTrue(DisclosurePriceTracker.isStaleNxt(stuck, 10_000));
+    }
+
+    @Test
+    void NXT_체결이_아예_없으면_호가_보완() {
+        // (d) NXT 열렸지만 체결 자체가 없음(execPresent=false) → 호가로 보완.
+        PriceSnapshot noExec = new PriceSnapshot(OptionalLong.of(10_000), true, false);
+        assertTrue(DisclosurePriceTracker.isStaleNxt(noExec, Long.MIN_VALUE));
     }
 }

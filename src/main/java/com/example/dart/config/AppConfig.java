@@ -45,6 +45,7 @@ public record AppConfig(
         int kisCooldownMin,
         String kisMarketDivCode,
         int kisSectorSummaryMin,
+        boolean kisPaper,
         String webexKisRoomId,
         String discordKisChannelId
 ) {
@@ -218,6 +219,9 @@ public record AppConfig(
         String kisMarketDivCode   = resolveOrDefault(dotenv, "KIS_MARKET_DIV_CODE", "J").trim().toUpperCase();
         // 급등 종목들의 KRX 업종을 집계해 N분마다 섹터 요약을 보낸다. 0이면 비활성. 기본 10분.
         int kisSectorSummaryMin   = Integer.parseInt(resolveOrDefault(dotenv, "KIS_SECTOR_SUMMARY_MIN", "10"));
+        // 모의투자(paper) 앱키 여부. true면 모의 도메인(openapivts:29443)을 쓴다 — 모의 앱키는 실전 도메인에서
+        // 시세조회(inquire-price)가 EGW02004로 거부돼 업종 분류가 전부 '미분류'가 되므로 키 종류에 맞춰야 한다.
+        boolean kisPaper          = Boolean.parseBoolean(resolveOrDefault(dotenv, "KIS_PAPER", "false"));
         // KIS 변동성 전용 채널(선택) — 미설정이면 공시 채널 공유. 뉴스 채널 분리와 동일 패턴.
         String webexKisRoomId      = resolve(dotenv, "WEBEX_KIS_ROOM_ID");
         String discordKisChannelId = resolve(dotenv, "DISCORD_KIS_CHANNEL_ID");
@@ -277,7 +281,7 @@ public record AppConfig(
                 newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec,
                 kisAppKey, kisAppSecret, kisPollIntervalSec,
                 kisMinChangePct, kisCooldownMin,
-                kisMarketDivCode, kisSectorSummaryMin, webexKisRoomId, discordKisChannelId);
+                kisMarketDivCode, kisSectorSummaryMin, kisPaper, webexKisRoomId, discordKisChannelId);
     }
 
     private static List<String> parseCsv(String csv) {

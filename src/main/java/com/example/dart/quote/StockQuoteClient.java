@@ -64,10 +64,18 @@ public class StockQuoteClient {
 
     /**
      * 종목 현재가(원). 코드 없음·조회 실패·파싱 실패 시 empty — 추적을 멈추지 않는다.
-     * 공시 후 주가 추적이 30초 간격으로 반복 호출하므로, 시총 조회와 달리 가벼운 실시간 엔드포인트를 쓴다.
+     * 공시 후 주가 추적이 10초 간격으로 반복 호출하므로, 시총 조회와 달리 가벼운 실시간 엔드포인트를 쓴다.
      */
     public OptionalLong currentPriceWon(String stockCode) {
-        if (stockCode == null || stockCode.isBlank()) return OptionalLong.empty();
+        return currentQuote(stockCode).price();
+    }
+
+    /**
+     * 현재가 + 세션 컨텍스트(스냅샷). 추적기가 "NXT 세션 중 체결가가 멈췄는지" 판단해 호가로 보완할지
+     * 정하는 데 쓴다. 코드 없음·조회 실패·파싱 실패 시 빈 스냅샷(price empty, nxtOpen/execPresent false).
+     */
+    public PriceSnapshot currentQuote(String stockCode) {
+        if (stockCode == null || stockCode.isBlank()) return PriceSnapshot.empty();
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(String.format(REALTIME_API, stockCode)))
@@ -78,39 +86,67 @@ public class StockQuoteClient {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 log.warn("현재가 조회 실패 (code={}): status={}", stockCode, response.statusCode());
-                return OptionalLong.empty();
+                return PriceSnapshot.empty();
             }
-            return parseCurrentPrice(response.body());
+            return parseSnapshot(response.body());
         } catch (Exception e) {
             log.warn("현재가 조회 중 오류 (code={})", stockCode, e);
-            return OptionalLong.empty();
+            return PriceSnapshot.empty();
         }
     }
 
     /**
-     * realtime 응답에서 현재가(원)를 파싱한다.
+     * realtime 응답에서 현재가(원)만 파싱한다. (기존 호출부·테스트 호환용 — 내부는 parseSnapshot에 위임)
+     */
+    OptionalLong parseCurrentPrice(String json) {
+        return parseSnapshot(json).price();
+    }
+
+    /**
+     * realtime 응답을 스냅샷으로 파싱한다.
      *
      * 정규장 종가(closePrice)는 NXT 연장세션(프리 08:00~09:00·애프터 15:30~20:00) 동안 고정돼,
      * 그 시간대엔 모든 샘플이 같은 값 → 등락률 0%로 잘못 찍힌다. 그래서 연장세션이 열려 있으면
      * (overMarketPriceInfo.overMarketStatus=OPEN) 그 시간대 실시간가(overPrice)를 우선 쓴다.
      * 정규장(09:00~15:30)엔 연장세션이 닫혀 있어 closePrice가 실시간가다.
+     *
+     * nxtOpen: 연장세션 OPEN 여부. execPresent: 그 세션의 체결가(overPrice)가 실제로 들어와 있는지
+     * (false면 NXT가 열렸어도 아직 체결이 없어 closePrice로 폴백한 상태 — 호가 보완 대상).
      */
-    OptionalLong parseCurrentPrice(String json) {
+    PriceSnapshot parseSnapshot(String json) {
         try {
             JsonNode datas = mapper.readTree(json).path("datas");
             if (datas.isArray() && !datas.isEmpty()) {
                 JsonNode d = datas.get(0);
                 JsonNode over = d.path("overMarketPriceInfo");
-                if ("OPEN".equals(over.path("overMarketStatus").asText())) {
+                boolean nxtOpen = "OPEN".equals(over.path("overMarketStatus").asText());
+                if (nxtOpen) {
                     OptionalLong overWon = wonOf(over.path("overPrice").asText(""));
-                    if (overWon.isPresent()) return overWon;   // NXT 프리·애프터마켓 실시간가
+                    if (overWon.isPresent()) {
+                        return new PriceSnapshot(overWon, true, true);   // NXT 프리·애프터마켓 실시간 체결가
+                    }
+                    // NXT 열렸지만 체결가 없음 → 종가로 폴백하되 execPresent=false로 표시
+                    return new PriceSnapshot(wonOf(d.path("closePrice").asText("")), true, false);
                 }
-                return wonOf(d.path("closePrice").asText(""));  // 정규장 실시간가(=종가 필드)
+                return new PriceSnapshot(wonOf(d.path("closePrice").asText("")), false, false);
             }
         } catch (Exception e) {
             log.warn("현재가 JSON 파싱 실패", e);
         }
-        return OptionalLong.empty();
+        return PriceSnapshot.empty();
+    }
+
+    /**
+     * 현재가 + 세션 컨텍스트.
+     *
+     * @param price       현재가(원). 파싱 실패 시 empty.
+     * @param nxtOpen     NXT 연장세션 OPEN 여부.
+     * @param execPresent NXT 세션의 체결가(overPrice)가 실제로 존재하는지.
+     */
+    public record PriceSnapshot(OptionalLong price, boolean nxtOpen, boolean execPresent) {
+        static PriceSnapshot empty() {
+            return new PriceSnapshot(OptionalLong.empty(), false, false);
+        }
     }
 
     /** "355,000" → 355000. 콤마·공백 제거 후 long. 빈 값·파싱 실패면 empty. */

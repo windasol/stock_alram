@@ -5,10 +5,12 @@ import com.example.dart.notify.Notifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -38,22 +40,41 @@ public class KisPollerService {
     private static final ZoneId KST = ZoneId.of("Asia/Seoul");
 
     /**
-     * 폴링 운영시간 — 시장구분에 따라 달라진다.
-     *  - KRX(J): 정규장 09:00~15:40(마감 동시호가 여유). NXT 데이터가 없으므로 연장세션을 봐도 의미 없음.
-     *  - NXT(UN/NX): 08:00~20:00 (프리마켓 08:00~09:00 · 정규장 09:00~15:30 · 애프터마켓 15:30~20:00).
-     * 이 시간 밖(야간·주말)엔 폴링하지 않는다.
+     * 폴링 운영시간 — 현재 시각(KST)에 맞춰 시장구분을 자동 전환한다.
+     *  - 정규장(KRX, 시장구분 J): 09:00~15:40 (마감 동시호가까지 KRX).
+     *  - NXT 애프터마켓(NXT, 시장구분 NX): 15:40~20:00.
+     * 이 시간 밖(야간·주말)엔 폴링하지 않는다. 두 구간은 15:40에서 맞닿아 폴링 공백이 없다.
      */
-    private static final LocalTime KRX_OPEN = LocalTime.of(9, 0);
-    private static final LocalTime KRX_CLOSE = LocalTime.of(15, 40);
-    private static final LocalTime NXT_OPEN = LocalTime.of(8, 0);
-    private static final LocalTime NXT_CLOSE = LocalTime.of(20, 0);
-    /** 세션 경계 — NXT 모드에서 알림에 "어느 장 시간대"인지 표시해 정규장 vs NXT 연장세션을 구분한다. */
-    private static final LocalTime MAIN_OPEN = LocalTime.of(9, 0);
-    private static final LocalTime MAIN_CLOSE = LocalTime.of(15, 30);
+    private static final LocalTime REGULAR_OPEN = LocalTime.of(9, 0);
+    private static final LocalTime REGULAR_CLOSE = LocalTime.of(15, 40);
+    private static final LocalTime NXT_AFTER_CLOSE = LocalTime.of(20, 0);
+
+    /** 현재 시각의 시장 세션 — 등락률순위 조회 시장구분(J/NX)과 알림 표시 라벨을 함께 든다. */
+    enum Session {
+        REGULAR("J", "정규장"),
+        NXT_AFTER("NX", "🌆 NXT 애프터마켓");
+        final String marketDiv;
+        final String label;
+        Session(String marketDiv, String label) {
+            this.marketDiv = marketDiv;
+            this.label = label;
+        }
+    }
+
+    /** 시각이 속한 세션 — 운영시간 밖이면 null. 09:00~15:40 정규장(J), 15:40~20:00 NXT 애프터마켓(NX). (순수 함수 — 테스트용) */
+    static Session sessionAt(LocalTime t) {
+        if (!t.isBefore(REGULAR_OPEN) && t.isBefore(REGULAR_CLOSE)) return Session.REGULAR;
+        if (!t.isBefore(REGULAR_CLOSE) && !t.isAfter(NXT_AFTER_CLOSE)) return Session.NXT_AFTER;
+        return null;
+    }
 
     private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
     /** 업종 미상 종목의 섹터 라벨. */
     private static final String UNCLASSIFIED = "미분류";
+    /** 거래대금 섹터 랭킹에서 보여줄 상위 섹터 수. */
+    private static final int TURNOVER_TOP_SECTORS = 10;
+    /** 각 섹터 안에서 보여줄 대표 종목 수(거래대금 상위). */
+    private static final int TURNOVER_STOCKS_PER_SECTOR = 3;
 
     private final KisClient client;
     private final Notifier notifier;
@@ -61,49 +82,48 @@ public class KisPollerService {
     private final int intervalSec;
     private final double minChangePct;
     private final Duration cooldown;
-    /** UN/NX 시장구분이면 NXT 모드 — 운영시간을 08:00~20:00으로 확장하고 세션(프리/정규/애프터)을 라벨링한다. */
-    private final boolean nxtMode;
-    private final LocalTime open;
-    private final LocalTime close;
     /** 섹터 요약 주기(분). 0이면 섹터 요약 비활성. */
     private final int sectorSummaryMin;
 
     /** 종목코드 → 마지막 알림 시각. 쿨다운 내 재알림 억제. */
     private final Map<String, Instant> lastAlert = new ConcurrentHashMap<>();
     /**
-     * 오늘 급등한 종목코드 → 최신 순위 항목(종목명·등락률). 섹터 요약 집계용(쿨다운 무관). 자정 리셋.
-     * 업종은 여기 담지 않고 요약 시점마다 새로 조회한다(캐시 안 함 — 10분 주기로 최신 분류 반영).
+     * 종목코드 → KRX 업종명 캐시. 업종은 거의 불변이라 한 번 조회하면 계속 재사용한다(디스크 영속화).
+     * 모의 도메인 inquire-price는 유량제한이 빡빡해(≈초당 1~2건) 수십 건을 한꺼번에 조회하면 'EGW00201 초과'로
+     * 빈 값→'미분류'가 되므로, 호출은 throttle하고 성공분은 캐시·파일에 모아 워밍업 1회 뒤엔 재조회를 없앤다.
+     * (업종명은 정적이라 캐시해도 실시간 등락률과 무관 — 등락률은 요약 때마다 라이브로 새로 조회한다.)
      */
-    private final Map<String, VolumeRankItem> gainers = new ConcurrentHashMap<>();
-    /** 누적 기준 날짜 — 날이 바뀌면 gainers를 비운다. */
-    private volatile LocalDate currentDay;
+    private final Map<String, String> sectorCache = new ConcurrentHashMap<>();
     /** 직전 폴링 시점의 장 개장 여부 — 개장→마감 전이를 감지해 마감 요약을 1회 보낸다. */
     private volatile boolean wasOpen = false;
+    /** 직전에 개장 중이던 세션 — 마감 요약을 그 세션 시장구분으로 라이브 조회하기 위해 기억. */
+    private volatile Session lastSession;
+    /** 업종 캐시 영속화 파일 — 업종은 거의 불변이라 한 번 조회분을 계속 재사용(유량제한 회피). 날짜 무관. */
+    private final Path sectorsFile;
+    /** 모의 도메인 inquire-price 유량제한 회피용 — 캐시 미스(실호출) 사이 최소 간격(ms). */
+    private static final long SECTOR_LOOKUP_INTERVAL_MS = 1000L;
     private final ScheduledExecutorService scheduler;
 
     private int consecutiveFailures = 0;
     private int skipPolls = 0;
 
     public KisPollerService(KisClient client, Notifier notifier,
-                            KisAlertComposer alertComposer, AppConfig config) {
+                            KisAlertComposer alertComposer, AppConfig config, Path sectorsFile) {
         this.client = client;
         this.notifier = notifier;
         this.alertComposer = alertComposer;
         this.intervalSec = config.kisPollIntervalSec();
         this.minChangePct = config.kisMinChangePct();
         this.cooldown = Duration.ofMinutes(config.kisCooldownMin());
-        String mkt = config.kisMarketDivCode();
-        this.nxtMode = "UN".equals(mkt) || "NX".equals(mkt);
-        this.open = nxtMode ? NXT_OPEN : KRX_OPEN;
-        this.close = nxtMode ? NXT_CLOSE : KRX_CLOSE;
         this.sectorSummaryMin = config.kisSectorSummaryMin();
+        this.sectorsFile = sectorsFile;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kis-poller"));
+        loadSectors();
     }
 
     public void start() {
-        log.info("KIS 급등 폴링 시작 (시장 {}{}, 주기 {}초, 운영 {}~{} KST, 임계 등락률≥{}%)",
-                client.marketDivCode(), nxtMode ? "(NXT 연장세션 포함)" : "",
-                intervalSec, open, close, minChangePct);
+        log.info("KIS 급등 폴링 시작 (정규장 J 09:00~15:40 → NXT 애프터마켓 NX 15:40~20:00 KST, 주기 {}초, 임계 등락률≥{}%)",
+                intervalSec, minChangePct);
         scheduler.scheduleWithFixedDelay(this::poll, 0, intervalSec, TimeUnit.SECONDS);
 
         if (sectorSummaryMin > 0) {
@@ -134,14 +154,14 @@ public class KisPollerService {
             return;
         }
         ZonedDateTime now = ZonedDateTime.now(KST);
-        boolean open = isMarketOpen(now);
-        maybeFinalSummary(now, open);  // 개장→마감 전이면 마감 요약 1건
-        if (!open) return;
-        rolloverIfNewDay(now.toLocalDate());
+        Session sess = currentSession(now);
+        maybeFinalSummary(now, sess);  // 개장→마감 전이면 마감 요약 1건
+        if (sess == null) return;
+        lastSession = sess;  // 마감 요약이 직전 세션 시장구분으로 라이브 조회할 수 있게 기억
 
         List<VolumeRankItem> items;
         try {
-            items = client.topGainers();
+            items = client.topGainers(sess.marketDiv);  // 정규장 J / NXT 애프터마켓 NX — 시각에 맞춰 자동 전환
             consecutiveFailures = 0;
         } catch (Exception e) {
             consecutiveFailures++;
@@ -152,11 +172,9 @@ public class KisPollerService {
         }
 
         Instant nowInstant = now.toInstant();
-        // 정규장(KRX) 모드에선 시간대 구분이 의미 없으므로 "정규장" 고정. NXT 모드에서만 프리/애프터마켓을 라벨링한다.
-        String session = nxtMode ? sessionLabel(now.toLocalTime()) : "정규장";
+        String session = sess.label;
         for (VolumeRankItem it : items) {
             if (!isBigGainer(it, minChangePct)) continue;
-            recordGainer(it);  // 섹터 요약 누적 — 쿨다운으로 알림이 억제돼도 집계엔 포함한다.
             if (!cooledDown(it.code(), nowInstant)) continue;
             lastAlert.put(it.code(), nowInstant);
             log.info("급등 [{} {} {}]: {}%", session, it.name(), it.code(), it.changePct());
@@ -168,63 +186,159 @@ public class KisPollerService {
         }
     }
 
-    /** 급등 종목을 누적한다 — 종목명·등락률을 최신값으로 갱신(업종은 요약 시점에 조회). */
-    private void recordGainer(VolumeRankItem it) {
-        if (sectorSummaryMin <= 0) return;
-        gainers.put(it.code(), it);
-    }
-
-    /** 날이 바뀌면 누적 급등 집계를 비운다(매일 0시 기준 새 집계). */
-    private void rolloverIfNewDay(LocalDate today) {
-        if (!today.equals(currentDay)) {
-            currentDay = today;
-            gainers.clear();
+    /** 업종 캐시를 파일에 저장한다 — 각 행: 코드\t업종명. 날짜 무관(업종은 안정적이라 계속 재사용). */
+    private void persistSectors() {
+        try {
+            List<String> lines = new ArrayList<>(sectorCache.size());
+            for (Map.Entry<String, String> e : sectorCache.entrySet()) {
+                lines.add(e.getKey() + "\t" + e.getValue());
+            }
+            Files.write(sectorsFile, lines, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            log.warn("KIS 업종 캐시 저장 실패: {}", e.toString());
         }
     }
 
-    /** 주기 요약(10분) — 장중에만. 누적된 급등 종목들의 업종을 집계해 1건 발송. */
+    /** 시작 시 업종 캐시를 복원한다 — 워밍업(수십 건 조회) 비용을 매 재시작마다 다시 치르지 않게. */
+    private void loadSectors() {
+        try {
+            if (!Files.exists(sectorsFile)) return;
+            for (String line : Files.readAllLines(sectorsFile, StandardCharsets.UTF_8)) {
+                String[] p = line.split("\t", 2);
+                if (p.length == 2 && !p[1].isBlank()) sectorCache.put(p[0], p[1]);
+            }
+            log.info("KIS 업종 캐시 {}건 복원", sectorCache.size());
+        } catch (Exception e) {
+            log.warn("KIS 업종 캐시 복원 실패 — 빈 상태로 시작: {}", e.toString());
+        }
+    }
+
+    /** 업종 실호출 사이 간격 — 모의 도메인 유량제한(EGW00201) 회피. */
+    private void sleepBetweenLookups() {
+        try {
+            Thread.sleep(SECTOR_LOOKUP_INTERVAL_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * 종목코드들의 KRX 업종을 해소한다 — 캐시 우선, 미스만 throttle해서 라이브 조회 후 캐시·파일에 보존.
+     * 조회 실패(빈 업종)는 캐시하지 않고(다음 주기 재시도) 결과 맵엔 '미분류'로 채운다.
+     * 급등 요약·거래대금 랭킹이 공통으로 쓴다(업종 캐시·유량제한 회피 로직 단일화).
+     */
+    private Map<String, String> resolveSectors(List<String> codes) {
+        Map<String, String> out = new HashMap<>();
+        int newLookups = 0;
+        for (String code : codes) {
+            String s = sectorCache.get(code);
+            if (s == null || s.isBlank()) {
+                if (newLookups++ > 0) sleepBetweenLookups();  // 실호출 사이만 간격
+                s = client.sectorOf(code);
+                if (s != null && !s.isBlank()) sectorCache.put(code, s);  // 성공만 캐시
+            }
+            out.put(code, (s != null && !s.isBlank()) ? s : UNCLASSIFIED);
+        }
+        if (newLookups > 0) {
+            persistSectors();  // 이번에 새로 조회된 업종을 파일에 보존(워밍업 1회로 끝)
+            log.info("업종 신규조회 {}건", newLookups);
+        }
+        return out;
+    }
+
+    /** 주기 요약(10분) — 장중에만. 그 시점 라이브 급등 종목을 조회해 업종별로 집계·발송. */
     private void summarize() {
         ZonedDateTime now = ZonedDateTime.now(KST);
-        if (!isMarketOpen(now)) return;
-        rolloverIfNewDay(now.toLocalDate());
-        String session = nxtMode ? sessionLabel(now.toLocalTime()) : "정규장";
-        sendSectorSummary(session, now.toLocalTime());
+        Session sess = currentSession(now);
+        if (sess == null) return;
+        sendSectorSummary(sess, sess.label, now.toLocalTime());
+        sendTurnoverRanking(sess, sess.label, now.toLocalTime());
     }
 
     /**
-     * 개장→마감 전이를 감지해 마감 시점 누적으로 최종 요약을 1회 보낸다.
-     * 주기 요약 경계가 마감 시각과 어긋나도 그날의 마지막 그림은 마감 기준으로 남긴다.
+     * 개장→마감 전이를 감지해 마감 시점 라이브 조회로 최종 요약을 1회 보낸다.
+     * 주기 요약 경계가 마감 시각과 어긋나도 그날의 마지막 그림을 남긴다. (직전 세션 시장구분으로 조회)
      */
-    private void maybeFinalSummary(ZonedDateTime now, boolean open) {
-        if (wasOpen && !open) {
+    private void maybeFinalSummary(ZonedDateTime now, Session current) {
+        if (wasOpen && current == null && lastSession != null) {
             log.info("장 마감 감지 — 마감 섹터 요약 발송");
-            sendSectorSummary("🔔 장마감", now.toLocalTime());
+            sendSectorSummary(lastSession, "🔔 장마감", now.toLocalTime());
+            sendTurnoverRanking(lastSession, "🔔 장마감", now.toLocalTime());
         }
-        wasOpen = open;
+        wasOpen = current != null;
     }
 
     /**
-     * 누적 급등 종목의 업종을 이 시점에 새로 조회(캐시 안 함)해 섹터 요약 1건을 발송한다.
-     * 누적이 없으면 건너뛴다. 주기 요약·마감 요약이 공유한다.
+     * 이 시점의 라이브 급등 종목(현재 등락률)을 조회해 업종별로 집계, 섹터 요약 1건을 발송한다.
+     * 등락률은 누적이 아니라 호출 시점 실시간 값이다. 업종명만 캐시(정적)를 쓴다. 급등 종목이 없으면 건너뛴다.
      */
-    private void sendSectorSummary(String session, LocalTime time) {
+    private void sendSectorSummary(Session session, String label, LocalTime time) {
         if (sectorSummaryMin <= 0) return;
-        List<VolumeRankItem> snapshot = new ArrayList<>(gainers.values());
-        if (snapshot.isEmpty()) {
-            log.info("섹터 요약 건너뜀 — 급등 종목 없음 ({})", session);
+        List<VolumeRankItem> snapshot;
+        try {
+            snapshot = new ArrayList<>(client.topGainers(session.marketDiv));
+        } catch (Exception e) {
+            log.warn("섹터 요약 라이브 조회 실패 ({}): {}", label, e.toString());
             return;
         }
-        List<Gainer> resolved = new ArrayList<>(snapshot.size());
-        for (VolumeRankItem it : snapshot) {
-            String s = client.sectorOf(it.code());
-            resolved.add(new Gainer(it.name(), (s == null || s.isBlank()) ? UNCLASSIFIED : s, it.changePct()));
+        snapshot.removeIf(it -> !isBigGainer(it, minChangePct));  // 현재 ≥임계인 종목만
+        if (snapshot.isEmpty()) {
+            log.info("섹터 요약 건너뜀 — 급등 종목 없음 ({})", label);
+            return;
         }
-        String msg = composeSectorSummary(resolved, session, time);
-        log.info("섹터 요약 발송 ({}종목, {})", resolved.size(), session);
+        Map<String, String> sectors = resolveSectors(
+                snapshot.stream().map(VolumeRankItem::code).toList());
+        List<Gainer> resolved = new ArrayList<>(snapshot.size());
+        int classified = 0;
+        for (VolumeRankItem it : snapshot) {
+            String s = sectors.getOrDefault(it.code(), UNCLASSIFIED);
+            if (!UNCLASSIFIED.equals(s)) classified++;
+            resolved.add(new Gainer(it.name(), s, it.changePct()));
+        }
+        String msg = composeSectorSummary(resolved, label, time);
+        log.info("섹터 요약 발송 ({}종목, 업종분류 {}/{}, {})",
+                resolved.size(), classified, resolved.size(), label);
+        if (classified == 0) {
+            log.warn("섹터 업종 조회가 전부 실패 — KIS 업종(inquire-price) 응답/권한·유량제한 확인 필요");
+        }
         try {
             notifier.send(msg);
         } catch (Exception e) {
             log.warn("섹터 요약 알림 전송 실패", e);
+        }
+    }
+
+    /**
+     * 거래대금 상위 종목을 라이브 조회해 업종별 거래대금을 합산, "지금 어느 섹터가 활발한가"를
+     * 거래대금 내림차순 섹터 랭킹 1건으로 발송한다(급등 섹터 요약과 별도 메시지).
+     * 급등 종목이 없어도 거래대금은 장중 항상 존재하므로 독립적으로 동작한다.
+     */
+    private void sendTurnoverRanking(Session session, String label, LocalTime time) {
+        if (sectorSummaryMin <= 0) return;
+        List<TradingValueItem> snapshot;
+        try {
+            snapshot = client.topByTradingValue(session.marketDiv);
+        } catch (Exception e) {
+            log.warn("거래대금 랭킹 라이브 조회 실패 ({}): {}", label, e.toString());
+            return;
+        }
+        if (snapshot.isEmpty()) {
+            log.info("거래대금 랭킹 건너뜀 — 종목 없음 ({})", label);
+            return;
+        }
+        Map<String, String> sectors = resolveSectors(
+                snapshot.stream().map(TradingValueItem::code).toList());
+        List<Turnover> resolved = new ArrayList<>(snapshot.size());
+        for (TradingValueItem it : snapshot) {
+            resolved.add(new Turnover(it.name(),
+                    sectors.getOrDefault(it.code(), UNCLASSIFIED), it.tradingValueWon()));
+        }
+        String msg = composeTurnoverRanking(resolved, label, time);
+        log.info("거래대금 랭킹 발송 ({}종목, {})", resolved.size(), label);
+        try {
+            notifier.send(msg);
+        } catch (Exception e) {
+            log.warn("거래대금 랭킹 알림 전송 실패", e);
         }
     }
 
@@ -265,12 +379,54 @@ public class KisPollerService {
     /** 섹터 요약 표시 단위 — 종목명·KRX 업종·등락률(%). 업종은 요약 시점에 조회해 채운다. */
     record Gainer(String name, String sector, double changePct) {}
 
-    /** 감지 시각이 속한 시장 세션 라벨 — 정규장 vs NXT 프리/애프터마켓 구분(알림 표시용). (순수 함수 — 테스트용) */
-    static String sessionLabel(LocalTime t) {
-        if (t.isBefore(MAIN_OPEN))  return "🌅 NXT 프리마켓";
-        if (t.isBefore(MAIN_CLOSE)) return "정규장";
-        return "🌆 NXT 애프터마켓";
+    /**
+     * 거래대금 상위 종목들을 업종별 거래대금 합계 내림차순으로 정렬해 섹터 랭킹 메시지로 만든다.
+     * 상위 {@value #TURNOVER_TOP_SECTORS}개 섹터까지, 각 섹터 안 대표 종목 {@value #TURNOVER_STOCKS_PER_SECTOR}개를
+     * 거래대금 내림차순으로 나열한다. 비중(%)은 표본 전체 거래대금 대비 해당 섹터 비율. (순수 함수 — 테스트용)
+     */
+    static String composeTurnoverRanking(Collection<Turnover> items, String session, LocalTime time) {
+        long total = items.stream().mapToLong(Turnover::valueWon).sum();
+        Map<String, List<Turnover>> bySector = new HashMap<>();
+        for (Turnover t : items) {
+            bySector.computeIfAbsent(t.sector(), k -> new ArrayList<>()).add(t);
+        }
+        // 섹터별 거래대금 합계로 내림차순, 동률은 업종명 사전순.
+        List<Map.Entry<String, List<Turnover>>> ranked = new ArrayList<>(bySector.entrySet());
+        ranked.sort(Comparator
+                .comparingLong((Map.Entry<String, List<Turnover>> e) ->
+                        e.getValue().stream().mapToLong(Turnover::valueWon).sum()).reversed()
+                .thenComparing(Map.Entry::getKey));
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("💰 **거래대금 섹터 랭킹** | %s %s%n(거래대금 상위 %d종목 기준)",
+                session, SUMMARY_TIME_FMT.format(time), items.size()));
+        int rank = 1;
+        for (Map.Entry<String, List<Turnover>> e : ranked) {
+            List<Turnover> list = e.getValue();
+            list.sort(Comparator.comparingLong(Turnover::valueWon).reversed());
+            long sectorSum = list.stream().mapToLong(Turnover::valueWon).sum();
+            int pct = total > 0 ? (int) Math.round(sectorSum * 100.0 / total) : 0;
+            String stocks = list.stream()
+                    .limit(TURNOVER_STOCKS_PER_SECTOR)
+                    .map(t -> String.format("%s %s", t.name(), formatWon(t.valueWon())))
+                    .collect(Collectors.joining(", "));
+            sb.append(String.format("%n%d. %s  %s (%d%%)%n   %s",
+                    rank++, e.getKey(), formatWon(sectorSum), pct, stocks));
+            if (rank > TURNOVER_TOP_SECTORS) break;
+        }
+        return sb.toString();
     }
+
+    /** 거래대금(원)을 "4.2조 / 380억 / 5,000만"처럼 사람이 읽기 쉬운 단위로 표기. */
+    static String formatWon(long won) {
+        double eok = won / 100_000_000.0;          // 1억 = 1e8
+        if (eok >= 10_000) return String.format("%.1f조", eok / 10_000.0);
+        if (eok >= 1) return String.format("%,.0f억", eok);
+        return String.format("%,d만", won / 10_000L);
+    }
+
+    /** 거래대금 랭킹 표시 단위 — 종목명·KRX 업종·당일 거래대금(원). */
+    record Turnover(String name, String sector, long valueWon) {}
 
     /** 전일 대비 등락률이 임계 이상인 "오늘 많이 오른" 종목인지. (순수 함수 — 테스트용) */
     static boolean isBigGainer(VolumeRankItem it, double minChangePct) {
@@ -282,10 +438,10 @@ public class KisPollerService {
         return last == null || Duration.between(last, now).compareTo(cooldown) >= 0;
     }
 
-    private boolean isMarketOpen(ZonedDateTime now) {
+    /** 현재 시각의 시장 세션 — 주말·운영시간 밖이면 null(폴링·요약 안 함). */
+    private Session currentSession(ZonedDateTime now) {
         DayOfWeek d = now.getDayOfWeek();
-        if (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY) return false;
-        LocalTime t = now.toLocalTime();
-        return !t.isBefore(open) && !t.isAfter(close);
+        if (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY) return null;
+        return sessionAt(now.toLocalTime());
     }
 }

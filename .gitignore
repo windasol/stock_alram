@@ -10,6 +10,8 @@ seen_kind.txt
 seen_disclosure_keys.txt
 seen_news_titles.txt
 kis_token.txt
+kis_gainers.txt
+kis_sectors.txt
 disclosure_price_stats.jsonl
 app.lock
 bash.exe.stackdump

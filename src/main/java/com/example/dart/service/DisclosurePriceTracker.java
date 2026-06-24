@@ -1,8 +1,10 @@
 package com.example.dart.service;
 
+import com.example.dart.kis.KisClient;
 import com.example.dart.model.Disclosure;
 import com.example.dart.notify.Notifier;
 import com.example.dart.quote.StockQuoteClient;
+import com.example.dart.quote.StockQuoteClient.PriceSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -53,14 +55,18 @@ public class DisclosurePriceTracker {
     private static final double FLAT_EPS_PCT = 0.5;
 
     private final StockQuoteClient quoteClient;
+    /** NXT 호가 보완용(nullable) — KIS 미설정 시 null이면 호가 없이 체결가/종가만으로 추적한다. */
+    private final KisClient kisClient;
     private final Notifier notifier;
     private final Path storeFile;
     private final ObjectMapper mapper = new ObjectMapper();
     private final ScheduledExecutorService pool =
             Executors.newScheduledThreadPool(2, r -> new Thread(r, "price-tracker"));
 
-    public DisclosurePriceTracker(StockQuoteClient quoteClient, Notifier notifier, Path storeFile) {
+    public DisclosurePriceTracker(StockQuoteClient quoteClient, KisClient kisClient,
+                                  Notifier notifier, Path storeFile) {
         this.quoteClient = quoteClient;
+        this.kisClient = kisClient;
         this.notifier = notifier;
         this.storeFile = storeFile;
     }
@@ -90,16 +96,50 @@ public class DisclosurePriceTracker {
     }
 
     private void start(Disclosure d, String category) {
-        OptionalLong base = quoteClient.currentPriceWon(d.stockCode());
+        Tracking t = new Tracking(d, category, ZonedDateTime.now(KST));
+        OptionalLong base = resolvePrice(t);
         if (base.isEmpty()) {
             log.warn("주가 추적 생략(기준가 조회 실패): {} {} - {}", d.stockCode(), d.corpName(), d.reportNm());
             return;
         }
-        Tracking t = new Tracking(d, category, ZonedDateTime.now(KST), base.getAsLong());
-        t.samples.add(new long[]{0, base.getAsLong()});
+        t.baseline = base.getAsLong();
+        t.samples.add(new long[]{0, t.baseline});
         log.info("주가 추적 시작 [{}] 기준가 {}원: {} - {}",
-                d.stockCode(), base.getAsLong(), d.corpName(), d.reportNm());
+                d.stockCode(), t.baseline, d.corpName(), d.reportNm());
         scheduleNext(t);
+    }
+
+    /**
+     * 이 종목의 다음 샘플 가격(원)을 결정한다.
+     *
+     * 기본은 네이버 실시간가(정규장 종가 / NXT 체결가). 단 NXT 세션 중 신규 체결이 없어 체결가가 멈췄거나
+     * 아직 체결이 없으면, 그 사이에도 갱신되는 NXT 호가(매수1·매도1) 중간값으로 보완한다(KIS 미설정 시 생략).
+     * 체결가가 들어오면 정체 판정 기준(lastExecPrice)을 최신 체결가로 갱신한다 — 기록값이 호가여도 무관하게.
+     */
+    private OptionalLong resolvePrice(Tracking t) {
+        PriceSnapshot s = quoteClient.currentQuote(t.d.stockCode());
+        boolean stale = kisClient != null && isStaleNxt(s, t.lastExecPrice);
+        if (s.execPresent() && s.price().isPresent()) {
+            t.lastExecPrice = s.price().getAsLong();
+        }
+        if (stale) {
+            OptionalLong mid = kisClient.nxtAskingMidWon(t.d.stockCode());
+            if (mid.isPresent()) {
+                t.usedQuote = true;
+                return mid;   // NXT 호가 중간값으로 보완
+            }
+        }
+        return s.price();
+    }
+
+    /**
+     * NXT 세션이 열렸는데 신규 체결이 없는가 — 호가 보완 대상 판정.
+     * 체결가가 아예 없거나(execPresent=false), 직전 체결가와 같으면(정체) true.
+     */
+    static boolean isStaleNxt(PriceSnapshot s, long lastExec) {
+        if (!s.nxtOpen()) return false;
+        if (!s.execPresent()) return true;
+        return s.price().isPresent() && s.price().getAsLong() == lastExec;
     }
 
     private void scheduleNext(Tracking t) {
@@ -111,8 +151,7 @@ public class DisclosurePriceTracker {
         try {
             ZonedDateTime now = ZonedDateTime.now(KST);
             long elapsed = Duration.between(t.t0, now).getSeconds();
-            quoteClient.currentPriceWon(t.d.stockCode())
-                    .ifPresent(v -> t.samples.add(new long[]{elapsed, v}));
+            resolvePrice(t).ifPresent(v -> t.samples.add(new long[]{elapsed, v}));
             if (elapsed >= WINDOW_MIN * 60L || !withinWindow(now)) {
                 finish(t, elapsed);
             } else {
@@ -142,12 +181,15 @@ public class DisclosurePriceTracker {
         double maePct = pct(troughPrice, p0);  // 최대 낙폭(<=0)
         String pattern = classify(mfePct, maePct, peakSec, troughSec);
 
-        log.info("주가 추적 종료 [{}] {} — 종료 {}% / 고점 {}%({}s) / 저점 {}%({}s) / 패턴 {}",
+        log.info("주가 추적 종료 [{}] {} — 종료 {}% / 고점 {}%({}s) / 저점 {}%({}s) / 패턴 {}{}",
                 t.d.stockCode(), t.d.corpName(),
-                round1(endPct), round1(mfePct), peakSec, round1(maePct), troughSec, pattern);
+                round1(endPct), round1(mfePct), peakSec, round1(maePct), troughSec, pattern,
+                t.usedQuote ? " (NXT 호가 보정)" : "");
 
+        // 호가로 보완한 추적은 "체결만으론 안 보였을 움직임"이라 메시지에서 구분해준다.
+        String patternDisplay = t.usedQuote ? pattern + " · NXT 호가 보정" : pattern;
         notifier.send(composeMessage(t, last[1], elapsedSec, endPct,
-                mfePct, peakSec, peakPrice, maePct, troughSec, troughPrice, pattern));
+                mfePct, peakSec, peakPrice, maePct, troughSec, troughPrice, patternDisplay));
         persist(t, endPct, mfePct, peakSec, peakPrice, maePct, troughSec, troughPrice, pattern);
 
         // 알림·저장을 마쳤으면 인메모리 시계열을 즉시 비운다 — 완료된 추적이 메모리를 붙들고 있지 않게 한다.
@@ -196,6 +238,7 @@ public class DisclosurePriceTracker {
             o.put("maeSec", troughSec);
             o.put("maeWon", troughPrice);
             o.put("pattern", pattern);
+            o.put("usedQuote", t.usedQuote);   // NXT 호가로 보완한 샘플이 있었는지(분석용)
             ArrayNode series = o.putArray("series");
             for (long[] s : t.samples) {
                 ArrayNode pair = series.addArray();
@@ -243,14 +286,17 @@ public class DisclosurePriceTracker {
         final Disclosure d;
         final String category;
         final ZonedDateTime t0;
-        final long baseline;
         final List<long[]> samples = new ArrayList<>();
+        long baseline;                          // 기준가 — start()에서 첫 조회 후 설정
+        /** 직전에 본 NXT 체결가 — 정체(신규 체결 없음) 판정 기준. 초기엔 어떤 가격과도 안 같게 둔다. */
+        long lastExecPrice = Long.MIN_VALUE;
+        /** 추적 중 한 번이라도 NXT 호가로 보완했는지. */
+        boolean usedQuote = false;
 
-        Tracking(Disclosure d, String category, ZonedDateTime t0, long baseline) {
+        Tracking(Disclosure d, String category, ZonedDateTime t0) {
             this.d = d;
             this.category = category;
             this.t0 = t0;
-            this.baseline = baseline;
         }
     }
 }
