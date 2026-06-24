@@ -1,6 +1,7 @@
 package com.example.dart.kis;
 
 import com.example.dart.config.AppConfig;
+import com.example.dart.llm.LlmClient;
 import com.example.dart.notify.Notifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,6 +85,10 @@ public class KisPollerService {
     private final Duration cooldown;
     /** 섹터 요약 주기(분). 0이면 섹터 요약 비활성. */
     private final int sectorSummaryMin;
+    /** 장 흐름 분석 리포트용 LLM(Gemini/Ollama). null이면 리포트 비활성. */
+    private final LlmClient llm;
+    /** 장 흐름 분석 리포트 주기(분). 0이면 비활성. */
+    private final int reportIntervalMin;
 
     /** 종목코드 → 마지막 알림 시각. 쿨다운 내 재알림 억제. */
     private final Map<String, Instant> lastAlert = new ConcurrentHashMap<>();
@@ -108,7 +113,8 @@ public class KisPollerService {
     private int skipPolls = 0;
 
     public KisPollerService(KisClient client, Notifier notifier,
-                            KisAlertComposer alertComposer, AppConfig config, Path sectorsFile) {
+                            KisAlertComposer alertComposer, AppConfig config, Path sectorsFile,
+                            LlmClient llm) {
         this.client = client;
         this.notifier = notifier;
         this.alertComposer = alertComposer;
@@ -117,6 +123,9 @@ public class KisPollerService {
         this.cooldown = Duration.ofMinutes(config.kisCooldownMin());
         this.sectorSummaryMin = config.kisSectorSummaryMin();
         this.sectorsFile = sectorsFile;
+        // 리포트는 LLM이 주입되고 활성 설정일 때만 동작(둘 중 하나라도 없으면 비활성).
+        this.llm = config.marketReportEnabled() ? llm : null;
+        this.reportIntervalMin = config.marketReportIntervalMin();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kis-poller"));
         loadSectors();
     }
@@ -132,6 +141,14 @@ public class KisPollerService {
             long initialDelaySec = periodSec - (Instant.now().getEpochSecond() % periodSec);
             scheduler.scheduleWithFixedDelay(this::summarize, initialDelaySec, periodSec, TimeUnit.SECONDS);
             log.info("KIS 섹터 요약 활성 ({}분 주기, 첫 발송 {}초 후)", sectorSummaryMin, initialDelaySec);
+        }
+
+        if (llm != null && reportIntervalMin > 0) {
+            long periodSec = reportIntervalMin * 60L;
+            long initialDelaySec = periodSec - (Instant.now().getEpochSecond() % periodSec);
+            scheduler.scheduleWithFixedDelay(this::generateReport, initialDelaySec, periodSec, TimeUnit.SECONDS);
+            log.info("장 흐름 분석 리포트 활성 ({}분 주기, 모델 {}, 첫 발송 {}초 후)",
+                    reportIntervalMin, llm.model(), initialDelaySec);
         }
     }
 
@@ -274,17 +291,31 @@ public class KisPollerService {
      */
     private void sendSectorSummary(Session session, String label, LocalTime time) {
         if (sectorSummaryMin <= 0) return;
+        String msg = buildSectorSummary(session, label, time);
+        if (msg == null) return;
+        try {
+            notifier.send(msg);
+        } catch (Exception e) {
+            log.warn("섹터 요약 알림 전송 실패", e);
+        }
+    }
+
+    /**
+     * 라이브 급등 종목을 업종별로 집계한 섹터 요약 문자열을 만든다(전송은 호출부 책임).
+     * 급등 종목이 없거나 라이브 조회 실패면 null. 섹터 요약 발송과 장 흐름 리포트가 공통으로 쓴다.
+     */
+    private String buildSectorSummary(Session session, String label, LocalTime time) {
         List<VolumeRankItem> snapshot;
         try {
             snapshot = new ArrayList<>(client.topGainers(session.marketDiv));
         } catch (Exception e) {
             log.warn("섹터 요약 라이브 조회 실패 ({}): {}", label, e.toString());
-            return;
+            return null;
         }
         snapshot.removeIf(it -> !isBigGainer(it, minChangePct));  // 현재 ≥임계인 종목만
         if (snapshot.isEmpty()) {
             log.info("섹터 요약 건너뜀 — 급등 종목 없음 ({})", label);
-            return;
+            return null;
         }
         Map<String, String> sectors = resolveSectors(
                 snapshot.stream().map(VolumeRankItem::code).toList());
@@ -295,17 +326,12 @@ public class KisPollerService {
             if (!UNCLASSIFIED.equals(s)) classified++;
             resolved.add(new Gainer(it.name(), s, it.changePct()));
         }
-        String msg = composeSectorSummary(resolved, label, time);
-        log.info("섹터 요약 발송 ({}종목, 업종분류 {}/{}, {})",
+        log.info("섹터 요약 조립 ({}종목, 업종분류 {}/{}, {})",
                 resolved.size(), classified, resolved.size(), label);
         if (classified == 0) {
             log.warn("섹터 업종 조회가 전부 실패 — KIS 업종(inquire-price) 응답/권한·유량제한 확인 필요");
         }
-        try {
-            notifier.send(msg);
-        } catch (Exception e) {
-            log.warn("섹터 요약 알림 전송 실패", e);
-        }
+        return composeSectorSummary(resolved, label, time);
     }
 
     /**
@@ -315,16 +341,30 @@ public class KisPollerService {
      */
     private void sendTurnoverRanking(Session session, String label, LocalTime time) {
         if (sectorSummaryMin <= 0) return;
+        String msg = buildTurnoverRanking(session, label, time);
+        if (msg == null) return;
+        try {
+            notifier.send(msg);
+        } catch (Exception e) {
+            log.warn("거래대금 랭킹 알림 전송 실패", e);
+        }
+    }
+
+    /**
+     * 거래대금 상위 종목을 업종별로 합산한 거래대금 섹터 랭킹 문자열을 만든다(전송은 호출부 책임).
+     * 종목이 없거나 라이브 조회 실패면 null. 거래대금 랭킹 발송과 장 흐름 리포트가 공통으로 쓴다.
+     */
+    private String buildTurnoverRanking(Session session, String label, LocalTime time) {
         List<TradingValueItem> snapshot;
         try {
             snapshot = client.topByTradingValue(session.marketDiv);
         } catch (Exception e) {
             log.warn("거래대금 랭킹 라이브 조회 실패 ({}): {}", label, e.toString());
-            return;
+            return null;
         }
         if (snapshot.isEmpty()) {
             log.info("거래대금 랭킹 건너뜀 — 종목 없음 ({})", label);
-            return;
+            return null;
         }
         Map<String, String> sectors = resolveSectors(
                 snapshot.stream().map(TradingValueItem::code).toList());
@@ -333,14 +373,53 @@ public class KisPollerService {
             resolved.add(new Turnover(it.name(),
                     sectors.getOrDefault(it.code(), UNCLASSIFIED), it.tradingValueWon()));
         }
-        String msg = composeTurnoverRanking(resolved, label, time);
-        log.info("거래대금 랭킹 발송 ({}종목, {})", resolved.size(), label);
+        log.info("거래대금 랭킹 조립 ({}종목, {})", resolved.size(), label);
+        return composeTurnoverRanking(resolved, label, time);
+    }
+
+    /**
+     * 장 흐름 분석 리포트 — 거래대금 섹터 랭킹 + 급등 섹터 분포를 '실측 데이터'로 모아
+     * 로컬 LLM(Ollama)에 넘겨 한국어 요약을 받아 1건 발송한다. 장중에만 동작.
+     * LLM이 숫자를 지어내지 않도록 데이터는 코드가 집계하고, 모델은 서술만 한다(하이브리드).
+     */
+    private void generateReport() {
+        ZonedDateTime now = ZonedDateTime.now(KST);
+        Session sess = currentSession(now);
+        if (sess == null) return;
+        LocalTime time = now.toLocalTime();
+
+        StringBuilder facts = new StringBuilder();
+        String turnover = buildTurnoverRanking(sess, sess.label, time);
+        if (turnover != null) facts.append(turnover);
+        String sector = buildSectorSummary(sess, sess.label, time);
+        if (sector != null) {
+            if (facts.length() > 0) facts.append("\n\n");
+            facts.append(sector);
+        }
+        if (facts.length() == 0) {
+            log.info("장 흐름 리포트 건너뜀 — 데이터 없음 ({})", sess.label);
+            return;
+        }
+
+        String narrative = llm.chat(REPORT_SYSTEM_PROMPT, REPORT_USER_PROMPT + "\n\n" + facts);
+        if (narrative == null) return;  // LLM 실패(네트워크·키·모델·타임아웃) — 이미 로깅됨, 리포트만 거른다
+        String msg = String.format("📈 **장 흐름 분석** | %s %s%n%n%s",
+                sess.label, SUMMARY_TIME_FMT.format(time), narrative);
         try {
             notifier.send(msg);
+            log.info("장 흐름 리포트 발송 ({})", sess.label);
         } catch (Exception e) {
-            log.warn("거래대금 랭킹 알림 전송 실패", e);
+            log.warn("장 흐름 리포트 전송 실패", e);
         }
     }
+
+    private static final String REPORT_SYSTEM_PROMPT =
+            "너는 한국 주식시장 분석가다. 아래 '실측 데이터'만 근거로 장 흐름을 한국어로 요약한다. "
+            + "데이터에 없는 숫자·종목·섹터를 절대 지어내지 마라. 과장·투자권유 없이 사실 위주로, "
+            + "어느 섹터로 자금이 몰리는지와 전반적 시장 분위기를 4~6문장으로 간결하게 쓴다.";
+
+    private static final String REPORT_USER_PROMPT =
+            "다음은 지금 시점의 거래대금 섹터 랭킹과 급등 종목 섹터 분포다. 이걸 바탕으로 장 흐름을 요약해줘.";
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.

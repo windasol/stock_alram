@@ -10,6 +10,9 @@ import com.example.dart.kind.KindPollerService;
 import com.example.dart.kis.KisAlertComposer;
 import com.example.dart.kis.KisClient;
 import com.example.dart.kis.KisPollerService;
+import com.example.dart.llm.GeminiClient;
+import com.example.dart.llm.LlmClient;
+import com.example.dart.llm.OllamaClient;
 import com.example.dart.news.BreakingNews;
 import com.example.dart.news.GoogleNewsFeeds;
 import com.example.dart.news.NaverNewsClient;
@@ -138,9 +141,14 @@ public class App {
                 kisNotifier.send("🚨 급등 알림이 시작되었습니다.");
                 log.info("KIS 알림 채널 분리 (channel/room: {})", kisChannelId);
             }
+            // 장 흐름 분석 리포트용 LLM — LLM_PROVIDER로 선택(gemini: 클라우드·무료한도·렉없음 / ollama: 로컬).
+            // MARKET_REPORT_ENABLED=false면 KisPollerService가 무시한다(불필요한 호출 방지).
+            LlmClient llm = "ollama".equals(config.llmProvider())
+                    ? new OllamaClient(config.ollamaBaseUrl(), config.ollamaModel())
+                    : new GeminiClient(config.geminiApiKey(), config.geminiModel());
             kisPollerService = new KisPollerService(
                     kisClient,   // 주가추적과 공유 — 토큰 분당 1회 발급 한도 때문에 인스턴스를 나누지 않는다.
-                    kisNotifier, new KisAlertComposer(), config, Path.of("kis_sectors.txt"));
+                    kisNotifier, new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm);
             kisPollerService.start();
         } else {
             kisPollerService = null;

@@ -48,7 +48,14 @@ public record AppConfig(
         int kisSectorSummaryMin,
         boolean kisPaper,
         String webexKisRoomId,
-        String discordKisChannelId
+        String discordKisChannelId,
+        boolean marketReportEnabled,
+        int marketReportIntervalMin,
+        String llmProvider,
+        String geminiApiKey,
+        String geminiModel,
+        String ollamaBaseUrl,
+        String ollamaModel
 ) {
 
     /**
@@ -237,6 +244,20 @@ public record AppConfig(
         String webexKisRoomId      = resolve(dotenv, "WEBEX_KIS_ROOM_ID");
         String discordKisChannelId = resolve(dotenv, "DISCORD_KIS_CHANNEL_ID");
 
+        // 장 흐름 분석 리포트 — KIS 거래대금·급등 데이터를 모아 로컬 LLM(Ollama)으로 한국어 요약을 만들어
+        // N분마다 보낸다. KIS가 활성일 때만 동작한다. Ollama 설치·모델 준비 전엔 기본 비활성(false)이라
+        // 죽은 엔드포인트를 폴링하지 않는다. 1시간 주기가 기본 — CPU 추론이 느려도 무방한 호흡.
+        boolean marketReportEnabled  = Boolean.parseBoolean(resolveOrDefault(dotenv, "MARKET_REPORT_ENABLED", "false"));
+        int marketReportIntervalMin  = Integer.parseInt(resolveOrDefault(dotenv, "MARKET_REPORT_INTERVAL_MIN", "60"));
+        // 요약 생성 공급자 — gemini(클라우드, 무료한도·렉없음) 또는 ollama(로컬, 무료·PC부하).
+        String llmProvider           = resolveOrDefault(dotenv, "LLM_PROVIDER", "gemini").trim().toLowerCase();
+        // Gemini(Google AI Studio) — 키는 시스템 환경변수/.env로 주입(env 우선). 모델은 무료 flash 계열 기본.
+        String geminiApiKey          = resolve(dotenv, "GEMINI_API_KEY");
+        String geminiModel           = resolveOrDefault(dotenv, "GEMINI_MODEL", "gemini-2.5-flash");
+        // 로컬 Ollama 주소·모델. 키 아님(로컬 무인증). LLM_PROVIDER=ollama일 때만 사용.
+        String ollamaBaseUrl         = resolveOrDefault(dotenv, "OLLAMA_BASE_URL", "http://localhost:11434");
+        String ollamaModel           = resolveOrDefault(dotenv, "OLLAMA_MODEL", "exaone3.5:7.8b");
+
         // 공통 필수
         if (dartApiKey == null || dartApiKey.isBlank()) {
             throw new IllegalStateException("DART_API_KEY 환경변수가 설정되지 않았습니다.");
@@ -293,7 +314,9 @@ public record AppConfig(
                 newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec,
                 kisAppKey, kisAppSecret, kisPollIntervalSec,
                 kisMinChangePct, kisCooldownMin,
-                kisMarketDivCode, kisSectorSummaryMin, kisPaper, webexKisRoomId, discordKisChannelId);
+                kisMarketDivCode, kisSectorSummaryMin, kisPaper, webexKisRoomId, discordKisChannelId,
+                marketReportEnabled, marketReportIntervalMin,
+                llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel);
     }
 
     private static List<String> parseCsv(String csv) {
