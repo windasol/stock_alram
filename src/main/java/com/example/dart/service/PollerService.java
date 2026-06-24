@@ -44,6 +44,13 @@ public class PollerService {
     private static final long FAST_RETRY_DELAY_SEC = 10;
     private static final int FAST_MAX_ATTEMPTS = 3;           // ≈ 20초 커버
 
+    /**
+     * 시총·매출 보강 중복 차단용 키 접두어 — 같은 정정 공시가 접수번호만 다르게 여러 건 올라오면
+     * (정규화 키 동일) winner·loser 양쪽이 scheduleScaleOnly로 들어와 보조 메시지가 중복 발송된다.
+     * 헤더 교차중복 키(disclosureKeys)와 같은 store를 쓰되 접두어로 네임스페이스를 분리한다.
+     */
+    private static final String ENRICH_PREFIX = "ENRICH|";
+
     private final DartClient dartClient;
     private final NewsFilter newsFilter;
     private final Notifier notifier;
@@ -181,6 +188,12 @@ public class PollerService {
      * KIND 선행 비계약 공시도 매출 출처(corp_code)가 DART에만 있으므로 이 경로로 보강한다.
      */
     private void scheduleScaleOnly(Disclosure d) {
+        // 같은 키(날짜+회사+정규화 제목)의 시총·매출 보강은 1회만 — 정정 공시가 접수번호만 다르게
+        // 2건 올라온 경우(winner=151, loser=135 모두 이 경로) 중복 발송을 막는다.
+        if (!disclosureKeys.add(ENRICH_PREFIX + DisclosureKeys.of(d.rceptDt(), d.corpName(), d.reportNm()))) {
+            log.info("시총·매출 보강 중복 생략(동일 키 재발생): {} - {}", d.corpName(), d.reportNm());
+            return;
+        }
         enrichmentPool.submit(() -> {
             try {
                 notifier.send(alertComposer.composeScaleOnly(d));
