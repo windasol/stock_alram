@@ -1,15 +1,21 @@
 package com.example.dart.service;
 
-import com.example.dart.quote.StockQuoteClient.PriceSnapshot;
+import com.example.dart.kis.MinuteCandle;
 import org.junit.jupiter.api.Test;
 
-import java.util.OptionalLong;
+import java.time.LocalTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DisclosurePriceTrackerTest {
+
+    private static MinuteCandle c(int h, int m, long open, long high, long low, long close) {
+        return new MinuteCandle(LocalTime.of(h, m), open, high, low, close);
+    }
 
     // classify(mfePct, maePct, peakSec, troughSec) — mfe>=0(최대상승), mae<=0(최대낙폭)
 
@@ -30,51 +36,91 @@ class DisclosurePriceTrackerTest {
 
     @Test
     void 고점이_저점보다_먼저면_올랐다_내림() {
-        // 2분에 고점, 8분에 저점 → 올랐다 내림
         assertEquals("올랐다 내림", DisclosurePriceTracker.classify(5.0, -2.0, 120, 480));
     }
 
     @Test
     void 저점이_고점보다_먼저면_내렸다_오름() {
-        // 2분에 저점, 8분에 고점 → 내렸다 오름
         assertEquals("내렸다 오름", DisclosurePriceTracker.classify(3.0, -4.0, 480, 120));
     }
 
-    @Test
-    void 경과시간을_분초로_표기() {
-        assertEquals("40초", DisclosurePriceTracker.formatDuration(40));
-        assertEquals("3분", DisclosurePriceTracker.formatDuration(180));
-        assertEquals("2분 10초", DisclosurePriceTracker.formatDuration(130));
-        assertEquals("0초", DisclosurePriceTracker.formatDuration(0));
-    }
-
-    // isStaleNxt(snapshot, lastExec) — 호가 보완을 쓸지 가르는 핵심 판정.
+    // nxtSession(t) — 정규장 밖(프리·애프터마켓)이면 통합("UN") 분봉이 필요
 
     @Test
-    void 정규장이면_호가_보완_안함() {
-        // (a) NXT 세션이 아니면 체결가가 그대로라도 호가를 쓰지 않는다.
-        PriceSnapshot regular = new PriceSnapshot(OptionalLong.of(10_000), false, false);
-        assertFalse(DisclosurePriceTracker.isStaleNxt(regular, 10_000));
+    void 정규장_안이면_NXT세션_아님() {
+        assertFalse(DisclosurePriceTracker.nxtSession(LocalTime.of(10, 5)));
+        assertFalse(DisclosurePriceTracker.nxtSession(LocalTime.of(9, 0)));   // 09:00 개장
     }
 
     @Test
-    void NXT_체결가가_변했으면_호가_보완_안함() {
-        // (b) 직전 체결가(9,900)와 다른 새 체결가(10,000) → 신규 체결 발생 → 체결가 사용.
-        PriceSnapshot moved = new PriceSnapshot(OptionalLong.of(10_000), true, true);
-        assertFalse(DisclosurePriceTracker.isStaleNxt(moved, 9_900));
+    void 프리_애프터마켓이면_NXT세션() {
+        assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(8, 30)));   // 프리마켓
+        assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(15, 30)));  // 애프터마켓 시작
+        assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(18, 0)));   // 애프터마켓
+    }
+
+    // computeStats(candles, t0Min, fromMin, toMin) — 분봉 창에서 통계 산출
+
+    @Test
+    void 기준가는_공시_2분_전_종가_고점저점은_공시후_구간() {
+        // 공시 10:05. 창 [10:03 ~ 10:15]. 기준가 = 10:03 종가 10,000.
+        // 공시 후: +2분 고점 10,600(+6%), +8분 저점 9,700(-3%), +10분 종료 9,800(-2%).
+        List<MinuteCandle> candles = List.of(
+                c(10, 3, 10_000, 10_010, 9_990, 10_000),   // 기준가 봉(공시 2분 전)
+                c(10, 5, 10_000, 10_150, 9_990, 10_100),   // 공시 시점
+                c(10, 7, 10_100, 10_600, 10_090, 10_500),  // +2분 고점
+                c(10, 13, 10_500, 10_510, 9_700, 9_750),   // +8분 저점
+                c(10, 15, 9_750, 9_810, 9_760, 9_800));    // +10분 종료
+
+        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15));
+
+        assertEquals(10_000, st.baseline());
+        assertEquals(2, st.baselineOffsetMin());
+        assertEquals(10_100, st.discPrice());        // 공시 시점 가격(10:05 종가)
+        assertEquals(1.0, st.discPct(), 0.05);       // 기준가 10,000 대비 +1.0%
+        assertEquals(9_800, st.endPrice());
+        assertEquals(10, st.endMin());
+        assertEquals(-2.0, st.endPct(), 0.05);
+        assertEquals(6.0, st.mfePct(), 0.05);
+        assertEquals(10_600, st.peakPrice());
+        assertEquals(2, st.peakMin());
+        assertEquals(LocalTime.of(10, 7), st.peakAt());
+        assertEquals(-3.0, st.maePct(), 0.05);
+        assertEquals(9_700, st.troughPrice());
+        assertEquals(8, st.troughMin());
+        assertEquals(LocalTime.of(10, 13), st.troughAt());
+        assertEquals("올랐다 내림", st.pattern());
     }
 
     @Test
-    void NXT_체결가가_정체면_호가_보완() {
-        // (c) 직전 체결가와 같은 값 → 신규 체결 없음(정체) → 호가로 보완.
-        PriceSnapshot stuck = new PriceSnapshot(OptionalLong.of(10_000), true, true);
-        assertTrue(DisclosurePriceTracker.isStaleNxt(stuck, 10_000));
+    void 공시_2분전_봉이_없으면_창내_가장_이른_봉을_기준가로() {
+        // 10:03 봉이 없음 → 창 내 가장 이른 10:04 봉(종가 9,500)이 기준가, 오프셋 1분.
+        List<MinuteCandle> candles = List.of(
+                c(10, 4, 9_500, 9_510, 9_490, 9_500),
+                c(10, 5, 9_500, 9_700, 9_500, 9_650),
+                c(10, 15, 9_650, 9_700, 9_600, 9_680));
+
+        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15));
+
+        assertEquals(9_500, st.baseline());
+        assertEquals(1, st.baselineOffsetMin());
     }
 
     @Test
-    void NXT_체결이_아예_없으면_호가_보완() {
-        // (d) NXT 열렸지만 체결 자체가 없음(execPresent=false) → 호가로 보완.
-        PriceSnapshot noExec = new PriceSnapshot(OptionalLong.of(10_000), true, false);
-        assertTrue(DisclosurePriceTracker.isStaleNxt(noExec, Long.MIN_VALUE));
+    void 창에_봉이_없으면_null() {
+        // 모든 봉이 창 밖(11시대) → null.
+        List<MinuteCandle> candles = List.of(c(11, 0, 100, 100, 100, 100));
+        assertNull(DisclosurePriceTracker.computeStats(
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15)));
+    }
+
+    @Test
+    void 공시후_봉이_없으면_null() {
+        // 기준가 봉만 있고 공시 시점 이후 봉이 없음 → null.
+        List<MinuteCandle> candles = List.of(c(10, 3, 10_000, 10_010, 9_990, 10_000));
+        assertNull(DisclosurePriceTracker.computeStats(
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15)));
     }
 }

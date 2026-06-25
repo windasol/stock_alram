@@ -28,6 +28,22 @@ class StockQuoteClientTest {
     }
 
     @Test
+    void integration_JSON에서_전일종가를_파싱한다() {
+        String json = """
+                {"itemCode":"005930","stockName":"삼성전자","totalInfos":[
+                  {"code":"lastClosePrice","key":"전일","value":"322,500"},
+                  {"code":"marketValue","key":"시총","value":"1,970조 1,959억"}
+                ]}""";
+        assertEquals(322_500L, client.parsePreviousClose(json).getAsLong());
+    }
+
+    @Test
+    void 전일종가_필드가_없으면_empty() {
+        assertTrue(client.parsePreviousClose("{\"totalInfos\":[]}").isEmpty());
+        assertTrue(client.parsePreviousClose("not json").isEmpty());
+    }
+
+    @Test
     void realtime_JSON에서_현재가를_파싱한다() {
         String json = "{ \"datas\": [ { \"closePrice\": \"357,000\", \"fluctuationsRatio\": \"0.85\" } ] }";
         assertEquals(357_000L, client.parseCurrentPrice(json).getAsLong());

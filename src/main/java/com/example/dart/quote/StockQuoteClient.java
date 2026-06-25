@@ -71,6 +71,32 @@ public class StockQuoteClient {
     }
 
     /**
+     * 전일 종가(원) — 공시 후 추적이 "전일 종가 대비 당일 등락률"을 계산하는 기준값.
+     * 정규장·NXT 모두 당일 등락률 기준이 전일 종가라 한 번만 잡으면 된다. 추적당 1회(start 시점) 조회.
+     * 코드 없음·조회 실패·파싱 실패 시 empty — 그 경우 등락률 병기를 생략할 뿐 추적은 계속한다.
+     */
+    public OptionalLong previousCloseWon(String stockCode) {
+        if (stockCode == null || stockCode.isBlank()) return OptionalLong.empty();
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(String.format(API, stockCode)))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("User-Agent", "Mozilla/5.0")
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.warn("전일 종가 조회 실패 (code={}): status={}", stockCode, response.statusCode());
+                return OptionalLong.empty();
+            }
+            return parsePreviousClose(response.body());
+        } catch (Exception e) {
+            log.warn("전일 종가 조회 중 오류 (code={})", stockCode, e);
+            return OptionalLong.empty();
+        }
+    }
+
+    /**
      * 현재가 + 세션 컨텍스트(스냅샷). 추적기가 "NXT 세션 중 체결가가 멈췄는지" 판단해 호가로 보완할지
      * 정하는 데 쓴다. 코드 없음·조회 실패·파싱 실패 시 빈 스냅샷(price empty, nxtOpen/execPresent false).
      */
@@ -158,6 +184,20 @@ public class StockQuoteClient {
         } catch (NumberFormatException e) {
             return OptionalLong.empty();
         }
+    }
+
+    /** integration 응답의 totalInfos[code=lastClosePrice].value("322,500")를 원으로 파싱. (테스트용 패키지 가시성) */
+    OptionalLong parsePreviousClose(String json) {
+        try {
+            for (JsonNode info : mapper.readTree(json).path("totalInfos")) {
+                if ("lastClosePrice".equals(info.path("code").asText())) {
+                    return wonOf(info.path("value").asText());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("전일 종가 JSON 파싱 실패", e);
+        }
+        return OptionalLong.empty();
     }
 
     /** integration 응답의 totalInfos[code=marketValue].value("1,970조 1,959억")를 원으로 파싱. */

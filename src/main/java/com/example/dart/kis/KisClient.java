@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
@@ -46,6 +47,9 @@ public class KisClient {
     private static final String INQUIRE_ASKING_PRICE_PATH =
             "/uapi/domestic-stock/v1/quotations/inquire-asking-price";
     private static final String TR_INQUIRE_ASKING_PRICE = "FHKST01010200";
+    private static final String INQUIRE_TIME_CHART_PATH =
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice";
+    private static final String TR_TIME_CHART = "FHKST03010200";   // 주식당일분봉조회
 
     /** 토큰 만료 이만큼 전에 미리 재발급한다. */
     private static final Duration TOKEN_REFRESH_MARGIN = Duration.ofMinutes(10);
@@ -133,7 +137,7 @@ public class KisClient {
 
     /**
      * 거래대금순위 — 당일 누적 거래대금(acml_tr_pbmn) 상위 종목을 내림차순으로 받아온다(최대 30건).
-     * "지금 어느 섹터가 활발한가"를 거래대금으로 보려는 용도라 등락률 조건 없이 거래대금이 큰 종목만 본다.
+     * "지금 어느 섹터가 활발한가"를 거래대금으로 보려는 용도라 등락률 조건 없이 거래대금이d사항  큰 종목만 본다.
      * 시장구분(J: KRX, NX: NXT, UN: 통합)에 따라 조회 — 시간대별로 폴러가 맞춰 호출한다.
      *
      * @return 거래대금 상위 종목 목록. 실패 시 빈 목록.
@@ -232,6 +236,47 @@ public class KisClient {
         }
     }
 
+    /**
+     * 당일 1분봉을 조회한다 — endHHMMSS(끝시각) 기준 과거로 최대 30개(=30분). 공시 후 주가추적이
+     * [공시-2분 ~ 공시+10분] 창(12분)을 한 번에 분석하는 데 쓴다(10초 폴링 대체).
+     *
+     * 시장구분(marketDiv): "J"(KRX 정규장) / "UN"(통합=KRX+NXT) / "NX"(NXT). KRX만 보면 NXT 연장세션
+     * (08:00~09:00·15:30~20:00) 분봉이 비므로, 그 시간대 공시는 "UN"으로 받아야 한다(계정에 UN 권한이
+     * 있을 때). 지원 안 되거나 데이터가 없으면 빈 목록 — 호출자가 J로 폴백하거나 분석을 건너뛴다.
+     *
+     * @param code      종목코드
+     * @param endHHMMSS 조회 끝 시각 "HHmmss"
+     * @param marketDiv 시장구분 코드(J/UN/NX)
+     * @return 1분봉 목록(시각 오름차순 정렬). 조회·파싱 실패 시 빈 목록.
+     */
+    public List<MinuteCandle> minuteCandles(String code, String endHHMMSS, String marketDiv) {
+        try {
+            String query = "FID_ETC_CLS_CODE="
+                    + "&FID_COND_MRKT_DIV_CODE=" + marketDiv
+                    + "&FID_INPUT_ISCD=" + code
+                    + "&FID_INPUT_HOUR_1=" + endHHMMSS
+                    + "&FID_PW_DATA_INCU_YN=N";
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + INQUIRE_TIME_CHART_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_TIME_CHART)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            return parseMinuteCandles(response.body());
+        } catch (Exception e) {
+            log.warn("KIS 분봉 조회 실패 ({}): {}", code, e.toString());
+            return List.of();
+        }
+    }
+
     /** 현재가 조회 응답에서 업종명(bstp_kor_isnm)만 추출한다. (네트워크 분리 — 테스트용 패키지 가시성) */
     static String parseSector(String json) {
         try {
@@ -272,6 +317,42 @@ public class KisClient {
             log.warn("KIS 호가 파싱 실패: {}", e.toString());
             return OptionalLong.empty();
         }
+    }
+
+    /**
+     * 분봉 응답(output2)을 시각 오름차순 MinuteCandle 목록으로 파싱한다. KIS는 최신→과거 순으로 주므로
+     * 마지막에 뒤집어 오름차순으로 돌려준다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성)
+     */
+    static List<MinuteCandle> parseMinuteCandles(String json) {
+        List<MinuteCandle> result = new ArrayList<>();
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                log.warn("KIS 분봉 비정상 응답: rt_cd={} msg={}",
+                        root.path("rt_cd").asText(), root.path("msg1").asText());
+                return result;
+            }
+            for (JsonNode n : root.path("output2")) {
+                String hms = n.path("stck_cntg_hour").asText("");
+                if (hms.length() < 6) continue;
+                long close = parseLong(n.path("stck_prpr").asText());
+                if (close <= 0) continue;   // 거래 없는 빈 봉(0)은 버린다
+                LocalTime time = LocalTime.of(
+                        Integer.parseInt(hms.substring(0, 2)),
+                        Integer.parseInt(hms.substring(2, 4)),
+                        Integer.parseInt(hms.substring(4, 6)));
+                result.add(new MinuteCandle(time,
+                        parseLong(n.path("stck_oprc").asText()),
+                        parseLong(n.path("stck_hgpr").asText()),
+                        parseLong(n.path("stck_lwpr").asText()),
+                        close));
+            }
+            // KIS는 최신→과거 순. 분석은 시간순이 편하므로 오름차순으로 뒤집는다.
+            java.util.Collections.reverse(result);
+        } catch (Exception e) {
+            log.warn("KIS 분봉 파싱 실패: {}", e.toString());
+        }
+        return result;
     }
 
     /** 등락률순위 응답 JSON을 파싱한다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성) */
