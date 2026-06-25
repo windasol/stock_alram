@@ -190,7 +190,7 @@ public class DisclosurePriceTracker {
         long endPrice = post.lastEntry().getValue().close();
         long endMin = ChronoUnit.MINUTES.between(t0Min, post.lastKey());
 
-        long discPrice = post.firstEntry().getValue().close();   // 공시 시점(분) 가격 = 시작가
+        long discPrice = baseline;   // 시작가 = 공시 2분전 봉 종가(공시 시점 가격이 아니라 추적 출발점)
 
         long peakPrice = Long.MIN_VALUE, troughPrice = Long.MAX_VALUE;
         LocalTime peakTime = post.firstKey(), troughTime = post.firstKey();
@@ -223,7 +223,7 @@ public class DisclosurePriceTracker {
 
     /**
      * 종료 메시지 조립. 모든 %는 전일종가 대비 당일 등락률(사용자가 종목 화면에서 보는 그 %).
-     * 공시 시작 시각·시작가(공시 시점 가격)+등락률, 10분 뒤 가격+등락률을 한 줄에 보여주고,
+     * 공시 시작 시각·시작가(공시 2분전 종가)+등락률, 10분 뒤 가격+등락률을 한 줄에 보여주고,
      * 고점/저점도 그 시점의 등락률과 실제 시계 시각(예: 10:07)으로 표기한다.
      */
     private static String composeMessage(Disclosure d, Stats st, ZonedDateTime t0) {
@@ -254,7 +254,7 @@ public class DisclosurePriceTracker {
             o.put("prdyCloseWon", st.prdyClose());      // 전일종가(표기 %의 기준, 0이면 기준가로 폴백)
             o.put("baseWon", st.baseline());            // 기준가(공시 N분 전 종가, 패턴 분류 기준점)
             o.put("baseOffsetMin", st.baselineOffsetMin());
-            o.put("discWon", st.discPrice());           // 공시 시점 가격(시작가)
+            o.put("discWon", st.discPrice());           // 시작가(공시 2분전 종가 = baseWon과 동일)
             o.put("discPct", round1(st.discPct()));     // 시작가의 당일 등락률(전일종가 대비)
             o.put("endWon", st.endPrice());
             o.put("endMin", st.endMin());
@@ -321,7 +321,7 @@ public class DisclosurePriceTracker {
      * @param prdyClose         전일종가(원, 표기 %의 기준) — 0이면 기준가로 폴백한 상태
      * @param baseline          기준가(공시 PRE_MIN분 전 봉 종가, 원) — 패턴 분류 기준점
      * @param baselineOffsetMin 기준가 봉이 공시 시점에서 몇 분 전인지(보통 PRE_MIN)
-     * @param discPrice         시작가 = 공시 시점(분) 가격(원)
+     * @param discPrice         시작가 = 공시 2분전 봉 종가(원, baseline과 동일)
      * @param discPct           시작가의 당일 등락률(전일종가 대비, %)
      * @param endPrice          종료가(공시+창 봉 종가, 원)
      * @param endMin            종료 시점까지 경과(분) — 보통 WINDOW_MIN, 마감에 잘리면 그보다 작음

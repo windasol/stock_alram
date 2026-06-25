@@ -85,8 +85,8 @@ class DisclosurePriceTrackerTest {
 
         assertEquals(10_000, st.baseline());
         assertEquals(2, st.baselineOffsetMin());
-        assertEquals(10_100, st.discPrice());        // 공시 시점 가격(10:05 종가)
-        assertEquals(1.0, st.discPct(), 0.05);       // 기준가 10,000 대비 +1.0%
+        assertEquals(10_000, st.discPrice());        // 시작가 = 공시 2분전 종가(baseline)
+        assertEquals(0.0, st.discPct(), 0.05);       // baseline 대비 baseline → 0.0 (전일종가 미조회 폴백)
         assertEquals(9_800, st.endPrice());
         assertEquals(10, st.endMin());
         assertEquals(-2.0, st.endPct(), 0.05);
@@ -117,12 +117,29 @@ class DisclosurePriceTrackerTest {
 
         // 표기 %는 전일종가 200,000 대비 — +0.x%가 아니라 실제 당일 등락률(-6%대)로 찍혀야 한다.
         assertEquals(200_000, st.prdyClose());
-        assertEquals(-5.95, st.discPct(), 0.05);   // (188,100-200,000)/200,000
+        assertEquals(188_000, st.discPrice());     // 시작가 = 공시 2분전 종가(공시 시점 188,100이 아님)
+        assertEquals(-6.0, st.discPct(), 0.05);    // (188,000-200,000)/200,000
         assertEquals(-6.0, st.endPct(), 0.05);     // (188,000-200,000)/200,000
         assertEquals(-5.8, st.mfePct(), 0.05);     // 고점 188,400
         assertEquals(-6.1, st.maePct(), 0.05);     // 저점 187,800
         // 패턴은 기준가(188,000) 대비 움직임으로 — 당일 등락률을 넣었다면 "계속 하락"으로 오분류됐을 것.
         assertEquals("횡보", st.pattern());
+    }
+
+    @Test
+    void 시작가는_공시시점_가격이_아니라_공시_2분전_종가() {
+        // 공시 2분전(10:03) 종가 10,000, 공시 시점(10:05) 종가 10,300으로 서로 다르게 구성.
+        // 시작가는 공시 시점(10,300)이 아니라 2분전 종가(10,000)여야 한다.
+        List<MinuteCandle> candles = List.of(
+                c(10, 3, 10_000, 10_010, 9_990, 10_000),   // 기준가 봉(공시 2분 전) = 시작가
+                c(10, 5, 10_100, 10_350, 10_090, 10_300),  // 공시 시점(시작가로 쓰면 안 됨)
+                c(10, 15, 10_300, 10_320, 10_280, 10_310)); // 종료
+
+        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L);
+
+        assertEquals(10_000, st.baseline());
+        assertEquals(10_000, st.discPrice());   // 시작가 == 2분전 종가(baseline), 공시 시점 10,300 아님
     }
 
     @Test
