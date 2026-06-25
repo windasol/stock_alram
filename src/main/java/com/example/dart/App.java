@@ -138,7 +138,9 @@ public class App {
                 kisNotifier = createNotifier(config, kisChannelId);
                 separateKisChannel = true;
                 kisNotifier.start();
-                kisNotifier.send("🚨 급등 알림이 시작되었습니다.");
+                kisNotifier.send(config.kisGainerAlertEnabled()
+                        ? "🚨 급등 알림이 시작되었습니다."
+                        : "📊 외국인·기관 수급 랭킹 알림이 시작되었습니다.");
                 log.info("KIS 알림 채널 분리 (channel/room: {})", kisChannelId);
             }
             // 장 흐름 분석 리포트용 LLM — LLM_PROVIDER로 선택(gemini: 클라우드·무료한도·렉없음 / ollama: 로컬).

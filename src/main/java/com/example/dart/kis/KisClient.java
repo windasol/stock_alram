@@ -50,9 +50,54 @@ public class KisClient {
     private static final String INQUIRE_TIME_CHART_PATH =
             "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice";
     private static final String TR_TIME_CHART = "FHKST03010200";   // 주식당일분봉조회
+    private static final String FOREIGN_INSTITUTION_TOTAL_PATH =
+            "/uapi/domestic-stock/v1/quotations/foreign-institution-total";
+    private static final String TR_FOREIGN_INSTITUTION_TOTAL = "FHPTJ04400000";   // 국내기관_외국인 매매종목가집계
+    private static final String INQUIRE_INVESTOR_PATH =
+            "/uapi/domestic-stock/v1/quotations/inquire-investor";
+    private static final String TR_INQUIRE_INVESTOR = "FHKST01010900";   // 종목별 투자자 매매동향(마감 후 확정)
+    /**
+     * 가집계 순매수 거래대금(frgn/orgn_ntby_tr_pbmn) 단위 — 원이 아니라 백만원이라 원으로 환산해 저장한다.
+     * (실측: 응답값 6자리 ≈ 360,000 → 백만원 환산 시 3,600억으로 현실적. 원이면 36만원으로 비현실적.)
+     * 단위가 다르게 확인되면 이 상수만 바꾸면 된다(예: 천원이면 1_000L).
+     */
+    static final long NTBY_PBMN_UNIT_WON = 1_000_000L;
+
+    /**
+     * 외국인·기관 수급 랭킹 조회 대상 투자자 구분 — 외국인/기관계.
+     * etcCode는 FID_ETC_CLS_CODE(1: 외국인, 2: 기관계), amountField는 응답에서 읽을 순매수 거래대금 필드명,
+     * label은 알림 표시용 라벨.
+     */
+    public enum Investor {
+        FOREIGN("1", "frgn_ntby_tr_pbmn", "🌍 외국인"),
+        INSTITUTION("2", "orgn_ntby_tr_pbmn", "🏛 기관");
+
+        final String etcCode;
+        final String amountField;
+        final String label;
+
+        Investor(String etcCode, String amountField, String label) {
+            this.etcCode = etcCode;
+            this.amountField = amountField;
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
 
     /** 토큰 만료 이만큼 전에 미리 재발급한다. */
     private static final Duration TOKEN_REFRESH_MARGIN = Duration.ofMinutes(10);
+
+    /**
+     * 외국인·기관 가집계 호출 사이 최소 간격(ms) — 유량제한(EGW00201 초당 거래건수 초과) 회피.
+     * 한 주기에 매수/매도×(외국인·기관·동시) = 6회를 연달아 쏘면, 특히 모의 도메인(≈초당 1~2건)에선
+     * 뒤쪽 호출(보통 매도)이 EGW00201로 빈 응답이 와 매도 칸이 비는 증상이 난다. 호출을 간격을 둬 분산한다.
+     */
+    private static final long FI_CALL_MIN_INTERVAL_MS = 1_100L;
+    /** 직전 가집계 호출 시각(ms). 모든 호출이 단일 폴러 스레드에서 순차 실행되므로 동기화 불필요. */
+    private long lastFiCallAt = 0L;
 
     private final String appKey;
     private final String appSecret;
@@ -172,6 +217,94 @@ public class KisClient {
             return parseVolumeRank(response.body());
         } catch (Exception e) {
             log.warn("KIS 거래대금순위 조회 실패: {}", e.toString());
+            return List.of();
+        }
+    }
+
+    /**
+     * 외국인·기관 매매종목가집계(가집계) — 투자자(외국인/기관)별 순매수/순매도 상위 종목을 받아온다(최대 ~30건).
+     * 코스피+코스닥 전체(FID_INPUT_ISCD=0000)를 순매수 거래대금(금액정렬) 기준으로 정렬한다.
+     * 이 엔드포인트는 세션 시장구분(J/NX)이 아니라 고정값 V/16449를 쓰며, 가집계 특성상 정규장 중에만 의미가 있다.
+     *
+     * @param inv     투자자 구분(외국인/기관계)
+     * @param buySide true면 순매수상위(가장 많이 산), false면 순매도상위(가장 많이 판)
+     * @return 순매수 거래대금 순 종목 목록. 실패 시 빈 목록.
+     */
+    public List<InvestorFlowItem> investorFlowRank(Investor inv, boolean buySide) {
+        try {
+            throttleFiCall();   // 유량제한 회피 — 호출 간 최소 간격 확보(특히 모의 도메인)
+            String query = "FID_COND_MRKT_DIV_CODE=V"            // 이 엔드포인트 고정값
+                    + "&FID_COND_SCR_DIV_CODE=16449"            // 이 엔드포인트 고정값
+                    + "&FID_INPUT_ISCD=0000"                    // 전체(코스피+코스닥)
+                    + "&FID_DIV_CLS_CODE=1"                     // 1: 금액정렬(순매수 거래대금 기준)
+                    + "&FID_RANK_SORT_CLS_CODE=" + (buySide ? "0" : "1")  // 0: 순매수상위, 1: 순매도상위
+                    + "&FID_ETC_CLS_CODE=" + inv.etcCode;       // 1: 외국인, 2: 기관계
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + FOREIGN_INSTITUTION_TOTAL_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_FOREIGN_INSTITUTION_TOTAL)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            List<InvestorFlowItem> items = parseInvestorFlow(response.body(), inv);
+            // [수급진단 — 임시] 매수/매도별 건수. 0건이면 KIS 원본 응답을 그대로 찍어 원인(빈 output·rt_cd·권한)을 가린다.
+            String side = buySide ? "순매수상위" : "순매도상위";
+            if (items.isEmpty()) {
+                String body = response.body();
+                log.warn("[수급진단] {} {} 0건 — 원본응답: {}", inv, side,
+                        body.length() > 700 ? body.substring(0, 700) : body);
+            } else {
+                InvestorFlowItem top = items.get(0);
+                log.info("[수급진단] {} {} {}건 (1위 {} {}원)", inv, side, items.size(), top.name(), top.netValueWon());
+            }
+            return items;
+        } catch (Exception e) {
+            log.warn("KIS 외국인·기관 수급 조회 실패 ({} {}): {}",
+                    inv, buySide ? "순매수" : "순매도", e.toString());
+            return List.of();
+        }
+    }
+
+    /**
+     * 외국인+기관 동시매매(양매수/양매도) 판정을 위해 전체(FID_ETC_CLS_CODE=0) 순매수/순매도 상위를 조회한다.
+     * 한 응답 행에 외국인·기관 순매수 거래대금이 함께 오므로, 두 값을 모두 담아 돌려준다.
+     *
+     * @param buySide true면 순매수상위, false면 순매도상위
+     * @return 외국인·기관 순매수대금을 함께 담은 목록(거래대금은 원으로 환산됨). 실패 시 빈 목록.
+     */
+    public List<InvestorPairItem> investorFlowDual(boolean buySide) {
+        try {
+            throttleFiCall();   // 유량제한 회피 — 호출 간 최소 간격 확보(특히 모의 도메인)
+            String query = "FID_COND_MRKT_DIV_CODE=V"
+                    + "&FID_COND_SCR_DIV_CODE=16449"
+                    + "&FID_INPUT_ISCD=0000"
+                    + "&FID_DIV_CLS_CODE=1"
+                    + "&FID_RANK_SORT_CLS_CODE=" + (buySide ? "0" : "1")
+                    + "&FID_ETC_CLS_CODE=0";                 // 0: 전체(외국인·기관 합산 기준 정렬)
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + FOREIGN_INSTITUTION_TOTAL_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_FOREIGN_INSTITUTION_TOTAL)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            return parseInvestorPair(response.body());
+        } catch (Exception e) {
+            log.warn("KIS 동시매매 수급 조회 실패 ({}): {}", buySide ? "순매수" : "순매도", e.toString());
             return List.of();
         }
     }
@@ -420,6 +553,146 @@ public class KisClient {
             log.warn("KIS 거래대금순위 파싱 실패: {}", e.toString());
         }
         return result;
+    }
+
+    /**
+     * 외국인·기관 매매종목가집계 응답 JSON을 파싱한다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성)
+     * 종목코드는 mksc_shrn_iscd, 순매수 거래대금은 투자자별 필드(외국인 frgn_ntby_tr_pbmn / 기관 orgn_ntby_tr_pbmn).
+     */
+    static List<InvestorFlowItem> parseInvestorFlow(String json, Investor inv) {
+        List<InvestorFlowItem> result = new ArrayList<>();
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                String rtCd = root.path("rt_cd").asText();
+                String msg = root.path("msg1").asText();
+                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
+                    log.error("KIS 외국인·기관 수급 거부: rt_cd={} msg={} — 권한/도메인(실전) 확인", rtCd, msg);
+                } else {
+                    log.warn("KIS 외국인·기관 수급 비정상 응답: rt_cd={} msg={}", rtCd, msg);
+                }
+                return result;
+            }
+            for (JsonNode n : root.path("output")) {
+                String code = n.path("mksc_shrn_iscd").asText("").trim();
+                if (code.isEmpty()) continue;
+                result.add(new InvestorFlowItem(
+                        code,
+                        n.path("hts_kor_isnm").asText("").trim(),
+                        parseLong(n.path(inv.amountField).asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
+                        parseDouble(n.path("prdy_ctrt").asText())));
+            }
+        } catch (Exception e) {
+            log.warn("KIS 외국인·기관 수급 파싱 실패: {}", e.toString());
+        }
+        return result;
+    }
+
+    /**
+     * 동시매매 판정용 — 한 행에서 외국인·기관 순매수 거래대금을 함께 파싱한다. rt_cd!="0"이면 빈 목록.
+     * 거래대금은 백만원→원으로 환산해 담는다. (네트워크 분리 — 테스트용 패키지 가시성)
+     */
+    static List<InvestorPairItem> parseInvestorPair(String json) {
+        List<InvestorPairItem> result = new ArrayList<>();
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                String rtCd = root.path("rt_cd").asText();
+                String msg = root.path("msg1").asText();
+                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
+                    log.error("KIS 동시매매 수급 거부: rt_cd={} msg={} — 권한/도메인(실전) 확인", rtCd, msg);
+                } else {
+                    log.warn("KIS 동시매매 수급 비정상 응답: rt_cd={} msg={}", rtCd, msg);
+                }
+                return result;
+            }
+            for (JsonNode n : root.path("output")) {
+                String code = n.path("mksc_shrn_iscd").asText("").trim();
+                if (code.isEmpty()) continue;
+                result.add(new InvestorPairItem(
+                        code,
+                        n.path("hts_kor_isnm").asText("").trim(),
+                        parseLong(n.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
+                        parseLong(n.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,
+                        parseDouble(n.path("prdy_ctrt").asText())));
+            }
+        } catch (Exception e) {
+            log.warn("KIS 동시매매 수급 파싱 실패: {}", e.toString());
+        }
+        return result;
+    }
+
+    /**
+     * 종목별 투자자 '확정' 순매수 거래대금(원) — inquire-investor(FHKST01010900) output[0](당일)에서 외국인·기관을 읽는다.
+     * 가집계(FHPTJ04400000, 추정·14:30 동결)와 달리 증권사 화면의 마감 후 확정 수급과 같다. 마감 후 호출해야 당일 확정값.
+     * 한 응답에 외국인·기관이 함께 오므로, 수급 랭킹을 확정치로 재구성할 때 종목당 1회 호출이면 된다.
+     *
+     * @param code 종목코드(6자리)
+     * @return 외국인·기관 확정 순매수대금(원). 실패·빈 응답·rt_cd!="0"이면 null.
+     */
+    public InvestorConfirmed inquireInvestorConfirmed(String code) {
+        try {
+            throttleFiCall();   // 유량제한 회피 — 가집계와 같은 간격으로 분산(단일 폴러 스레드)
+            String query = "FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=" + code;
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + INQUIRE_INVESTOR_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_INQUIRE_INVESTOR)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            return parseInvestorConfirmed(response.body());
+        } catch (Exception e) {
+            log.warn("KIS 종목별 투자자 확정 수급 조회 실패 ({}): {}", code, e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * inquire-investor 응답에서 당일(output[0]) 외국인·기관 순매수 거래대금을 읽는다.
+     * 거래대금 단위는 가집계와 동일하게 백만원으로 보고 원으로 환산한다({@link #NTBY_PBMN_UNIT_WON}).
+     * rt_cd!="0"이거나 output이 비면 null. (네트워크 분리 — 테스트용 패키지 가시성)
+     */
+    static InvestorConfirmed parseInvestorConfirmed(String json) {
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                log.warn("KIS 종목별 투자자 확정 수급 비정상 응답: rt_cd={} msg={}",
+                        root.path("rt_cd").asText(), root.path("msg1").asText());
+                return null;
+            }
+            JsonNode out = root.path("output");
+            if (!out.isArray() || out.isEmpty()) return null;
+            JsonNode row = out.get(0);   // 최신 영업일(마감 후=당일 확정)
+            return new InvestorConfirmed(
+                    row.path("stck_bsop_date").asText("").trim(),
+                    parseLong(row.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,
+                    parseLong(row.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON);
+        } catch (Exception e) {
+            log.warn("KIS 종목별 투자자 확정 수급 파싱 실패: {}", e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * 직전 가집계 호출 이후 {@link #FI_CALL_MIN_INTERVAL_MS}가 지나도록 대기한다 — 연속 호출의 유량제한(EGW00201) 회피.
+     * 폴러 단일 스레드에서만 호출되고, 다른 스케줄 작업(급등 폴링 등)은 비활성/한가하므로 잠깐의 sleep은 안전하다.
+     */
+    private void throttleFiCall() {
+        long wait = FI_CALL_MIN_INTERVAL_MS - (System.currentTimeMillis() - lastFiCallAt);
+        if (wait > 0) {
+            try {
+                Thread.sleep(wait);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        lastFiCallAt = System.currentTimeMillis();
     }
 
     // ---- 토큰 관리 ----

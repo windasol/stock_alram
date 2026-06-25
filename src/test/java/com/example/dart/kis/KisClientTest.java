@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KisClientTest {
@@ -109,5 +110,113 @@ class KisClientTest {
     void 거래대금순위_비정상이면_빈목록() {
         assertTrue(KisClient.parseVolumeRank("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
         assertTrue(KisClient.parseVolumeRank("not json").isEmpty());
+    }
+
+    @Test
+    void 외국인_수급_응답을_파싱하고_백만원을_원으로_환산한다() {
+        // 외국인은 frgn_ntby_tr_pbmn 을 읽고, 단위가 백만원이라 ×1,000,000 으로 원 환산한다(orgn 필드는 무시).
+        String json = """
+                {
+                  "rt_cd": "0", "msg1": "정상처리",
+                  "output": [
+                    { "mksc_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자",
+                      "prdy_ctrt": "2.1",
+                      "frgn_ntby_tr_pbmn": "360,000",
+                      "orgn_ntby_tr_pbmn": "-5,000" }
+                  ]
+                }
+                """;
+        List<InvestorFlowItem> items = KisClient.parseInvestorFlow(json, KisClient.Investor.FOREIGN);
+        assertEquals(1, items.size());
+        InvestorFlowItem it = items.get(0);
+        assertEquals("005930", it.code());
+        assertEquals("삼성전자", it.name());
+        assertEquals(360_000L * 1_000_000L, it.netValueWon());   // 3,600억
+        assertEquals(2.1, it.changePct());
+    }
+
+    @Test
+    void 기관_수급은_orgn필드를_읽고_순매도는_음수다() {
+        String json = """
+                {
+                  "rt_cd": "0", "msg1": "정상처리",
+                  "output": [
+                    { "mksc_shrn_iscd": "000660", "hts_kor_isnm": "SK하이닉스",
+                      "prdy_ctrt": "-1.5",
+                      "frgn_ntby_tr_pbmn": "1,000",
+                      "orgn_ntby_tr_pbmn": "-98,700" }
+                  ]
+                }
+                """;
+        List<InvestorFlowItem> items = KisClient.parseInvestorFlow(json, KisClient.Investor.INSTITUTION);
+        assertEquals(1, items.size());
+        assertEquals(-98_700L * 1_000_000L, items.get(0).netValueWon());   // -987억
+        assertEquals(-1.5, items.get(0).changePct());
+    }
+
+    @Test
+    void 외국인_기관_수급_비정상이면_빈목록() {
+        assertTrue(KisClient.parseInvestorFlow(
+                "{\"rt_cd\":\"1\",\"msg1\":\"오류\"}", KisClient.Investor.FOREIGN).isEmpty());
+        assertTrue(KisClient.parseInvestorFlow("not json", KisClient.Investor.FOREIGN).isEmpty());
+    }
+
+    @Test
+    void 동시매매_응답에서_외국인_기관_거래대금을_함께_파싱한다() {
+        // 한 행에 frgn·orgn 순매수대금이 함께 — 둘 다 백만원→원 환산.
+        String json = """
+                {
+                  "rt_cd": "0", "msg1": "정상처리",
+                  "output": [
+                    { "mksc_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자",
+                      "prdy_ctrt": "1.8",
+                      "frgn_ntby_tr_pbmn": "120,000",
+                      "orgn_ntby_tr_pbmn": "80,000" }
+                  ]
+                }
+                """;
+        List<InvestorPairItem> items = KisClient.parseInvestorPair(json);
+        assertEquals(1, items.size());
+        InvestorPairItem it = items.get(0);
+        assertEquals("삼성전자", it.name());
+        assertEquals(120_000L * 1_000_000L, it.frgnWon());   // 1,200억
+        assertEquals(80_000L * 1_000_000L, it.orgnWon());    // 800억
+        assertEquals(200_000L * 1_000_000L, it.sumWon());    // 합계 2,000억
+    }
+
+    @Test
+    void 동시매매_비정상이면_빈목록() {
+        assertTrue(KisClient.parseInvestorPair("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
+        assertTrue(KisClient.parseInvestorPair("not json").isEmpty());
+    }
+
+    @Test
+    void 종목별_확정수급은_당일행_외국인_기관을_백만원에서_원으로_환산한다() {
+        // inquire-investor 는 output 이 일자별 배열(최신=맨앞). 당일 행에서 외국인·기관 거래대금을 읽고 ×1,000,000.
+        // NAVER 사례: 기관 순매도(-2,304 백만원=-23억), 외국인 순매수(+38,931 백만원=+389억).
+        String json = """
+                {
+                  "rt_cd": "0", "msg1": "정상처리",
+                  "output": [
+                    { "stck_bsop_date": "20260625",
+                      "frgn_ntby_tr_pbmn": "38,931", "orgn_ntby_tr_pbmn": "-2,304" },
+                    { "stck_bsop_date": "20260624",
+                      "frgn_ntby_tr_pbmn": "100", "orgn_ntby_tr_pbmn": "200" }
+                  ]
+                }
+                """;
+        InvestorConfirmed c = KisClient.parseInvestorConfirmed(json);
+        assertEquals("20260625", c.date());
+        assertEquals(38_931L * 1_000_000L, c.foreignWon());      // +389억
+        assertEquals(-2_304L * 1_000_000L, c.institutionWon());  // -23억
+        assertEquals(-2_304L * 1_000_000L, c.netWon(KisClient.Investor.INSTITUTION));
+        assertEquals(38_931L * 1_000_000L, c.netWon(KisClient.Investor.FOREIGN));
+    }
+
+    @Test
+    void 종목별_확정수급_비정상이거나_빈output이면_null() {
+        assertNull(KisClient.parseInvestorConfirmed("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}"));
+        assertNull(KisClient.parseInvestorConfirmed("not json"));
+        assertNull(KisClient.parseInvestorConfirmed("{\"rt_cd\":\"0\",\"output\":[]}"));
     }
 }

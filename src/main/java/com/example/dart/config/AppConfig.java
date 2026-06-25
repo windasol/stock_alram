@@ -46,6 +46,8 @@ public record AppConfig(
         int kisCooldownMin,
         String kisMarketDivCode,
         int kisSectorSummaryMin,
+        int kisInvestorFlowMin,
+        boolean kisGainerAlertEnabled,
         boolean kisPaper,
         String webexKisRoomId,
         String discordKisChannelId,
@@ -237,6 +239,10 @@ public record AppConfig(
         String kisMarketDivCode   = resolveOrDefault(dotenv, "KIS_MARKET_DIV_CODE", "J").trim().toUpperCase();
         // 급등 종목들의 KRX 업종을 집계해 N분마다 섹터 요약을 보낸다. 0이면 비활성. 기본 10분.
         int kisSectorSummaryMin   = Integer.parseInt(resolveOrDefault(dotenv, "KIS_SECTOR_SUMMARY_MIN", "10"));
+        // 장중 외국인·기관 순매수/순매도 상위 종목(가집계)을 N분마다 보낸다. 0이면 비활성. 기본 10분.
+        int kisInvestorFlowMin    = Integer.parseInt(resolveOrDefault(dotenv, "KIS_INVESTOR_FLOW_MIN", "10"));
+        // 급등(개별 종목) 알림 활성 여부. false면 급등 알림을 끈다(수급 랭킹만 운용할 때). 기본 true.
+        boolean kisGainerAlertEnabled = Boolean.parseBoolean(resolveOrDefault(dotenv, "KIS_GAINER_ALERT_ENABLED", "true"));
         // 모의투자(paper) 앱키 여부. true면 모의 도메인(openapivts:29443)을 쓴다 — 모의 앱키는 실전 도메인에서
         // 시세조회(inquire-price)가 EGW02004로 거부돼 업종 분류가 전부 '미분류'가 되므로 키 종류에 맞춰야 한다.
         boolean kisPaper          = Boolean.parseBoolean(resolveOrDefault(dotenv, "KIS_PAPER", "false"));
@@ -314,7 +320,8 @@ public record AppConfig(
                 newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec,
                 kisAppKey, kisAppSecret, kisPollIntervalSec,
                 kisMinChangePct, kisCooldownMin,
-                kisMarketDivCode, kisSectorSummaryMin, kisPaper, webexKisRoomId, discordKisChannelId,
+                kisMarketDivCode, kisSectorSummaryMin, kisInvestorFlowMin, kisGainerAlertEnabled,
+                kisPaper, webexKisRoomId, discordKisChannelId,
                 marketReportEnabled, marketReportIntervalMin,
                 llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel);
     }
