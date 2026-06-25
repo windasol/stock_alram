@@ -16,3 +16,4 @@ disclosure_price_stats.jsonl
 app.lock
 bash.exe.stackdump
 grep.exe.stackdump
+*.ps1
