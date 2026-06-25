@@ -244,10 +244,10 @@ public record AppConfig(
         String webexKisRoomId      = resolve(dotenv, "WEBEX_KIS_ROOM_ID");
         String discordKisChannelId = resolve(dotenv, "DISCORD_KIS_CHANNEL_ID");
 
-        // 장 흐름 분석 리포트 — KIS 거래대금·급등 데이터를 모아 로컬 LLM(Ollama)으로 한국어 요약을 만들어
-        // N분마다 보낸다. KIS가 활성일 때만 동작한다. Ollama 설치·모델 준비 전엔 기본 비활성(false)이라
-        // 죽은 엔드포인트를 폴링하지 않는다. 1시간 주기가 기본 — CPU 추론이 느려도 무방한 호흡.
-        boolean marketReportEnabled  = Boolean.parseBoolean(resolveOrDefault(dotenv, "MARKET_REPORT_ENABLED", "false"));
+        // 장 흐름 분석 리포트 — KIS 거래대금·급등 데이터를 모아 LLM(Gemini/Ollama)으로 한국어 요약을 만들어
+        // N분마다 보낸다. KIS가 활성이고 LLM 키가 있을 때만 의미가 있다. 기본 활성(true) — 끄려면
+        // 환경변수/.env에 MARKET_REPORT_ENABLED=false 를 명시한다. (키 없으면 호출이 실패해도 안전하게 건너뜀)
+        boolean marketReportEnabled  = Boolean.parseBoolean(resolveOrDefault(dotenv, "MARKET_REPORT_ENABLED", "true"));
         int marketReportIntervalMin  = Integer.parseInt(resolveOrDefault(dotenv, "MARKET_REPORT_INTERVAL_MIN", "60"));
         // 요약 생성 공급자 — gemini(클라우드, 무료한도·렉없음) 또는 ollama(로컬, 무료·PC부하).
         String llmProvider           = resolveOrDefault(dotenv, "LLM_PROVIDER", "gemini").trim().toLowerCase();
