@@ -66,7 +66,7 @@ public class DisclosurePriceTracker {
     /** 횡보/유의미 변동을 가르는 임계(%). 이보다 작은 변동은 "안 움직였다"로 본다. */
     private static final double FLAT_EPS_PCT = 0.5;
 
-    /** 시총 등 다른 조회 일관성을 위해 보관(현재 추적 분석엔 분봉만 쓴다). */
+    /** 표기 %의 기준이 되는 전일종가 조회용(previousCloseWon). 시총 등 다른 조회 일관성도 겸한다. */
     private final StockQuoteClient quoteClient;
     private final KisClient kisClient;
     private final Notifier notifier;
@@ -133,15 +133,17 @@ public class DisclosurePriceTracker {
             if (candles.isEmpty() && !"J".equals(marketDiv)) {
                 candles = kisClient.minuteCandles(d.stockCode(), endHms, "J");
             }
-            Stats st = computeStats(candles, t0Min, fromMin, toMin);
+            // 표기 %의 기준 = 전일종가(당일 등락률). 조회 실패 시 0 → computeStats가 기준가 대비로 폴백.
+            long prdyClose = quoteClient.previousCloseWon(d.stockCode()).orElse(0L);
+            Stats st = computeStats(candles, t0Min, fromMin, toMin, prdyClose);
             if (st == null) {
                 log.warn("주가 추적 생략(분봉 부족 — NXT 연장세션·데이터 없음): {} {} - {}",
                         d.stockCode(), d.corpName(), d.reportNm());
                 return;
             }
 
-            log.info("주가 추적 종료 [{}] {} — 기준가 {}원(공시 {}분 전) / 종료 {}%({}분) / 고점 {}%({}분) / 저점 {}%({}분) / {}",
-                    d.stockCode(), d.corpName(), st.baseline(), st.baselineOffsetMin(),
+            log.info("주가 추적 종료 [{}] {} — 전일종가 {}원/기준가 {}원(공시 {}분 전) / 종료 {}%({}분) / 고점 {}%({}분) / 저점 {}%({}분) / {} (%=전일종가 대비 등락률)",
+                    d.stockCode(), d.corpName(), st.prdyClose(), st.baseline(), st.baselineOffsetMin(),
                     round1(st.endPct()), st.endMin(), round1(st.mfePct()), st.peakMin(),
                     round1(st.maePct()), st.troughMin(), st.pattern());
 
@@ -154,12 +156,22 @@ public class DisclosurePriceTracker {
 
     /**
      * 분봉 목록에서 통계를 낸다(순수 함수 — 네트워크 분리, 테스트용 패키지 가시성).
+     *
+     * 표기 %(시작가·종료가·고점·저점)는 <b>전일종가(prdyClose) 대비 당일 등락률</b>이다 — 사용자가 종목 화면에서
+     * 보는 그 %. prdyClose가 0(조회 실패)이면 기준가 대비로 폴백한다.
+     *
+     * 단, 패턴 분류는 전일종가가 아닌 <b>기준가(공시 PRE_MIN분 전 종가) 대비 움직임</b>으로 본다 — classify()의
+     * 임계(±FLAT_EPS_PCT)에 -6%대 당일 등락률을 그대로 넣으면 멀쩡한 횡보가 "계속 하락"으로 오분류되기 때문.
+     * 즉 "지금 얼마인지(표기)"와 "공시 후 어떻게 움직였는지(패턴)"의 기준점을 분리한다.
+     *
      * 기준가 = 공시 PRE_MIN분 전 봉의 종가(없으면 창 내 가장 이른 봉). 고점/저점/종료가는
      * 공시 시점 이후 구간 [t0Min, toMin]에서만 본다(공시 전 봉은 기준가용일 뿐).
      *
+     * @param prdyClose 전일종가(원). 0이면 기준가 대비로 폴백.
      * @return 통계. 창에 봉이 없거나 공시 후 봉이 없으면 null(분석 생략).
      */
-    static Stats computeStats(List<MinuteCandle> candles, LocalTime t0Min, LocalTime fromMin, LocalTime toMin) {
+    static Stats computeStats(List<MinuteCandle> candles, LocalTime t0Min, LocalTime fromMin, LocalTime toMin,
+                              long prdyClose) {
         TreeMap<LocalTime, MinuteCandle> byTime = new TreeMap<>();
         for (MinuteCandle c : candles) {
             if (!c.time().isBefore(fromMin) && !c.time().isAfter(toMin)) byTime.put(c.time(), c);
@@ -179,7 +191,6 @@ public class DisclosurePriceTracker {
         long endMin = ChronoUnit.MINUTES.between(t0Min, post.lastKey());
 
         long discPrice = post.firstEntry().getValue().close();   // 공시 시점(분) 가격 = 시작가
-        double discPct = pct(discPrice, baseline);               // 공시 직전(기준가) 대비 = 이미 오른 폭
 
         long peakPrice = Long.MIN_VALUE, troughPrice = Long.MAX_VALUE;
         LocalTime peakTime = post.firstKey(), troughTime = post.firstKey();
@@ -193,20 +204,27 @@ public class DisclosurePriceTracker {
 
         long peakMin = ChronoUnit.MINUTES.between(t0Min, peakTime);
         long troughMin = ChronoUnit.MINUTES.between(t0Min, troughTime);
-        double endPct = pct(endPrice, baseline);
-        double mfePct = pct(peakPrice, baseline);
-        double maePct = pct(troughPrice, baseline);
-        String pattern = classify(mfePct, maePct, endPct, peakMin * 60, troughMin * 60);
 
-        return new Stats(baseline, baselineOffsetMin, discPrice, discPct, endPrice, endMin, endPct,
+        // 표기 %의 기준 = 전일종가(당일 등락률). 조회 실패(0)면 기준가로 폴백.
+        long dispBase = prdyClose > 0 ? prdyClose : baseline;
+        double discPct = pct(discPrice, dispBase);
+        double endPct = pct(endPrice, dispBase);
+        double mfePct = pct(peakPrice, dispBase);
+        double maePct = pct(troughPrice, dispBase);
+
+        // 패턴 분류는 공시 직전(기준가) 대비 움직임으로 — 당일 등락률을 넣으면 임계가 깨진다.
+        String pattern = classify(pct(peakPrice, baseline), pct(troughPrice, baseline),
+                pct(endPrice, baseline), peakMin * 60, troughMin * 60);
+
+        return new Stats(prdyClose, baseline, baselineOffsetMin, discPrice, discPct, endPrice, endMin, endPct,
                 mfePct, peakPrice, peakMin, peakTime,
                 maePct, troughPrice, troughMin, troughTime, pattern);
     }
 
     /**
-     * 종료 메시지 조립. 모든 %의 기준은 공시 2분 전 가격(라벨로 노출하지 않는 숨은 기준점).
-     * 공시 시작 시각·시작가(공시 시점 가격)+기준가 대비 %, 10분 뒤 가격+기준가 대비 %를 한 줄에 보여주고,
-     * 고점/저점도 기준가 대비 %와 실제 시계 시각(예: 10:07)으로 표기한다.
+     * 종료 메시지 조립. 모든 %는 전일종가 대비 당일 등락률(사용자가 종목 화면에서 보는 그 %).
+     * 공시 시작 시각·시작가(공시 시점 가격)+등락률, 10분 뒤 가격+등락률을 한 줄에 보여주고,
+     * 고점/저점도 그 시점의 등락률과 실제 시계 시각(예: 10:07)으로 표기한다.
      */
     private static String composeMessage(Disclosure d, Stats st, ZonedDateTime t0) {
         return String.format(
@@ -233,10 +251,11 @@ public class DisclosurePriceTracker {
             o.put("market", d.marketName());
             o.put("category", category);
             o.put("code", d.stockCode());
-            o.put("baseWon", st.baseline());            // 기준가(공시 N분 전 종가, % 기준점)
+            o.put("prdyCloseWon", st.prdyClose());      // 전일종가(표기 %의 기준, 0이면 기준가로 폴백)
+            o.put("baseWon", st.baseline());            // 기준가(공시 N분 전 종가, 패턴 분류 기준점)
             o.put("baseOffsetMin", st.baselineOffsetMin());
             o.put("discWon", st.discPrice());           // 공시 시점 가격(시작가)
-            o.put("discPct", round1(st.discPct()));     // 공시 시점의 기준가 대비(공시 직전 오른 폭)
+            o.put("discPct", round1(st.discPct()));     // 시작가의 당일 등락률(전일종가 대비)
             o.put("endWon", st.endPrice());
             o.put("endMin", st.endMin());
             o.put("endPct", round1(st.endPct()));
@@ -296,26 +315,28 @@ public class DisclosurePriceTracker {
     }
 
     /**
-     * 공시 후 주가 통계 한 건.
+     * 공시 후 주가 통계 한 건. 모든 %(discPct·endPct·mfePct·maePct)는 전일종가 대비 당일 등락률이다
+     * (prdyClose=0이면 기준가 대비로 폴백). 단 pattern은 기준가 대비 움직임으로 분류한 결과다.
      *
-     * @param baseline          기준가(공시 PRE_MIN분 전 봉 종가, 원) — 모든 %의 숨은 기준점
+     * @param prdyClose         전일종가(원, 표기 %의 기준) — 0이면 기준가로 폴백한 상태
+     * @param baseline          기준가(공시 PRE_MIN분 전 봉 종가, 원) — 패턴 분류 기준점
      * @param baselineOffsetMin 기준가 봉이 공시 시점에서 몇 분 전인지(보통 PRE_MIN)
      * @param discPrice         시작가 = 공시 시점(분) 가격(원)
-     * @param discPct           시작가의 기준가 대비 변동률(공시 직전 이미 오른 폭, %)
+     * @param discPct           시작가의 당일 등락률(전일종가 대비, %)
      * @param endPrice          종료가(공시+창 봉 종가, 원)
      * @param endMin            종료 시점까지 경과(분) — 보통 WINDOW_MIN, 마감에 잘리면 그보다 작음
-     * @param endPct            공시 후 변동률(종료가의 기준가 대비, %)
-     * @param mfePct            최대 상승폭(고점의 기준가 대비, %)
+     * @param endPct            종료가의 당일 등락률(전일종가 대비, %)
+     * @param mfePct            고점의 당일 등락률(전일종가 대비, %)
      * @param peakPrice         고점(원)
      * @param peakMin           고점 발생 시점(공시 기준 경과 분)
      * @param peakAt            고점 발생 시계 시각(예: 10:07)
-     * @param maePct            최대 낙폭(저점의 기준가 대비, %)
+     * @param maePct            저점의 당일 등락률(전일종가 대비, %)
      * @param troughPrice       저점(원)
      * @param troughMin         저점 발생 시점(공시 기준 경과 분)
      * @param troughAt          저점 발생 시계 시각
-     * @param pattern           움직임 패턴
+     * @param pattern           움직임 패턴(기준가 대비 움직임으로 분류)
      */
-    record Stats(long baseline, long baselineOffsetMin, long discPrice, double discPct,
+    record Stats(long prdyClose, long baseline, long baselineOffsetMin, long discPrice, double discPct,
                  long endPrice, long endMin, double endPct,
                  double mfePct, long peakPrice, long peakMin, LocalTime peakAt,
                  double maePct, long troughPrice, long troughMin, LocalTime troughAt, String pattern) {}

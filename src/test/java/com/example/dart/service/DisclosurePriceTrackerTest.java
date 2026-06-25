@@ -66,11 +66,12 @@ class DisclosurePriceTrackerTest {
         assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(18, 0)));   // 애프터마켓
     }
 
-    // computeStats(candles, t0Min, fromMin, toMin) — 분봉 창에서 통계 산출
+    // computeStats(candles, t0Min, fromMin, toMin, prdyClose) — 분봉 창에서 통계 산출.
+    // 표기 %는 전일종가(prdyClose) 대비 당일 등락률, prdyClose=0이면 기준가 대비로 폴백. 패턴은 항상 기준가 대비.
 
     @Test
-    void 기준가는_공시_2분_전_종가_고점저점은_공시후_구간() {
-        // 공시 10:05. 창 [10:03 ~ 10:15]. 기준가 = 10:03 종가 10,000.
+    void 전일종가_0이면_기준가_대비로_폴백() {
+        // prdyClose=0 → 표기 %가 기준가(10:03 종가 10,000) 대비로 떨어진다(기존 동작 보존).
         // 공시 후: +2분 고점 10,600(+6%), +8분 저점 9,700(-3%), +10분 종료 9,800(-2%).
         List<MinuteCandle> candles = List.of(
                 c(10, 3, 10_000, 10_010, 9_990, 10_000),   // 기준가 봉(공시 2분 전)
@@ -80,7 +81,7 @@ class DisclosurePriceTrackerTest {
                 c(10, 15, 9_750, 9_810, 9_760, 9_800));    // +10분 종료
 
         DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
-                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15));
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L);
 
         assertEquals(10_000, st.baseline());
         assertEquals(2, st.baselineOffsetMin());
@@ -101,6 +102,30 @@ class DisclosurePriceTrackerTest {
     }
 
     @Test
+    void 표기는_전일종가_대비_등락률_패턴은_기준가_대비_움직임() {
+        // 사용자 보고 케이스: 전일 대비 -6%로 빠진 상태에서 공시. 공시 후엔 거의 안 움직임(횡보).
+        // 전일종가 200,000 / 기준가(공시 2분 전) 188,000. 공시 후 ±0.2% 안에서만 진동.
+        List<MinuteCandle> candles = List.of(
+                c(10, 3, 188_000, 188_010, 187_990, 188_000),   // 기준가 봉
+                c(10, 5, 188_000, 188_150, 187_990, 188_100),   // 공시 시점(시작가)
+                c(10, 7, 188_100, 188_400, 188_090, 188_200),   // 고점 188,400
+                c(10, 13, 188_200, 188_210, 187_800, 187_900),  // 저점 187,800
+                c(10, 15, 187_900, 188_010, 187_850, 188_000)); // 종료 188,000
+
+        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 200_000L);
+
+        // 표기 %는 전일종가 200,000 대비 — +0.x%가 아니라 실제 당일 등락률(-6%대)로 찍혀야 한다.
+        assertEquals(200_000, st.prdyClose());
+        assertEquals(-5.95, st.discPct(), 0.05);   // (188,100-200,000)/200,000
+        assertEquals(-6.0, st.endPct(), 0.05);     // (188,000-200,000)/200,000
+        assertEquals(-5.8, st.mfePct(), 0.05);     // 고점 188,400
+        assertEquals(-6.1, st.maePct(), 0.05);     // 저점 187,800
+        // 패턴은 기준가(188,000) 대비 움직임으로 — 당일 등락률을 넣었다면 "계속 하락"으로 오분류됐을 것.
+        assertEquals("횡보", st.pattern());
+    }
+
+    @Test
     void 공시_2분전_봉이_없으면_창내_가장_이른_봉을_기준가로() {
         // 10:03 봉이 없음 → 창 내 가장 이른 10:04 봉(종가 9,500)이 기준가, 오프셋 1분.
         List<MinuteCandle> candles = List.of(
@@ -109,7 +134,7 @@ class DisclosurePriceTrackerTest {
                 c(10, 15, 9_650, 9_700, 9_600, 9_680));
 
         DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
-                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15));
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L);
 
         assertEquals(9_500, st.baseline());
         assertEquals(1, st.baselineOffsetMin());
@@ -120,7 +145,7 @@ class DisclosurePriceTrackerTest {
         // 모든 봉이 창 밖(11시대) → null.
         List<MinuteCandle> candles = List.of(c(11, 0, 100, 100, 100, 100));
         assertNull(DisclosurePriceTracker.computeStats(
-                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15)));
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L));
     }
 
     @Test
@@ -128,6 +153,6 @@ class DisclosurePriceTrackerTest {
         // 기준가 봉만 있고 공시 시점 이후 봉이 없음 → null.
         List<MinuteCandle> candles = List.of(c(10, 3, 10_000, 10_010, 9_990, 10_000));
         assertNull(DisclosurePriceTracker.computeStats(
-                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15)));
+                candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L));
     }
 }
