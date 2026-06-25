@@ -196,7 +196,7 @@ public class DisclosurePriceTracker {
         double endPct = pct(endPrice, baseline);
         double mfePct = pct(peakPrice, baseline);
         double maePct = pct(troughPrice, baseline);
-        String pattern = classify(mfePct, maePct, peakMin * 60, troughMin * 60);
+        String pattern = classify(mfePct, maePct, endPct, peakMin * 60, troughMin * 60);
 
         return new Stats(baseline, baselineOffsetMin, discPrice, discPct, endPrice, endMin, endPct,
                 mfePct, peakPrice, peakMin, peakTime,
@@ -267,15 +267,20 @@ public class DisclosurePriceTracker {
 
     /**
      * 움직임 패턴 분류 — "올랐다 내렸나 / 내렸다 올랐나 / 계속 한 방향인가".
-     * 고점·저점이 모두 임계(FLAT_EPS_PCT) 이상 움직였으면 둘 중 먼저 찍은 쪽으로 방향을 정한다.
+     *
+     * 기준가(공시 2분 전) 대비 고점·저점만으로 보면, 고점 찍고 기준가 근처로 되돌려도 기준가를 안 깨면
+     * "계속 상승"으로 잘못 잡힌다. 그래서 종료가가 고점에서 임계(FLAT_EPS_PCT) 이상 되돌렸으면(pullback)
+     * "올랐다 내림", 저점에서 그만큼 되올라왔으면(bounce) "내렸다 오름"으로 본다.
+     *  - 기준가 양쪽을 다 건드린 경우(up&&down): 먼저 찍은 극점으로 방향 결정(기존과 동일).
+     *  - 한쪽만 건드린 경우: 그 극점에서 종료가가 얼마나 되돌렸는지로 반전 여부 판정.
      */
-    static String classify(double mfePct, double maePct, long peakSec, long troughSec) {
+    static String classify(double mfePct, double maePct, double endPct, long peakSec, long troughSec) {
         boolean up = mfePct >= FLAT_EPS_PCT;
         boolean down = maePct <= -FLAT_EPS_PCT;
         if (!up && !down) return "횡보";
-        if (up && !down) return "계속 상승";
-        if (down && !up) return "계속 하락";
-        return peakSec <= troughSec ? "올랐다 내림" : "내렸다 오름";
+        if (up && down) return peakSec <= troughSec ? "올랐다 내림" : "내렸다 오름";
+        if (up) return (mfePct - endPct) >= FLAT_EPS_PCT ? "올랐다 내림" : "계속 상승";
+        return (endPct - maePct) >= FLAT_EPS_PCT ? "내렸다 오름" : "계속 하락";
     }
 
     /** KRX 정규장(09:00~15:30) 밖이면 true — 프리·애프터마켓은 NXT만 거래하므로 통합 분봉이 필요. */

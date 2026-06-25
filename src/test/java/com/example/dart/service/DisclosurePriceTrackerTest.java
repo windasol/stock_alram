@@ -17,31 +17,38 @@ class DisclosurePriceTrackerTest {
         return new MinuteCandle(LocalTime.of(h, m), open, high, low, close);
     }
 
-    // classify(mfePct, maePct, peakSec, troughSec) — mfe>=0(최대상승), mae<=0(최대낙폭)
+    // classify(mfePct, maePct, endPct, peakSec, troughSec) — mfe>=0(최대상승), mae<=0(최대낙폭)
 
     @Test
     void 변동_거의_없으면_횡보() {
-        assertEquals("횡보", DisclosurePriceTracker.classify(0.3, -0.2, 60, 120));
+        assertEquals("횡보", DisclosurePriceTracker.classify(0.3, -0.2, 0.1, 60, 120));
     }
 
     @Test
-    void 오르기만_하면_계속_상승() {
-        assertEquals("계속 상승", DisclosurePriceTracker.classify(4.0, -0.1, 300, 30));
+    void 올라서_고점_근처로_끝나면_계속_상승() {
+        // 고점 +4.0%, 종료 +3.9% — 고점에서 거의 안 내려옴.
+        assertEquals("계속 상승", DisclosurePriceTracker.classify(4.0, -0.1, 3.9, 300, 30));
     }
 
     @Test
-    void 내리기만_하면_계속_하락() {
-        assertEquals("계속 하락", DisclosurePriceTracker.classify(0.2, -3.5, 30, 300));
+    void 내려서_저점_근처로_끝나면_계속_하락() {
+        assertEquals("계속 하락", DisclosurePriceTracker.classify(0.2, -3.5, -3.4, 30, 300));
     }
 
     @Test
     void 고점이_저점보다_먼저면_올랐다_내림() {
-        assertEquals("올랐다 내림", DisclosurePriceTracker.classify(5.0, -2.0, 120, 480));
+        assertEquals("올랐다 내림", DisclosurePriceTracker.classify(5.0, -2.0, -1.0, 120, 480));
     }
 
     @Test
     void 저점이_고점보다_먼저면_내렸다_오름() {
-        assertEquals("내렸다 오름", DisclosurePriceTracker.classify(3.0, -4.0, 480, 120));
+        assertEquals("내렸다 오름", DisclosurePriceTracker.classify(3.0, -4.0, 0.5, 480, 120));
+    }
+
+    @Test
+    void 기준가_안깨도_고점에서_되돌리면_올랐다_내림() {
+        // 우진아이엔에스 케이스: 고점 +5.4% 찍고 +0.6%로 복귀(기준가 밑으론 안 감). 계속 상승이 아님.
+        assertEquals("올랐다 내림", DisclosurePriceTracker.classify(5.4, 0.0, 0.6, 0, 60));
     }
 
     // nxtSession(t) — 정규장 밖(프리·애프터마켓)이면 통합("UN") 분봉이 필요
