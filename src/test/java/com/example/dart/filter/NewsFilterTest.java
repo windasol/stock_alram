@@ -105,13 +105,11 @@ class NewsFilterTest {
     }
 
     @Test
-    void 호재_정정은_통과하되_정정으로_표기() {
-        // 정정 공시도 알리되 헤더에 "[정정]" 태그로 구분한다 — 더 이상 차단하지 않는다.
-        assertCategory("수주공급계약", "[기재정정]단일판매ㆍ공급계약체결");
-        assertCategory("수주공급계약", "[첨부정정]단일판매ㆍ공급계약체결");
-        assertTrue(NewsFilter.isCorrection("[기재정정]단일판매ㆍ공급계약체결"));
-        assertTrue(NewsFilter.isCorrection("[첨부정정]단일판매ㆍ공급계약체결"));
-        assertFalse(NewsFilter.isCorrection("단일판매ㆍ공급계약체결"));
+    void 정정_공시는_전면_제외() {
+        // 정정 공시는 호재 서식이어도 알림에서 제외한다.
+        assertRejected("[기재정정]단일판매ㆍ공급계약체결");
+        assertRejected("[첨부정정]단일판매ㆍ공급계약체결");
+        assertCategory("수주공급계약", "단일판매ㆍ공급계약체결");  // 비정정은 통과
     }
 
     @Test
