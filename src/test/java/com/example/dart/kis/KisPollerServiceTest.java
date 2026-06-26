@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.LocalTime;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -187,6 +188,84 @@ class KisPollerServiceTest {
                 new InvestorPairItem("005930", "삼성전자", 120_000_000_000L, 80_000_000_000L, 1.8));
         String msg = KisPollerService.composeInvestorPair(dualBuy, List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
         assertTrue(msg.contains("(해당 종목 없음)"), msg);
+    }
+
+    @Test
+    void flowPhase는_시각에_따라_추정_KRX확정_NXT확정으로_갈린다() {
+        // 09:00 이전엔 발송 없음(null)
+        assertNull(KisPollerService.flowPhaseAt(LocalTime.of(8, 59)));
+        // 09:00~15:35 추정
+        assertEquals(KisPollerService.FlowPhase.ESTIMATE, KisPollerService.flowPhaseAt(LocalTime.of(9, 0)));
+        assertEquals(KisPollerService.FlowPhase.ESTIMATE, KisPollerService.flowPhaseAt(LocalTime.of(15, 34)));
+        // 15:35~20:05 KRX 확정
+        assertEquals(KisPollerService.FlowPhase.KRX_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(15, 35)));
+        assertEquals(KisPollerService.FlowPhase.KRX_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(20, 4)));
+        // 20:05~ NXT 최종 확정
+        assertEquals(KisPollerService.FlowPhase.NXT_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(20, 5)));
+        assertEquals(KisPollerService.FlowPhase.NXT_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(23, 0)));
+    }
+
+    @Test
+    void 확정_시장구분은_현재시각으로_판단_20시05분이후_NX_그전_J() {
+        assertEquals("J", KisPollerService.confirmedMarketDiv(LocalTime.of(15, 35)));
+        assertEquals("J", KisPollerService.confirmedMarketDiv(LocalTime.of(20, 4)));
+        assertEquals("NX", KisPollerService.confirmedMarketDiv(LocalTime.of(20, 5)));
+        assertEquals("NX", KisPollerService.confirmedMarketDiv(LocalTime.of(23, 0)));
+    }
+
+    @Test
+    void 수급_facts는_업종주석을_붙이고_미선물_거래대금을_포함() {
+        List<InvestorFlowItem> frgnBuys = List.of(
+                new InvestorFlowItem("005930", "삼성전자", 120_000_000_000L, 1.8),
+                new InvestorFlowItem("000660", "SK하이닉스", 80_000_000_000L, 1.2));
+        List<InvestorFlowItem> frgnSells = List.of(
+                new InvestorFlowItem("035720", "카카오", -90_000_000_000L, -1.5));
+        List<InvestorFlowItem> instBuys = List.of(
+                new InvestorFlowItem("373220", "LG에너지솔루션", 50_000_000_000L, 0.9));
+        List<InvestorFlowItem> instSells = List.of();
+        List<InvestorPairItem> dualBuy = List.of(
+                new InvestorPairItem("005930", "삼성전자", 120_000_000_000L, 30_000_000_000L, 1.8));
+        Map<String, String> sectors = Map.of(
+                "005930", "반도체", "000660", "반도체", "373220", "2차전지", "035720", "미분류");
+
+        String facts = KisPollerService.buildFlowFacts(
+                "🌎 **미국 선물** | S&P +0.4%", frgnBuys, frgnSells, instBuys, instSells,
+                dualBuy, "💰 거래대금 섹터 랭킹 ...", sectors);
+
+        // 미선물 한 줄이 맨 앞
+        assertTrue(facts.startsWith("🌎 **미국 선물** | S&P +0.4%"), facts);
+        // 외국인 순매수에 업종 주석 + 금액
+        assertTrue(facts.contains("삼성전자(반도체) +1,200억"), facts);
+        assertTrue(facts.contains("SK하이닉스(반도체) +800억"), facts);
+        // 외국인 순매도
+        assertTrue(facts.contains("순매도: 카카오 -900억"), facts);
+        // 미분류 업종은 괄호 생략(카카오엔 업종 주석 없음)
+        assertFalse(facts.contains("카카오(미분류)"), facts);
+        // 기관 순매도는 비어 "(없음)"
+        assertTrue(facts.contains("[기관] 순매수: LG에너지솔루션(2차전지) +500억"), facts);
+        assertTrue(facts.contains("순매도: (없음)"), facts);
+        // 양매수 종목(금액 없이 종목명+업종)
+        assertTrue(facts.contains("[외국인+기관 양매수] 삼성전자(반도체)"), facts);
+        // 거래대금 랭킹이 뒤에 붙음
+        assertTrue(facts.contains("💰 거래대금 섹터 랭킹"), facts);
+    }
+
+    @Test
+    void 수급_facts는_미선물_거래대금_null이면_생략하고_양매수_없으면_누락() {
+        List<InvestorFlowItem> frgnBuys = List.of(
+                new InvestorFlowItem("005930", "삼성전자", 120_000_000_000L, 1.8));
+        Map<String, String> sectors = Map.of("005930", "반도체");
+
+        String facts = KisPollerService.buildFlowFacts(
+                null, frgnBuys, List.of(), List.of(), List.of(),
+                List.of(), null, sectors);
+
+        // 미선물 없으면 외국인 줄로 시작
+        assertTrue(facts.startsWith("[외국인] 순매수: 삼성전자(반도체) +1,200억"), facts);
+        // 양매수 섹션 없음
+        assertFalse(facts.contains("양매수"), facts);
+        // 거래대금 랭킹 없음
+        assertFalse(facts.contains("거래대금"), facts);
     }
 
     @Test

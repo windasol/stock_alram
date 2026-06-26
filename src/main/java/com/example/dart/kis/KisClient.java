@@ -56,6 +56,9 @@ public class KisClient {
     private static final String INQUIRE_INVESTOR_PATH =
             "/uapi/domestic-stock/v1/quotations/inquire-investor";
     private static final String TR_INQUIRE_INVESTOR = "FHKST01010900";   // 종목별 투자자 매매동향(마감 후 확정)
+    private static final String FRGNMEM_TRADE_ESTIMATE_PATH =
+            "/uapi/domestic-stock/v1/quotations/frgnmem-trade-estimate";
+    private static final String TR_FRGNMEM_TRADE_ESTIMATE = "FHKST644100C0";   // 외국계 매매종목 가집계(HTS [0430], 실시간 추정)
     /**
      * 가집계 순매수 거래대금(frgn/orgn_ntby_tr_pbmn) 단위 — 원이 아니라 백만원이라 원으로 환산해 저장한다.
      * (실측: 응답값 6자리 ≈ 360,000 → 백만원 환산 시 3,600억으로 현실적. 원이면 36만원으로 비현실적.)
@@ -305,6 +308,56 @@ public class KisClient {
             return parseInvestorPair(response.body());
         } catch (Exception e) {
             log.warn("KIS 동시매매 수급 조회 실패 ({}): {}", buySide ? "순매수" : "순매도", e.toString());
+            return List.of();
+        }
+    }
+
+    /**
+     * 외국계 매매종목 가집계(HTS [0430], TR FHKST644100C0) — 외국계 증권사 창구 기준 종목별 외국인 순매수/순매도 상위.
+     * 거래소 가집계(foreign-institution-total, 09:30~14:30 4회 입력·동결)와 달리 장중 더 자주 갱신되는 '외국계 창구'
+     * 실시간 추정치다(키움 실시간 외국인 수급과 같은 계열). 응답은 금액이 아니라 수량(주)이라
+     * 순매수수량(총매수−총매도)×현재가로 원을 근사해 {@link InvestorFlowItem}에 담는다.
+     *
+     * @param marketDiv 시장구분 — "J":KRX(정규장) / "NX":NXT(애프터마켓). (KIS 문서엔 J만 명시 — NX 지원은 실측 확인 필요)
+     * @param buySide   true면 순매수상위(매수순), false면 순매도상위(매도순)
+     * @return 외국인(외국계) 순매수금액(원, 근사) 순 종목 목록. 실패 시 빈 목록.
+     */
+    public List<InvestorFlowItem> foreignMemberEstimate(String marketDiv, boolean buySide) {
+        try {
+            throttleFiCall();   // 유량제한 회피 — 다른 수급 호출과 같은 간격으로 분산
+            String query = "FID_COND_MRKT_DIV_CODE=" + marketDiv
+                    + "&FID_COND_SCR_DIV_CODE=16441"           // 이 엔드포인트 고정값
+                    + "&FID_INPUT_ISCD=0000"                   // 0000: 전체(코스피+코스닥)
+                    + "&FID_RANK_SORT_CLS_CODE=0"              // 0: 금액순
+                    + "&FID_RANK_SORT_CLS_CODE_2=" + (buySide ? "0" : "1");  // 0: 매수순, 1: 매도순
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + FRGNMEM_TRADE_ESTIMATE_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_FRGNMEM_TRADE_ESTIMATE)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            List<InvestorFlowItem> items = parseForeignMemberEstimate(response.body());
+            // [외국계진단] — 0건이면 원본 응답을 찍어 원인(NX 미지원·권한·시간대)을 드러낸다. (특히 NX 실측 확인용)
+            String side = buySide ? "매수순" : "매도순";
+            if (items.isEmpty()) {
+                String body = response.body();
+                log.warn("[외국계진단] {} {} 0건 — 원본응답: {}", marketDiv, side,
+                        body.length() > 700 ? body.substring(0, 700) : body);
+            } else {
+                InvestorFlowItem top = items.get(0);
+                log.info("[외국계진단] {} {} {}건 (1위 {} {}원)", marketDiv, side, items.size(), top.name(), top.netValueWon());
+            }
+            return items;
+        } catch (Exception e) {
+            log.warn("KIS 외국계 매매종목 가집계 조회 실패 ({} {}): {}", marketDiv, buySide ? "매수" : "매도", e.toString());
             return List.of();
         }
     }
@@ -623,17 +676,55 @@ public class KisClient {
     }
 
     /**
+     * 외국계 매매종목 가집계(FHKST644100C0) 응답 파싱. rt_cd!="0"이면 빈 목록.
+     * 종목코드 stck_shrn_iscd, 종목명 hts_kor_isnm. 순매수수량 = 외국계총매수(glob_total_shnu_qty) − 외국계총매도(glob_total_seln_qty),
+     * 금액(원) ≈ 순매수수량 × 현재가(stck_prpr). (네트워크 분리 — 테스트용 패키지 가시성)
+     */
+    static List<InvestorFlowItem> parseForeignMemberEstimate(String json) {
+        List<InvestorFlowItem> result = new ArrayList<>();
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                String rtCd = root.path("rt_cd").asText();
+                String msg = root.path("msg1").asText();
+                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
+                    log.error("KIS 외국계 매매종목 가집계 거부: rt_cd={} msg={} — 권한/도메인(실전)·시장구분(NX) 확인", rtCd, msg);
+                } else {
+                    log.warn("KIS 외국계 매매종목 가집계 비정상 응답: rt_cd={} msg={}", rtCd, msg);
+                }
+                return result;
+            }
+            for (JsonNode n : root.path("output")) {
+                String code = n.path("stck_shrn_iscd").asText("").trim();
+                if (code.isEmpty()) continue;
+                long netQty = parseLong(n.path("glob_total_shnu_qty").asText())
+                        - parseLong(n.path("glob_total_seln_qty").asText());   // 외국계 순매수수량
+                long price = parseLong(n.path("stck_prpr").asText());
+                result.add(new InvestorFlowItem(
+                        code,
+                        n.path("hts_kor_isnm").asText("").trim(),
+                        netQty * price,                                        // 순매수수량 × 현재가 ≈ 순매수금액(원)
+                        parseDouble(n.path("prdy_ctrt").asText())));
+            }
+        } catch (Exception e) {
+            log.warn("KIS 외국계 매매종목 가집계 파싱 실패: {}", e.toString());
+        }
+        return result;
+    }
+
+    /**
      * 종목별 투자자 '확정' 순매수 거래대금(원) — inquire-investor(FHKST01010900) output[0](당일)에서 외국인·기관을 읽는다.
      * 가집계(FHPTJ04400000, 추정·14:30 동결)와 달리 증권사 화면의 마감 후 확정 수급과 같다. 마감 후 호출해야 당일 확정값.
      * 한 응답에 외국인·기관이 함께 오므로, 수급 랭킹을 확정치로 재구성할 때 종목당 1회 호출이면 된다.
      *
-     * @param code 종목코드(6자리)
+     * @param code      종목코드(6자리)
+     * @param marketDiv 시장구분 — "J":KRX(정규장 확정) / "NX":NXT(애프터마켓 최종). (KIS 공식: FID_COND_MRKT_DIV_CODE J/NX만 허용)
      * @return 외국인·기관 확정 순매수대금(원). 실패·빈 응답·rt_cd!="0"이면 null.
      */
-    public InvestorConfirmed inquireInvestorConfirmed(String code) {
+    public InvestorConfirmed inquireInvestorConfirmed(String code, String marketDiv) {
         try {
             throttleFiCall();   // 유량제한 회피 — 가집계와 같은 간격으로 분산(단일 폴러 스레드)
-            String query = "FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=" + code;
+            String query = "FID_COND_MRKT_DIV_CODE=" + marketDiv + "&FID_INPUT_ISCD=" + code;
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + INQUIRE_INVESTOR_PATH + "?" + query))
                     .timeout(Duration.ofSeconds(15))

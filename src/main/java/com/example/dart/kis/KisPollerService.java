@@ -83,12 +83,23 @@ public class KisPollerService {
     /** 외국인+기관 동시매매(양매수/양매도)에서 각각 보여줄 종목 수. */
     private static final int INVESTOR_PAIR_TOP = 30;
     /**
-     * 이 시각(KST) 이후엔 수급을 가집계(추정) 대신 '확정치'(inquire-investor)로 그 날 1회만 발송한다.
-     * 가집계는 14:30에 멈추고 증권사 확정 수급과 자주 어긋나므로, 마감(15:40) 후 확정 반영 여유를 두고 전환한다.
+     * 수급 단계 전환 시각(KST). 가집계(추정)는 09:30~14:30 입력으로 14:30이 마지막이라(KIS 공식),
+     * 정규장 확정 집계 시각(KRX 15:35) 이후엔 가집계 대신 '확정치'(inquire-investor)로 그 날 1회 발송한다.
+     *  - 09:00~15:35 : 가집계 추정 10분 폴링(표 + 분석)
+     *  - 15:35~20:05 : KRX 확정 수급 1회(이후 NXT 라이브 수급은 데이터 소스가 없어 폴링하지 않음)
+     *  - 20:05~      : NXT 최종 확정 집계 시각 — 최종 확정 1회, 이후 중단
      */
-    private static final LocalTime INVESTOR_CONFIRMED_AFTER = LocalTime.of(16, 0);
-    /** 확정 수급을 이미 발송한 날짜(KST). 마감 후 매 틱 재발송 방지 — 단일 폴러 스레드 접근이라 동기화 불필요. */
-    private LocalDate investorConfirmedSentDate = null;
+    private static final LocalTime KRX_CONFIRMED_AFTER = LocalTime.of(15, 35);
+    private static final LocalTime NXT_CONFIRMED_AFTER = LocalTime.of(20, 5);
+    /** KRX 정규장 확정 수급을 발송한 날짜(KST). 당일 재발송 방지 — 단일 폴러 스레드 접근이라 동기화 불필요. */
+    private LocalDate krxConfirmedSentDate = null;
+    /** NXT 최종 확정 수급을 발송한 날짜(KST). 당일 재발송 방지 — 단일 폴러 스레드 접근이라 동기화 불필요. */
+    private LocalDate nxtConfirmedSentDate = null;
+    /**
+     * 직전 수급 분석에 쓴 수급 데이터 시그니처. 가집계는 14:30에 동결되므로 직전과 같으면 LLM 호출을 생략한다.
+     * 단일 폴러 스레드(kis-poller)에서만 접근 — 동기화 불필요. null이면 아직 1회도 분석 안 함.
+     */
+    private Integer lastFlowSignature = null;
 
     private final KisClient client;
     private final Notifier notifier;
@@ -104,8 +115,6 @@ public class KisPollerService {
     private final boolean gainerAlertEnabled;
     /** 장 흐름 분석 리포트용 LLM(Gemini/Ollama). null이면 리포트 비활성. */
     private final LlmClient llm;
-    /** 장 흐름 분석 리포트 주기(분). 0이면 비활성. */
-    private final int reportIntervalMin;
     /** 리포트 '대외 여건'용 미국 선물 조회기. 실패해도 국내 리포트는 계속된다. */
     private final UsFuturesClient usFutures = new UsFuturesClient();
 
@@ -145,8 +154,8 @@ public class KisPollerService {
         this.gainerAlertEnabled = config.kisGainerAlertEnabled();
         this.sectorsFile = sectorsFile;
         // 리포트는 LLM이 주입되고 활성 설정일 때만 동작(둘 중 하나라도 없으면 비활성).
+        // 분석 주기는 수급 랭킹 주기(KIS_INVESTOR_FLOW_MIN)를 따른다 — MARKET_REPORT_INTERVAL_MIN은 더 이상 안 쓴다.
         this.llm = config.marketReportEnabled() ? llm : null;
-        this.reportIntervalMin = config.marketReportIntervalMin();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kis-poller"));
         loadSectors();
     }
@@ -167,16 +176,10 @@ public class KisPollerService {
         if (investorFlowMin > 0) {
             long periodSec = investorFlowMin * 60L;
             // 재시작 즉시 1회 분석·발송(initialDelay=0)한 뒤 주기 반복 — 벽시계 정렬을 두지 않는다.
+            // 수급 랭킹 표 + (LLM 활성 시) 수급 기반 장 흐름 분석이 이 한 사이클에 함께 올라탄다.
             scheduler.scheduleWithFixedDelay(this::investorFlowTick, 0, periodSec, TimeUnit.SECONDS);
-            log.info("KIS 외국인·기관 수급 랭킹 활성 ({}분 주기, 재시작 즉시 발송)", investorFlowMin);
-        }
-
-        if (llm != null && reportIntervalMin > 0) {
-            long periodSec = reportIntervalMin * 60L;
-            long initialDelaySec = periodSec - (Instant.now().getEpochSecond() % periodSec);
-            scheduler.scheduleWithFixedDelay(this::generateReport, initialDelaySec, periodSec, TimeUnit.SECONDS);
-            log.info("장 흐름 분석 리포트 활성 ({}분 주기, 모델 {}, 첫 발송 {}초 후)",
-                    reportIntervalMin, llm.model(), initialDelaySec);
+            log.info("KIS 외국인·기관 수급 랭킹 활성 ({}분 주기, 재시작 즉시 발송){}",
+                    investorFlowMin, llm != null ? " + 수급 기반 장 흐름 분석(" + llm.model() + ")" : "");
         }
     }
 
@@ -407,56 +410,132 @@ public class KisPollerService {
         return composeTurnoverRanking(resolved, label, time);
     }
 
-    /**
-     * 장 흐름 분석 리포트 — 거래대금 섹터 랭킹 + 급등 섹터 분포를 '실측 데이터'로 모아
-     * 로컬 LLM(Ollama)에 넘겨 한국어 요약을 받아 1건 발송한다. 장중에만 동작.
-     * LLM이 숫자를 지어내지 않도록 데이터는 코드가 집계하고, 모델은 서술만 한다(하이브리드).
-     */
-    private void generateReport() {
-        ZonedDateTime now = ZonedDateTime.now(KST);
-        Session sess = currentSession(now);
-        if (sess == null) return;
-        LocalTime time = now.toLocalTime();
+    /** 수급 기반 장 흐름 분석에서 LLM에 넣을 외국인·기관 순매수/순매도 상위 종목 수(메시지 토큰 절약). */
+    private static final int FLOW_REPORT_TOP = 10;
 
-        StringBuilder facts = new StringBuilder();
-        String turnover = buildTurnoverRanking(sess, sess.label, time);
-        if (turnover != null) facts.append(turnover);
-        String sector = buildSectorSummary(sess, sess.label, time);
-        if (sector != null) {
-            if (facts.length() > 0) facts.append("\n\n");
-            facts.append(sector);
-        }
-        if (facts.length() == 0) {
-            log.info("장 흐름 리포트 건너뜀 — 데이터 없음 ({})", sess.label);
+    /**
+     * 수급 기반 장 흐름 분석 — 외국인·기관 수급 순위 + 거래대금 섹터 랭킹 + 미국 선물을 '실측 데이터'로 모아
+     * LLM(Gemini/Ollama)에 넘겨 "현재 시장 흐름 + 강한 섹터"를 한국어로 받아 1건 발송한다. 장중에만 동작.
+     * LLM이 숫자를 지어내지 않도록 데이터는 코드가 집계하고, 모델은 서술만 한다(하이브리드).
+     *
+     * 수급 리스트는 호출부(틱)에서 1회 조회한 raw를 그대로 받아 표와 공유한다(중복 조회 없음).
+     * 가집계는 14:30에 동결되므로 수급 데이터가 직전과 동일하면(시그니처 일치) LLM 호출을 생략한다.
+     */
+    private void generateFlowReport(Session sess, LocalTime time,
+                                    List<InvestorFlowItem> frgnBuys, List<InvestorFlowItem> frgnSells,
+                                    List<InvestorFlowItem> instBuys, List<InvestorFlowItem> instSells,
+                                    List<InvestorPairItem> dualBuy) {
+        if (llm == null) return;
+
+        List<InvestorFlowItem> fb = frgnBuys.stream().limit(FLOW_REPORT_TOP).toList();
+        List<InvestorFlowItem> fs = frgnSells.stream().limit(FLOW_REPORT_TOP).toList();
+        List<InvestorFlowItem> ib = instBuys.stream().limit(FLOW_REPORT_TOP).toList();
+        List<InvestorFlowItem> is = instSells.stream().limit(FLOW_REPORT_TOP).toList();
+        List<InvestorPairItem> db = dualBuy.stream().limit(FLOW_REPORT_TOP).toList();
+        if (fb.isEmpty() && fs.isEmpty() && ib.isEmpty() && is.isEmpty()) {
+            log.info("수급 분석 건너뜀 — 수급 데이터 없음 ({})", sess.label);
             return;
         }
 
-        // 대외 여건(미국 선물)을 맨 앞에 덧붙인다 — 있으면 LLM이 국내 흐름과 엮어 서술한다.
-        // 국내 데이터가 있어야만 리포트를 내므로(위 게이트), 선물은 보조 정보로만 더한다.
-        String usFuturesLine = usFutures.summaryLine();
-        String factsBlock = usFuturesLine != null ? usFuturesLine + "\n\n" + facts : facts.toString();
+        // 동결 스킵 — 수급 부분(외국인·기관·양매수)만으로 시그니처를 잡는다.
+        // 거래대금·미선물은 계속 변하므로 시그니처에 넣지 않는다(넣으면 동결 구간에도 매번 달라져 스킵이 무력화).
+        int signature = flowSignature(fb, fs, ib, is, db);
+        if (Integer.valueOf(signature).equals(lastFlowSignature)) {
+            log.info("수급 분석 건너뜀 — 수급 변동 없음(가집계 동결, {})", sess.label);
+            return;
+        }
 
-        String narrative = llm.chat(REPORT_SYSTEM_PROMPT, REPORT_USER_PROMPT + "\n\n" + factsBlock);
-        if (narrative == null) return;  // LLM 실패(네트워크·키·모델·타임아웃) — 이미 로깅됨, 리포트만 거른다
+        // 강한 섹터 판단 근거 — 수급 상위 종목의 업종을 해소(기존 캐시·유량제한 회피 재사용).
+        List<String> codes = new ArrayList<>();
+        for (InvestorFlowItem it : fb) codes.add(it.code());
+        for (InvestorFlowItem it : fs) codes.add(it.code());
+        for (InvestorFlowItem it : ib) codes.add(it.code());
+        for (InvestorFlowItem it : is) codes.add(it.code());
+        for (InvestorPairItem it : db) codes.add(it.code());
+        Map<String, String> sectorByCode = resolveSectors(codes);
+
+        String turnover = buildTurnoverRanking(sess, sess.label, time);  // 거래대금 섹터 랭킹(null 가능)
+        String usFuturesLine = usFutures.summaryLine();                  // 대외 여건(null 가능)
+        String facts = buildFlowFacts(usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
+
+        // 데이터가 새로 잡혔으니 시그니처를 갱신해 둔다(LLM 실패해도 동일 데이터로 매 틱 재시도하지 않는다).
+        lastFlowSignature = signature;
+
+        String narrative = llm.chat(FLOW_SYSTEM_PROMPT, FLOW_USER_PROMPT + "\n\n" + facts);
+        if (narrative == null) return;  // LLM 실패(네트워크·키·모델·타임아웃) — 이미 로깅됨, 분석만 거른다
         String msg = String.format("📈 **장 흐름 분석** | %s %s%n%n%s",
                 sess.label, SUMMARY_TIME_FMT.format(time), narrative);
         try {
             notifier.send(msg);
-            log.info("장 흐름 리포트 발송 ({})", sess.label);
+            log.info("수급 기반 장 흐름 분석 발송 ({})", sess.label);
         } catch (Exception e) {
-            log.warn("장 흐름 리포트 전송 실패", e);
+            log.warn("수급 기반 장 흐름 분석 전송 실패", e);
         }
     }
 
-    private static final String REPORT_SYSTEM_PROMPT =
-            "너는 한국 주식시장 분석가다. 아래 '실측 데이터'만 근거로 장 흐름을 한국어로 요약한다. "
-            + "데이터에 없는 숫자·종목·섹터를 절대 지어내지 마라. 미국 선물 등 대외 여건이 주어지면 "
-            + "국내 자금 흐름과 연결해 설명한다. 과장·투자권유 없이 사실 위주로, "
-            + "어느 섹터로 자금이 몰리는지와 전반적 시장 분위기를 4~6문장으로 간결하게 쓴다.";
+    /** 수급 리스트(외국인·기관 매수/매도 + 양매수)의 종목·금액으로 동결 판별용 시그니처를 만든다. (가집계 동결 스킵용) */
+    private static int flowSignature(List<InvestorFlowItem> fb, List<InvestorFlowItem> fs,
+                                     List<InvestorFlowItem> ib, List<InvestorFlowItem> is,
+                                     List<InvestorPairItem> db) {
+        StringBuilder sb = new StringBuilder();
+        for (List<InvestorFlowItem> lst : List.of(fb, fs, ib, is)) {
+            for (InvestorFlowItem it : lst) sb.append(it.code()).append(':').append(it.netValueWon()).append('|');
+            sb.append('#');
+        }
+        for (InvestorPairItem it : db) sb.append(it.code()).append(':').append(it.sumWon()).append('|');
+        return sb.toString().hashCode();
+    }
 
-    private static final String REPORT_USER_PROMPT =
-            "다음은 지금 시점의 미국 선물 등락률, 거래대금 섹터 랭킹, 급등 종목 섹터 분포다. "
-            + "이걸 바탕으로 장 흐름을 요약해줘.";
+    /**
+     * 수급 기반 LLM 분석에 넣을 '실측 데이터' 블록을 만든다(전송·호출 없음 — 순수 함수, 테스트용).
+     * 미선물 한 줄(있으면) → 외국인/기관 순매수·순매도(종목명(업종) +금액, TOP) → 외국인+기관 양매수 →
+     * 거래대금 섹터 랭킹(있으면) 순. 업종은 sectorByCode에서 붙이되 미상·미분류면 생략한다.
+     */
+    static String buildFlowFacts(String usFuturesLine,
+                                 List<InvestorFlowItem> frgnBuys, List<InvestorFlowItem> frgnSells,
+                                 List<InvestorFlowItem> instBuys, List<InvestorFlowItem> instSells,
+                                 List<InvestorPairItem> dualBuy, String turnoverRanking,
+                                 Map<String, String> sectorByCode) {
+        StringBuilder sb = new StringBuilder();
+        if (usFuturesLine != null) sb.append(usFuturesLine).append("\n\n");
+        sb.append("[외국인] 순매수: ").append(flowLine(frgnBuys, sectorByCode));
+        sb.append("\n         순매도: ").append(flowLine(frgnSells, sectorByCode));
+        sb.append("\n[기관] 순매수: ").append(flowLine(instBuys, sectorByCode));
+        sb.append("\n       순매도: ").append(flowLine(instSells, sectorByCode));
+        if (!dualBuy.isEmpty()) {
+            String dual = dualBuy.stream()
+                    .map(it -> it.name() + sectorTag(it.code(), sectorByCode))
+                    .collect(Collectors.joining(", "));
+            sb.append("\n[외국인+기관 양매수] ").append(dual);
+        }
+        if (turnoverRanking != null) sb.append("\n\n").append(turnoverRanking);
+        return sb.toString();
+    }
+
+    /** 수급 한 줄 — "종목명(업종) +금액, ..." 형태. 비면 "(없음)". */
+    private static String flowLine(List<InvestorFlowItem> items, Map<String, String> sectorByCode) {
+        if (items.isEmpty()) return "(없음)";
+        return items.stream()
+                .map(it -> it.name() + sectorTag(it.code(), sectorByCode) + " " + formatNetWon(it.netValueWon()))
+                .collect(Collectors.joining(", "));
+    }
+
+    /** 종목 업종을 "(반도체)"처럼 괄호로. 미상·미분류면 빈 문자열(괄호 생략). */
+    private static String sectorTag(String code, Map<String, String> sectorByCode) {
+        String s = sectorByCode.get(code);
+        return (s != null && !s.isBlank() && !UNCLASSIFIED.equals(s)) ? "(" + s + ")" : "";
+    }
+
+    private static final String FLOW_SYSTEM_PROMPT =
+            "너는 한국 주식시장 수급 분석가다. 아래 '실측 데이터'(외국인·기관 순매수/순매도 상위와 업종, "
+            + "외국인+기관 양매수, 거래대금 섹터 랭킹, 미국 선물)만 근거로 장 흐름을 한국어로 요약한다. "
+            + "데이터에 없는 숫자·종목·섹터를 절대 지어내지 마라. 핵심은 (1) 외국인과 기관이 각각 어느 업종으로 "
+            + "자금을 넣고 빼는지, (2) 그래서 지금 강한 섹터와 약한 섹터가 무엇인지, (3) 미국 선물 등 대외 여건과 "
+            + "엮은 전반 분위기다. 과장·투자권유 없이 사실 위주로 4~6문장으로 간결하게 쓴다.";
+
+    private static final String FLOW_USER_PROMPT =
+            "다음은 지금 시점의 미국 선물, 외국인·기관 순매수/순매도 상위(업종 포함), 외국인+기관 양매수 종목, "
+            + "거래대금 섹터 랭킹이다. 수급을 중심으로 현재 시장 흐름과 강한 섹터를 요약해줘.";
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.
@@ -550,23 +629,131 @@ public class KisPollerService {
      * 단, 이 가집계 엔드포인트는 고정 시장코드(V)·정규장 증권사 입력치(마지막 14:30)만 반영하므로
      * NXT 애프터마켓엔 값이 갱신되지 않고 그날 최종 스냅샷이 반복된다(세션 라벨로 애프터마켓임을 표시).
      */
+    /** 수급 발송 단계 — 시각에 따라 가집계 추정 폴링 / KRX 확정 1회 / NXT 최종 확정 1회로 갈린다. */
+    enum FlowPhase { ESTIMATE, KRX_CONFIRMED, NXT_CONFIRMED }
+
+    /**
+     * 시각이 속한 수급 단계. 09:00~15:35 추정, 15:35~20:05 KRX 확정, 20:05~ NXT 최종 확정.
+     * 09:00 이전이면 null(발송 없음). (순수 함수 — 테스트용)
+     */
+    static FlowPhase flowPhaseAt(LocalTime t) {
+        if (!t.isBefore(NXT_CONFIRMED_AFTER)) return FlowPhase.NXT_CONFIRMED;   // ≥ 20:05
+        if (!t.isBefore(KRX_CONFIRMED_AFTER)) return FlowPhase.KRX_CONFIRMED;   // ≥ 15:35
+        if (!t.isBefore(REGULAR_OPEN)) return FlowPhase.ESTIMATE;               // ≥ 09:00
+        return null;
+    }
+
+    /**
+     * 확정 수급 조회용 시장구분 — 현재 시각으로 판단한다. NXT 최종 집계 시각(20:05) 이후면 NXT("NX"),
+     * 그 전(정규장 확정 구간)이면 KRX("J"). 호출부가 넘기는 세션이 아니라 실제 시계로 결정한다. (순수 함수 — 테스트용)
+     */
+    static String confirmedMarketDiv(LocalTime t) {
+        return !t.isBefore(NXT_CONFIRMED_AFTER) ? "NX" : "J";
+    }
+
     private void investorFlowTick() {
         ZonedDateTime now = ZonedDateTime.now(KST);
-        Session sess = currentSession(now);
-        if (sess == null) return;
+        DayOfWeek d = now.getDayOfWeek();
+        if (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY) return;   // 주말 제외
         LocalTime time = now.toLocalTime();
-        if (!time.isBefore(INVESTOR_CONFIRMED_AFTER)) {
-            // 마감 후: 가집계(추정) 반복 발송을 멈추고 확정치로 그 날 1회만 발송한다.
-            LocalDate today = now.toLocalDate();
-            if (today.equals(investorConfirmedSentDate)) return;
-            if (sendConfirmedInvestorFlow(sess.label, time)) {
-                investorConfirmedSentDate = today;
+        LocalDate today = now.toLocalDate();
+        FlowPhase phase = flowPhaseAt(time);
+        if (phase == null) return;   // 장 시작 전
+
+        switch (phase) {
+            case NXT_CONFIRMED -> {
+                // NXT 최종 확정(20:05~) — 외국인·기관 확정 1회(NX). 당일 1회.
+                if (today.equals(nxtConfirmedSentDate)) return;
+                if (sendConfirmedInvestorFlow(Session.NXT_AFTER, time)) nxtConfirmedSentDate = today;
             }
+            case KRX_CONFIRMED -> {
+                // (a) 정규장 확정(15:35~) — 당일 1회. 확정이 아직 안 잡히면 false → 다음 틱 재시도.
+                if (!today.equals(krxConfirmedSentDate) && sendConfirmedInvestorFlow(Session.REGULAR, time)) {
+                    krxConfirmedSentDate = today;
+                }
+                // (b) NXT 외국인 수급 — 외국계 실시간(NX)으로 매 틱 폴링. NX 미지원/장외면 빈 응답 → 자동 스킵.
+                //     (NXT는 기관 실시간 소스가 없어 외국인만 라이브로 본다.)
+                sendForeignEstimateTable("NX", Session.NXT_AFTER.label, time);
+            }
+            case ESTIMATE -> sendEstimateFlow(time);   // 정규장 추정 10분 폴링(표 + 분석)
+        }
+    }
+
+    /**
+     * 정규장 추정 구간 — 외국인은 외국계 실시간(자주 갱신), 기관·동시매매는 거래소 가집계(4회/일)로 조회해
+     * 표를 발송하고 같은 데이터로 LLM 분석 1건을 만든다.
+     * 외국인을 외국계 실시간으로 바꿔 장중 수급 변화가 키움 실시간 외국인 수급처럼 자주 반영되게 한다.
+     */
+    private void sendEstimateFlow(LocalTime time) {
+        Session sess = Session.REGULAR;   // 추정 구간은 항상 정규장 라벨(가집계는 시장코드 V 전용)
+        // 외국인 — 외국계 실시간(정규장 J). 거래소 가집계 대신 사용해 더 자주 갱신.
+        List<InvestorFlowItem> frgnBuys = client.foreignMemberEstimate("J", true);
+        List<InvestorFlowItem> frgnSells = client.foreignMemberEstimate("J", false);
+        // 기관 — 외국계 창구 구분이 안 돼 실시간 소스가 없으므로 거래소 가집계 유지.
+        List<InvestorFlowItem> instBuys = client.investorFlowRank(KisClient.Investor.INSTITUTION, true);
+        List<InvestorFlowItem> instSells = client.investorFlowRank(KisClient.Investor.INSTITUTION, false);
+        List<InvestorPairItem> dualBuy = client.investorFlowDual(true).stream()
+                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)   // 외국인·기관 둘 다 순매수
+                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
+                .limit(INVESTOR_PAIR_TOP).toList();
+        List<InvestorPairItem> dualSell = client.investorFlowDual(false).stream()
+                .filter(it -> it.frgnWon() < 0 && it.orgnWon() < 0)   // 외국인·기관 둘 다 순매도
+                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon))
+                .limit(INVESTOR_PAIR_TOP).toList();
+
+        sendFlowTable(KisClient.Investor.FOREIGN, frgnBuys, frgnSells, sess.label, time, "외국계 실시간");
+        sendFlowTable(KisClient.Investor.INSTITUTION, instBuys, instSells, sess.label, time, "가집계·추정");
+        sendPairTable(dualBuy, dualSell, sess.label, time);
+
+        // 수급 기반 장 흐름 분석(LLM) — 표와 같은 데이터로 1건. (외국인이 실시간이라 시그니처가 자주 바뀌어 분석도 갱신된다.)
+        generateFlowReport(sess, time, frgnBuys, frgnSells, instBuys, instSells, dualBuy);
+    }
+
+    /** 한 투자자의 순매수·순매도 상위를 각각 TOP{@value #INVESTOR_FLOW_TOP}로 잘라 표 1건 발송. 둘 다 비면 미발송. */
+    private void sendFlowTable(KisClient.Investor inv, List<InvestorFlowItem> buys, List<InvestorFlowItem> sells,
+                               String label, LocalTime time, String tag) {
+        if (investorFlowMin <= 0) return;
+        if (buys.isEmpty() && sells.isEmpty()) {
+            log.info("{} 수급 랭킹 건너뜀 — 데이터 없음 ({} {})", tag, inv, label);
             return;
         }
-        sendInvestorFlow(KisClient.Investor.FOREIGN, sess.label, time);
-        sendInvestorFlow(KisClient.Investor.INSTITUTION, sess.label, time);
-        sendInvestorPair(sess.label, time);
+        List<InvestorFlowItem> topBuys = buys.stream().limit(INVESTOR_FLOW_TOP).toList();
+        List<InvestorFlowItem> topSells = sells.stream().limit(INVESTOR_FLOW_TOP).toList();
+        log.info("{} 수급 랭킹 조립 ({} 매수 {}종목·매도 {}종목, {})",
+                tag, inv, topBuys.size(), topSells.size(), label);
+        try {
+            notifier.send(composeInvestorFlow(inv, topBuys, topSells, label, time, tag));
+        } catch (Exception e) {
+            log.warn("수급 랭킹 알림 전송 실패 ({} {})", tag, inv, e);
+        }
+    }
+
+    /**
+     * 외국계 실시간(외국인) 수급 표 1건 발송 — 정규장은 marketDiv="J", NXT는 "NX".
+     * 거래소 가집계(4회/일)와 달리 장중 더 자주 갱신되는 외국계 창구 추정(키움 실시간 외국인 수급 계열).
+     * NX는 KIS 문서 미명시라 미지원/장외면 빈 응답 → 자동 스킵(되면 표 발송, 안 되면 발송 없음).
+     */
+    private void sendForeignEstimateTable(String marketDiv, String label, LocalTime time) {
+        if (investorFlowMin <= 0) return;
+        List<InvestorFlowItem> buys = client.foreignMemberEstimate(marketDiv, true);
+        List<InvestorFlowItem> sells = client.foreignMemberEstimate(marketDiv, false);
+        sendFlowTable(KisClient.Investor.FOREIGN, buys, sells, label, time, "외국계 실시간");
+    }
+
+    /** 양매수·양매도(이미 필터·정렬된) 종목을 동시매매 표 1건으로 발송. 둘 다 비면 미발송. */
+    private void sendPairTable(List<InvestorPairItem> dualBuy, List<InvestorPairItem> dualSell,
+                               String label, LocalTime time) {
+        if (investorFlowMin <= 0) return;
+        if (dualBuy.isEmpty() && dualSell.isEmpty()) {
+            log.info("동시매매 랭킹 건너뜀 — 해당 종목 없음 ({})", label);
+            return;
+        }
+        log.info("동시매매 랭킹 조립 (양매수 {}종목·양매도 {}종목, {})", dualBuy.size(), dualSell.size(), label);
+        try {
+            notifier.send(composeInvestorPair(dualBuy, dualSell, label, time, "가집계·추정"));
+        } catch (Exception e) {
+            log.warn("동시매매 랭킹 알림 전송 실패", e);
+        }
     }
 
     /**
@@ -576,8 +763,9 @@ public class KisPollerService {
      *
      * @return 1건이라도 발송했으면 true(그 날 재발송 방지용).
      */
-    private boolean sendConfirmedInvestorFlow(String label, LocalTime time) {
+    private boolean sendConfirmedInvestorFlow(Session sess, LocalTime time) {
         if (investorFlowMin <= 0) return false;
+        String label = sess.label;
 
         // 1) 가집계로 후보 종목(코드→종목명) 수집 — 외국인/기관 순매수·순매도 + 동시매매(ETC=0).
         Map<String, String> names = new HashMap<>();
@@ -597,9 +785,11 @@ public class KisPollerService {
         }
 
         // 2) 후보 종목 합집합을 inquire-investor로 1회씩 확정 조회(외국인·기관 동시 반환).
+        //    시장구분은 현재 시각으로 판단한다 — 20:05 이후=NXT 기반(NX), 그 전=KRX 확정(J).
+        String marketDiv = confirmedMarketDiv(time);
         Map<String, InvestorConfirmed> confirmed = new HashMap<>();
         for (String code : names.keySet()) {
-            InvestorConfirmed c = client.inquireInvestorConfirmed(code);
+            InvestorConfirmed c = client.inquireInvestorConfirmed(code, marketDiv);
             if (c != null) confirmed.put(code, c);
         }
         if (confirmed.isEmpty()) {
@@ -614,7 +804,43 @@ public class KisPollerService {
         sent |= sendConfirmedFlow(KisClient.Investor.FOREIGN, names, confirmed, label, time, tag);
         sent |= sendConfirmedFlow(KisClient.Investor.INSTITUTION, names, confirmed, label, time, tag);
         sent |= sendConfirmedPair(names, confirmed, label, time, tag);
+
+        // 4) 확정 수급 기반 장 흐름 분석 1건(가집계와 시그니처가 달라 그 날 1회 새로 생성된다).
+        generateConfirmedFlowReport(sess, names, confirmed, time);
         return sent;
+    }
+
+    /**
+     * 마감 후 확정 수급으로 장 흐름 분석 1건을 생성한다. 확정값에서 외국인·기관 순매수/순매도 상위와
+     * 양매수를 추려 {@link #generateFlowReport}에 넘긴다(표 발송과 같은 분석 경로 재사용).
+     */
+    private void generateConfirmedFlowReport(Session sess, Map<String, String> names,
+                                             Map<String, InvestorConfirmed> confirmed, LocalTime time) {
+        if (llm == null) return;
+        List<InvestorFlowItem> frgnBuys = confirmedFlow(names, confirmed, KisClient.Investor.FOREIGN, true);
+        List<InvestorFlowItem> frgnSells = confirmedFlow(names, confirmed, KisClient.Investor.FOREIGN, false);
+        List<InvestorFlowItem> instBuys = confirmedFlow(names, confirmed, KisClient.Investor.INSTITUTION, true);
+        List<InvestorFlowItem> instSells = confirmedFlow(names, confirmed, KisClient.Investor.INSTITUTION, false);
+        List<InvestorPairItem> dualBuy = confirmed.entrySet().stream()
+                .map(e -> new InvestorPairItem(e.getKey(), names.getOrDefault(e.getKey(), e.getKey()),
+                        e.getValue().foreignWon(), e.getValue().institutionWon(), 0.0))
+                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)
+                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
+                .limit(INVESTOR_PAIR_TOP).toList();
+        generateFlowReport(sess, time, frgnBuys, frgnSells, instBuys, instSells, dualBuy);
+    }
+
+    /** 확정값 맵에서 한 투자자의 순매수(buy=true)/순매도 상위 종목을 금액순으로 추린다. */
+    private static List<InvestorFlowItem> confirmedFlow(Map<String, String> names,
+                                                        Map<String, InvestorConfirmed> confirmed,
+                                                        KisClient.Investor inv, boolean buy) {
+        return confirmed.entrySet().stream()
+                .map(e -> new InvestorFlowItem(e.getKey(), names.getOrDefault(e.getKey(), e.getKey()),
+                        e.getValue().netWon(inv), 0.0))
+                .filter(it -> buy ? it.netValueWon() > 0 : it.netValueWon() < 0)
+                .sorted(buy ? Comparator.comparingLong(InvestorFlowItem::netValueWon).reversed()
+                        : Comparator.comparingLong(InvestorFlowItem::netValueWon))
+                .toList();
     }
 
     /** 한 투자자의 확정 순매수/순매도 상위를 재정렬해 1건 발송한다. 둘 다 비면 미발송(false). */
@@ -676,39 +902,6 @@ public class KisPollerService {
         return "확정";
     }
 
-    /**
-     * 한 투자자(외국인/기관)의 순매수·순매도 상위 종목을 조립해 1건 발송한다.
-     * 외국인·기관을 별도 메시지로 보내 분리 표시하고 Discord 길이 한도(2,000자)도 피한다.
-     */
-    private void sendInvestorFlow(KisClient.Investor inv, String label, LocalTime time) {
-        if (investorFlowMin <= 0) return;
-        String msg = buildInvestorFlow(inv, label, time);
-        if (msg == null) return;
-        try {
-            notifier.send(msg);
-        } catch (Exception e) {
-            log.warn("외국인·기관 수급 랭킹 알림 전송 실패 ({})", inv, e);
-        }
-    }
-
-    /**
-     * 투자자별 순매수상위·순매도상위를 라이브 조회해 각각 상위 {@value #INVESTOR_FLOW_TOP}건으로 잘라
-     * 수급 랭킹 문자열을 만든다(전송은 호출부 책임). 매수·매도 둘 다 비면 null.
-     */
-    private String buildInvestorFlow(KisClient.Investor inv, String label, LocalTime time) {
-        List<InvestorFlowItem> buys = client.investorFlowRank(inv, true);
-        List<InvestorFlowItem> sells = client.investorFlowRank(inv, false);
-        if (buys.isEmpty() && sells.isEmpty()) {
-            log.info("외국인·기관 수급 랭킹 건너뜀 — 데이터 없음 ({} {})", inv, label);
-            return null;
-        }
-        List<InvestorFlowItem> topBuys = buys.stream().limit(INVESTOR_FLOW_TOP).toList();
-        List<InvestorFlowItem> topSells = sells.stream().limit(INVESTOR_FLOW_TOP).toList();
-        log.info("외국인·기관 수급 랭킹 조립 ({} 매수 {}종목·매도 {}종목, {})",
-                inv, topBuys.size(), topSells.size(), label);
-        return composeInvestorFlow(inv, topBuys, topSells, label, time, "가집계·추정");
-    }
-
     /** 수급 표 종목명 칸 표시폭(한글=2). "SK하이닉스"·"LG에너지솔루션" 등 대부분 수용. */
     private static final int FLOW_NAME_W = 12;
     /** 수급 표 순매수금액 칸 표시폭(우측정렬). "+1,234억"·"-987억" 등 수용. */
@@ -756,44 +949,6 @@ public class KisPollerService {
     private static String flowCell(InvestorFlowItem it) {
         return padDisplay(it.name(), FLOW_NAME_W, true)
                 + " " + padDisplay(formatNetWon(it.netValueWon()), FLOW_AMT_W, false);
-    }
-
-    /**
-     * 외국인+기관 동시매매(양매수/양매도) 메시지 1건을 만들어 발송한다(전송은 호출부 책임).
-     * 별도 메시지로 보내 외국인·기관 개별 랭킹과 분리한다.
-     */
-    private void sendInvestorPair(String label, LocalTime time) {
-        if (investorFlowMin <= 0) return;
-        String msg = buildInvestorPair(label, time);
-        if (msg == null) return;
-        try {
-            notifier.send(msg);
-        } catch (Exception e) {
-            log.warn("동시매매 랭킹 알림 전송 실패", e);
-        }
-    }
-
-    /**
-     * 전체(ETC=0) 순매수/순매도 상위를 라이브 조회해 외국인·기관이 둘 다 순매수(양매수)·둘 다 순매도(양매도)인
-     * 종목을 합계 거래대금 순으로 각각 상위 {@value #INVESTOR_PAIR_TOP}건 추려 메시지를 만든다. 둘 다 비면 null.
-     */
-    private String buildInvestorPair(String label, LocalTime time) {
-        List<InvestorPairItem> buyBase = client.investorFlowDual(true);
-        List<InvestorPairItem> sellBase = client.investorFlowDual(false);
-        List<InvestorPairItem> dualBuy = buyBase.stream()
-                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)   // 외국인·기관 둘 다 순매수
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
-                .limit(INVESTOR_PAIR_TOP).toList();
-        List<InvestorPairItem> dualSell = sellBase.stream()
-                .filter(it -> it.frgnWon() < 0 && it.orgnWon() < 0)   // 외국인·기관 둘 다 순매도
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon))  // 합계 오름차순(가장 많이 판)
-                .limit(INVESTOR_PAIR_TOP).toList();
-        if (dualBuy.isEmpty() && dualSell.isEmpty()) {
-            log.info("동시매매 랭킹 건너뜀 — 해당 종목 없음 ({})", label);
-            return null;
-        }
-        log.info("동시매매 랭킹 조립 (양매수 {}종목·양매도 {}종목, {})", dualBuy.size(), dualSell.size(), label);
-        return composeInvestorPair(dualBuy, dualSell, label, time, "가집계·추정");
     }
 
     /**

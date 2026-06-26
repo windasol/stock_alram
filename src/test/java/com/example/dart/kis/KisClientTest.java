@@ -214,6 +214,51 @@ class KisClientTest {
     }
 
     @Test
+    void 외국계_실시간_응답은_순매수수량X현재가로_원을_근사한다() {
+        // 외국계 매매종목 가집계 — 금액이 아니라 수량. 순매수수량=총매수-총매도, 금액(원)≈순매수수량×현재가.
+        String json = """
+                {
+                  "rt_cd": "0", "msg1": "정상처리",
+                  "output": [
+                    { "stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자",
+                      "stck_prpr": "70,000", "prdy_ctrt": "2.1",
+                      "glob_total_shnu_qty": "100,000", "glob_total_seln_qty": "30,000" }
+                  ]
+                }
+                """;
+        List<InvestorFlowItem> items = KisClient.parseForeignMemberEstimate(json);
+        assertEquals(1, items.size());
+        InvestorFlowItem it = items.get(0);
+        assertEquals("005930", it.code());
+        assertEquals("삼성전자", it.name());
+        // 순매수수량 (100,000 - 30,000) × 70,000원 = 49억
+        assertEquals(70_000L * 70_000L, it.netValueWon());
+        assertEquals(2.1, it.changePct());
+    }
+
+    @Test
+    void 외국계_실시간_순매도우위면_음수() {
+        String json = """
+                {
+                  "rt_cd": "0", "msg1": "정상처리",
+                  "output": [
+                    { "stck_shrn_iscd": "000660", "hts_kor_isnm": "SK하이닉스",
+                      "stck_prpr": "180,000", "prdy_ctrt": "-1.2",
+                      "glob_total_shnu_qty": "10,000", "glob_total_seln_qty": "25,000" }
+                  ]
+                }
+                """;
+        List<InvestorFlowItem> items = KisClient.parseForeignMemberEstimate(json);
+        assertEquals(-15_000L * 180_000L, items.get(0).netValueWon());   // 순매도 우위 → 음수
+    }
+
+    @Test
+    void 외국계_실시간_비정상이면_빈목록() {
+        assertTrue(KisClient.parseForeignMemberEstimate("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
+        assertTrue(KisClient.parseForeignMemberEstimate("not json").isEmpty());
+    }
+
+    @Test
     void 종목별_확정수급_비정상이거나_빈output이면_null() {
         assertNull(KisClient.parseInvestorConfirmed("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}"));
         assertNull(KisClient.parseInvestorConfirmed("not json"));
