@@ -56,6 +56,26 @@ public class GeminiClient implements LlmClient {
 
     @Override
     public String chat(String systemPrompt, String userPrompt) {
+        String body = generate(systemPrompt, userPrompt, false);
+        return body == null ? null : extractText(body);
+    }
+
+    @Override
+    public String chatGrounded(String systemPrompt, String userPrompt) {
+        String body = generate(systemPrompt, userPrompt, true);
+        if (body == null) return null;
+        String text = extractText(body);
+        if (text == null) return null;
+        String sources = extractSources(body);
+        return sources.isEmpty() ? text : text + "\n\n" + sources;
+    }
+
+    /**
+     * generateContent 호출 — 본문을 만들고 응답 JSON 문자열을 돌려준다(파싱은 호출부).
+     * grounded면 google_search 도구를 켜 실시간 웹 검색으로 답하게 한다(gemini-2.5계열 지원, 2.5는 검색 호출당 과금).
+     * 실패(키 없음·비200·네트워크) 시 null.
+     */
+    private String generate(String systemPrompt, String userPrompt, boolean grounded) {
         if (apiKey == null || apiKey.isBlank()) {
             log.warn("GEMINI_API_KEY 미설정 — 리포트 건너뜀");
             return null;
@@ -69,6 +89,10 @@ public class GeminiClient implements LlmClient {
             userTurn.put("role", "user");
             userTurn.putArray("parts").addObject().put("text", userPrompt);
             body.putObject("generationConfig").put("temperature", 0.3);
+            if (grounded) {
+                // 실시간 웹 검색 그라운딩 — tools:[{"google_search":{}}]. 컷오프 밖 "지금 왜?"를 인용과 함께.
+                body.putArray("tools").addObject().putObject("google_search");
+            }
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(API_BASE + model + ":generateContent"))
@@ -80,12 +104,12 @@ public class GeminiClient implements LlmClient {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                log.warn("Gemini 응답 실패: status={}, body={}", response.statusCode(), brief(response.body()));
+                log.warn("Gemini 응답 실패: status={}, grounded={}, body={}", response.statusCode(), grounded, brief(response.body()));
                 return null;
             }
-            return extractText(response.body());
+            return response.body();
         } catch (Exception e) {
-            log.warn("Gemini 호출 실패 (모델 {}): {}", model, e.toString());
+            log.warn("Gemini 호출 실패 (모델 {}, grounded={}): {}", model, grounded, e.toString());
             return null;
         }
     }
@@ -115,6 +139,33 @@ public class GeminiClient implements LlmClient {
         } catch (Exception e) {
             log.warn("Gemini 응답 파싱 실패: {}", e.toString());
             return null;
+        }
+    }
+
+    /**
+     * 그라운딩 응답의 출처를 뽑아 "🔎 출처: 제목1 · 제목2 · 제목3" 한 줄로 만든다(상위 3개).
+     * candidates[0].groundingMetadata.groundingChunks[].web.{title,uri}. 출처가 없으면 빈 문자열.
+     * (검색이 실제로 수행됐다는 증거이자 "지어내기 아님"의 근거 — 네트워크 분리, 테스트용 패키지 가시성)
+     */
+    static String extractSources(String responseBody) {
+        try {
+            JsonNode chunks = PARSER.readTree(responseBody)
+                    .path("candidates").path(0).path("groundingMetadata").path("groundingChunks");
+            if (!chunks.isArray() || chunks.isEmpty()) return "";
+            StringBuilder sb = new StringBuilder("🔎 출처: ");
+            int n = 0;
+            for (JsonNode c : chunks) {
+                JsonNode web = c.path("web");
+                String uri = web.path("uri").asText("");
+                if (uri.isEmpty()) continue;
+                String title = web.path("title").asText("");
+                if (n > 0) sb.append(" · ");
+                sb.append(title.isEmpty() ? uri : title);
+                if (++n >= 3) break;
+            }
+            return n == 0 ? "" : sb.toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 

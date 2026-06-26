@@ -95,14 +95,11 @@ public class KisPollerService {
     private LocalDate krxConfirmedSentDate = null;
     /** NXT 최종 확정 수급을 발송한 날짜(KST). 당일 재발송 방지 — 단일 폴러 스레드 접근이라 동기화 불필요. */
     private LocalDate nxtConfirmedSentDate = null;
-    /**
-     * 직전 수급 분석에 쓴 수급 데이터 시그니처. 가집계는 14:30에 동결되므로 직전과 같으면 LLM 호출을 생략한다.
-     * 단일 폴러 스레드(kis-poller)에서만 접근 — 동기화 불필요. null이면 아직 1회도 분석 안 함.
-     */
-    private Integer lastFlowSignature = null;
 
     private final KisClient client;
     private final Notifier notifier;
+    /** 시황 분석(LLM) 전용 발송 채널 — 뉴스 채널. 표·급등·섹터는 {@link #notifier}(KIS 채널), 분석만 여기로. */
+    private final Notifier reportNotifier;
     private final KisAlertComposer alertComposer;
     private final int intervalSec;
     private final double minChangePct;
@@ -115,6 +112,10 @@ public class KisPollerService {
     private final boolean gainerAlertEnabled;
     /** 장 흐름 분석 리포트용 LLM(Gemini/Ollama). null이면 리포트 비활성. */
     private final LlmClient llm;
+    /** 시황 매크로 분석 주기(분). 0이면 비활성. 검색 그라운딩이 호출당 과금이라 10분이 아닌 시간당 운영. */
+    private final int reportIntervalMin;
+    /** 시황 분석에 실시간 검색 그라운딩을 켤지. true면 chatGrounded(과금·실시간), false면 평문 chat. */
+    private final boolean reportGrounding;
     /** 리포트 '대외 여건'용 미국 선물 조회기. 실패해도 국내 리포트는 계속된다. */
     private final UsFuturesClient usFutures = new UsFuturesClient();
 
@@ -140,11 +141,12 @@ public class KisPollerService {
     private int consecutiveFailures = 0;
     private int skipPolls = 0;
 
-    public KisPollerService(KisClient client, Notifier notifier,
+    public KisPollerService(KisClient client, Notifier notifier, Notifier reportNotifier,
                             KisAlertComposer alertComposer, AppConfig config, Path sectorsFile,
                             LlmClient llm) {
         this.client = client;
         this.notifier = notifier;
+        this.reportNotifier = reportNotifier;
         this.alertComposer = alertComposer;
         this.intervalSec = config.kisPollIntervalSec();
         this.minChangePct = config.kisMinChangePct();
@@ -154,8 +156,9 @@ public class KisPollerService {
         this.gainerAlertEnabled = config.kisGainerAlertEnabled();
         this.sectorsFile = sectorsFile;
         // 리포트는 LLM이 주입되고 활성 설정일 때만 동작(둘 중 하나라도 없으면 비활성).
-        // 분석 주기는 수급 랭킹 주기(KIS_INVESTOR_FLOW_MIN)를 따른다 — MARKET_REPORT_INTERVAL_MIN은 더 이상 안 쓴다.
         this.llm = config.marketReportEnabled() ? llm : null;
+        this.reportIntervalMin = config.marketReportIntervalMin();   // 시황 매크로 분석 주기(시간당)
+        this.reportGrounding = config.marketReportGrounding();       // 실시간 검색 그라운딩 on/off
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kis-poller"));
         loadSectors();
     }
@@ -175,11 +178,39 @@ public class KisPollerService {
 
         if (investorFlowMin > 0) {
             long periodSec = investorFlowMin * 60L;
-            // 재시작 즉시 1회 분석·발송(initialDelay=0)한 뒤 주기 반복 — 벽시계 정렬을 두지 않는다.
-            // 수급 랭킹 표 + (LLM 활성 시) 수급 기반 장 흐름 분석이 이 한 사이클에 함께 올라탄다.
+            // 재시작 즉시 1회 발송(initialDelay=0)한 뒤 주기 반복 — 벽시계 정렬을 두지 않는다. (수급 표만, 분석은 별도 스케줄)
             scheduler.scheduleWithFixedDelay(this::investorFlowTick, 0, periodSec, TimeUnit.SECONDS);
-            log.info("KIS 외국인·기관 수급 랭킹 활성 ({}분 주기, 재시작 즉시 발송){}",
-                    investorFlowMin, llm != null ? " + 수급 기반 장 흐름 분석(" + llm.model() + ")" : "");
+            log.info("KIS 외국인·기관 수급 랭킹 활성 ({}분 주기, 재시작 즉시 발송)", investorFlowMin);
+        }
+
+        // 시황 매크로 분석(시간당) — 실시간 검색 그라운딩으로 "지금 왜?"(미선물 이유·경제 일정·시황)를 뉴스 채널로.
+        // 10분이 아니라 시간당인 이유: 그라운딩이 호출당 과금이고 매크로 맥락은 10분마다 안 바뀐다.
+        if (llm != null && reportIntervalMin > 0) {
+            long periodSec = reportIntervalMin * 60L;
+            // 재시작 즉시 1회(장중이면 발송, 장외면 게이트로 스킵) 후 주기 반복 — 바로 동작 확인 가능.
+            scheduler.scheduleWithFixedDelay(this::generateMacroReport, 0, periodSec, TimeUnit.SECONDS);
+            log.info("🌐 시황 매크로 분석 활성 ({}분 주기, 모델 {}, 그라운딩 {}, 재시작 즉시 1회)",
+                    reportIntervalMin, llm.model(), reportGrounding ? "ON(검색)" : "OFF(평문)");
+        }
+
+        // 시작 시 LLM(Gemini/Ollama) 연결 1회 자가진단 — 장외에도 키·연결 정상 여부를 즉시 로그로 확인한다.
+        // (실제 장 흐름 분석 발송은 장중에만. 이 진단은 발송과 무관하게 연결만 확인.)
+        if (llm != null) {
+            scheduler.schedule(this::llmSelfTest, 0, TimeUnit.SECONDS);
+        }
+    }
+
+    /** 시작 시 LLM 연결을 1회 핑(ping)해 키·모델·네트워크 정상 여부를 로그로 남긴다. 분석 발송과 무관(장외에도 동작). */
+    private void llmSelfTest() {
+        try {
+            String r = llm.chat("너는 연결 확인용이다. 군더더기 없이 'OK'만 답해.", "OK?");
+            if (r != null && !r.isBlank()) {
+                log.info("✅ LLM 연결 확인 OK ({}): \"{}\"", llm.model(), r.trim());
+            } else {
+                log.warn("⚠️ LLM 연결 확인 실패 ({}) — 응답 없음/차단. GEMINI_API_KEY·모델명·네트워크 확인", llm.model());
+            }
+        } catch (Exception e) {
+            log.warn("⚠️ LLM 연결 확인 중 오류 ({}): {}", llm.model(), e.toString());
         }
     }
 
@@ -410,42 +441,32 @@ public class KisPollerService {
         return composeTurnoverRanking(resolved, label, time);
     }
 
-    /** 수급 기반 장 흐름 분석에서 LLM에 넣을 외국인·기관 순매수/순매도 상위 종목 수(메시지 토큰 절약). */
-    private static final int FLOW_REPORT_TOP = 10;
+    /** 시황 분석 facts 블록에 넣을 외국인·기관 수급 상위 종목 수(토큰 절약). */
+    private static final int FACTS_TOP = 10;
 
     /**
-     * 수급 기반 장 흐름 분석 — 외국인·기관 수급 순위 + 거래대금 섹터 랭킹 + 미국 선물을 '실측 데이터'로 모아
-     * LLM(Gemini/Ollama)에 넘겨 "현재 시장 흐름 + 강한 섹터"를 한국어로 받아 1건 발송한다. 장중에만 동작.
-     * LLM이 숫자를 지어내지 않도록 데이터는 코드가 집계하고, 모델은 서술만 한다(하이브리드).
-     *
-     * 수급 리스트는 호출부(틱)에서 1회 조회한 raw를 그대로 받아 표와 공유한다(중복 조회 없음).
-     * 가집계는 14:30에 동결되므로 수급 데이터가 직전과 동일하면(시그니처 일치) LLM 호출을 생략한다.
+     * 시황 매크로 분석 — 국내 수급·미선물 '실측'을 근거로 깔고, Gemini 검색 그라운딩으로
+     * "지금 왜?"(미국 선물 등락 이유·경제 일정·글로벌 시황)를 끌어와 국내 흐름과 엮어 뉴스 채널로 발송한다.
+     * 모델이 컷오프 밖 사실을 지어내지 않도록 검색(그라운딩)으로만 외부 사실을 얻는다(하이브리드). 장중에만 동작.
      */
-    private void generateFlowReport(Session sess, LocalTime time,
-                                    List<InvestorFlowItem> frgnBuys, List<InvestorFlowItem> frgnSells,
-                                    List<InvestorFlowItem> instBuys, List<InvestorFlowItem> instSells,
-                                    List<InvestorPairItem> dualBuy) {
+    private void generateMacroReport() {
         if (llm == null) return;
+        ZonedDateTime now = ZonedDateTime.now(KST);
+        if (now.getDayOfWeek() == DayOfWeek.SATURDAY || now.getDayOfWeek() == DayOfWeek.SUNDAY) return;
+        Session sess = currentSession(now);
+        if (sess == null) return;   // 장중에만
+        LocalTime time = now.toLocalTime();
 
-        List<InvestorFlowItem> fb = frgnBuys.stream().limit(FLOW_REPORT_TOP).toList();
-        List<InvestorFlowItem> fs = frgnSells.stream().limit(FLOW_REPORT_TOP).toList();
-        List<InvestorFlowItem> ib = instBuys.stream().limit(FLOW_REPORT_TOP).toList();
-        List<InvestorFlowItem> is = instSells.stream().limit(FLOW_REPORT_TOP).toList();
-        List<InvestorPairItem> db = dualBuy.stream().limit(FLOW_REPORT_TOP).toList();
-        if (fb.isEmpty() && fs.isEmpty() && ib.isEmpty() && is.isEmpty()) {
-            log.info("수급 분석 건너뜀 — 수급 데이터 없음 ({})", sess.label);
-            return;
-        }
+        // 국내 실측 facts(지지 근거) — 외국인은 외국계 실시간(J), 기관·양매수는 거래소 가집계.
+        List<InvestorFlowItem> fb = client.foreignMemberEstimate("J", true).stream().limit(FACTS_TOP).toList();
+        List<InvestorFlowItem> fs = client.foreignMemberEstimate("J", false).stream().limit(FACTS_TOP).toList();
+        List<InvestorFlowItem> ib = client.investorFlowRank(KisClient.Investor.INSTITUTION, true).stream().limit(FACTS_TOP).toList();
+        List<InvestorFlowItem> is = client.investorFlowRank(KisClient.Investor.INSTITUTION, false).stream().limit(FACTS_TOP).toList();
+        List<InvestorPairItem> db = client.investorFlowDual(true).stream()
+                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)
+                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
+                .limit(FACTS_TOP).toList();
 
-        // 동결 스킵 — 수급 부분(외국인·기관·양매수)만으로 시그니처를 잡는다.
-        // 거래대금·미선물은 계속 변하므로 시그니처에 넣지 않는다(넣으면 동결 구간에도 매번 달라져 스킵이 무력화).
-        int signature = flowSignature(fb, fs, ib, is, db);
-        if (Integer.valueOf(signature).equals(lastFlowSignature)) {
-            log.info("수급 분석 건너뜀 — 수급 변동 없음(가집계 동결, {})", sess.label);
-            return;
-        }
-
-        // 강한 섹터 판단 근거 — 수급 상위 종목의 업종을 해소(기존 캐시·유량제한 회피 재사용).
         List<String> codes = new ArrayList<>();
         for (InvestorFlowItem it : fb) codes.add(it.code());
         for (InvestorFlowItem it : fs) codes.add(it.code());
@@ -458,32 +479,24 @@ public class KisPollerService {
         String usFuturesLine = usFutures.summaryLine();                  // 대외 여건(null 가능)
         String facts = buildFlowFacts(usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
 
-        // 데이터가 새로 잡혔으니 시그니처를 갱신해 둔다(LLM 실패해도 동일 데이터로 매 틱 재시도하지 않는다).
-        lastFlowSignature = signature;
-
-        String narrative = llm.chat(FLOW_SYSTEM_PROMPT, FLOW_USER_PROMPT + "\n\n" + facts);
-        if (narrative == null) return;  // LLM 실패(네트워크·키·모델·타임아웃) — 이미 로깅됨, 분석만 거른다
-        String msg = String.format("📈 **장 흐름 분석** | %s %s%n%n%s",
-                sess.label, SUMMARY_TIME_FMT.format(time), narrative);
+        // 그라운딩 ON이면 실시간 검색으로 "왜?"를 끌어온다. 단 무료 티어/권한 문제로 그라운딩이 실패할 수 있어
+        // 실패하면 평문(chat)으로 폴백한다 — 분석이 통째로 빠지지 않게(평문은 국내 실측만, "왜?"는 약함).
+        String narrative = null;
+        if (reportGrounding) {
+            narrative = llm.chatGrounded(MACRO_SYSTEM_PROMPT, MACRO_USER_PROMPT + "\n\n" + facts);
+            if (narrative == null) log.warn("그라운딩 실패 — 평문 분석으로 폴백(무료 티어/권한·한도 확인)");
+        }
+        if (narrative == null) {
+            narrative = llm.chat(MACRO_SYSTEM_PROMPT, MACRO_USER_PROMPT + "\n\n" + facts);
+        }
+        if (narrative == null) return;  // LLM 실패 — 이미 로깅됨, 분석만 거른다
+        String msg = String.format("🌐 **시황 분석** | %s%n%n%s", SUMMARY_TIME_FMT.format(time), narrative);
         try {
-            notifier.send(msg);
-            log.info("수급 기반 장 흐름 분석 발송 ({})", sess.label);
+            reportNotifier.send(msg);   // 뉴스 채널로
+            log.info("🌐 시황 매크로 분석 발송 (그라운딩 {})", reportGrounding ? "ON" : "OFF");
         } catch (Exception e) {
-            log.warn("수급 기반 장 흐름 분석 전송 실패", e);
+            log.warn("시황 매크로 분석 전송 실패", e);
         }
-    }
-
-    /** 수급 리스트(외국인·기관 매수/매도 + 양매수)의 종목·금액으로 동결 판별용 시그니처를 만든다. (가집계 동결 스킵용) */
-    private static int flowSignature(List<InvestorFlowItem> fb, List<InvestorFlowItem> fs,
-                                     List<InvestorFlowItem> ib, List<InvestorFlowItem> is,
-                                     List<InvestorPairItem> db) {
-        StringBuilder sb = new StringBuilder();
-        for (List<InvestorFlowItem> lst : List.of(fb, fs, ib, is)) {
-            for (InvestorFlowItem it : lst) sb.append(it.code()).append(':').append(it.netValueWon()).append('|');
-            sb.append('#');
-        }
-        for (InvestorPairItem it : db) sb.append(it.code()).append(':').append(it.sumWon()).append('|');
-        return sb.toString().hashCode();
     }
 
     /**
@@ -526,16 +539,17 @@ public class KisPollerService {
         return (s != null && !s.isBlank() && !UNCLASSIFIED.equals(s)) ? "(" + s + ")" : "";
     }
 
-    private static final String FLOW_SYSTEM_PROMPT =
-            "너는 한국 주식시장 수급 분석가다. 아래 '실측 데이터'(외국인·기관 순매수/순매도 상위와 업종, "
-            + "외국인+기관 양매수, 거래대금 섹터 랭킹, 미국 선물)만 근거로 장 흐름을 한국어로 요약한다. "
-            + "데이터에 없는 숫자·종목·섹터를 절대 지어내지 마라. 핵심은 (1) 외국인과 기관이 각각 어느 업종으로 "
-            + "자금을 넣고 빼는지, (2) 그래서 지금 강한 섹터와 약한 섹터가 무엇인지, (3) 미국 선물 등 대외 여건과 "
-            + "엮은 전반 분위기다. 과장·투자권유 없이 사실 위주로 4~6문장으로 간결하게 쓴다.";
+    private static final String MACRO_SYSTEM_PROMPT =
+            "너는 한국 주식시장 시황 분석가다. 아래 '국내 실측 데이터'(외국인·기관 수급 상위·업종, 외국인+기관 양매수, "
+            + "거래대금 섹터 랭킹, 미국 선물 등락률)는 사실이다. 여기에 더해 Google 검색으로 지금 시점의 "
+            + "① 미국 주가지수 선물이 오르거나 내리는 '이유' ② 오늘과 이번 주 주요 경제 일정(FOMC·CPI·고용지표·주요 기업 실적 등) "
+            + "③ 현재 글로벌 시장 분위기를 확인하라. 그런 다음 검색으로 확인된 사실과 국내 수급을 엮어 "
+            + "'지금 시장이 왜 이런지'를 한국어로 설명한다. 검색으로 확인되지 않은 추측·소문은 쓰지 마라. "
+            + "과장·투자권유 금지. 5~8문장으로 쓰고, 마지막에 '오늘/이번 주 체크포인트'를 2~3개 불릿으로 정리한다.";
 
-    private static final String FLOW_USER_PROMPT =
-            "다음은 지금 시점의 미국 선물, 외국인·기관 순매수/순매도 상위(업종 포함), 외국인+기관 양매수 종목, "
-            + "거래대금 섹터 랭킹이다. 수급을 중심으로 현재 시장 흐름과 강한 섹터를 요약해줘.";
+    private static final String MACRO_USER_PROMPT =
+            "아래는 지금 국내 수급·미국 선물 실측이다. 위 지침대로 검색을 활용해 '왜 지금 시장이 이런지'"
+            + "(미선물 등락 이유, 경제 일정, 글로벌 시황)를 국내 수급과 엮어 분석해줘.";
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.
@@ -704,9 +718,7 @@ public class KisPollerService {
         sendFlowTable(KisClient.Investor.FOREIGN, frgnBuys, frgnSells, sess.label, time, "외국계 실시간");
         sendFlowTable(KisClient.Investor.INSTITUTION, instBuys, instSells, sess.label, time, "가집계·추정");
         sendPairTable(dualBuy, dualSell, sess.label, time);
-
-        // 수급 기반 장 흐름 분석(LLM) — 표와 같은 데이터로 1건. (외국인이 실시간이라 시그니처가 자주 바뀌어 분석도 갱신된다.)
-        generateFlowReport(sess, time, frgnBuys, frgnSells, instBuys, instSells, dualBuy);
+        // LLM 분석은 여기서 하지 않는다 — 시간당 generateMacroReport()가 뉴스 채널로 별도 발송.
     }
 
     /** 한 투자자의 순매수·순매도 상위를 각각 TOP{@value #INVESTOR_FLOW_TOP}로 잘라 표 1건 발송. 둘 다 비면 미발송. */
@@ -804,43 +816,7 @@ public class KisPollerService {
         sent |= sendConfirmedFlow(KisClient.Investor.FOREIGN, names, confirmed, label, time, tag);
         sent |= sendConfirmedFlow(KisClient.Investor.INSTITUTION, names, confirmed, label, time, tag);
         sent |= sendConfirmedPair(names, confirmed, label, time, tag);
-
-        // 4) 확정 수급 기반 장 흐름 분석 1건(가집계와 시그니처가 달라 그 날 1회 새로 생성된다).
-        generateConfirmedFlowReport(sess, names, confirmed, time);
         return sent;
-    }
-
-    /**
-     * 마감 후 확정 수급으로 장 흐름 분석 1건을 생성한다. 확정값에서 외국인·기관 순매수/순매도 상위와
-     * 양매수를 추려 {@link #generateFlowReport}에 넘긴다(표 발송과 같은 분석 경로 재사용).
-     */
-    private void generateConfirmedFlowReport(Session sess, Map<String, String> names,
-                                             Map<String, InvestorConfirmed> confirmed, LocalTime time) {
-        if (llm == null) return;
-        List<InvestorFlowItem> frgnBuys = confirmedFlow(names, confirmed, KisClient.Investor.FOREIGN, true);
-        List<InvestorFlowItem> frgnSells = confirmedFlow(names, confirmed, KisClient.Investor.FOREIGN, false);
-        List<InvestorFlowItem> instBuys = confirmedFlow(names, confirmed, KisClient.Investor.INSTITUTION, true);
-        List<InvestorFlowItem> instSells = confirmedFlow(names, confirmed, KisClient.Investor.INSTITUTION, false);
-        List<InvestorPairItem> dualBuy = confirmed.entrySet().stream()
-                .map(e -> new InvestorPairItem(e.getKey(), names.getOrDefault(e.getKey(), e.getKey()),
-                        e.getValue().foreignWon(), e.getValue().institutionWon(), 0.0))
-                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
-                .limit(INVESTOR_PAIR_TOP).toList();
-        generateFlowReport(sess, time, frgnBuys, frgnSells, instBuys, instSells, dualBuy);
-    }
-
-    /** 확정값 맵에서 한 투자자의 순매수(buy=true)/순매도 상위 종목을 금액순으로 추린다. */
-    private static List<InvestorFlowItem> confirmedFlow(Map<String, String> names,
-                                                        Map<String, InvestorConfirmed> confirmed,
-                                                        KisClient.Investor inv, boolean buy) {
-        return confirmed.entrySet().stream()
-                .map(e -> new InvestorFlowItem(e.getKey(), names.getOrDefault(e.getKey(), e.getKey()),
-                        e.getValue().netWon(inv), 0.0))
-                .filter(it -> buy ? it.netValueWon() > 0 : it.netValueWon() < 0)
-                .sorted(buy ? Comparator.comparingLong(InvestorFlowItem::netValueWon).reversed()
-                        : Comparator.comparingLong(InvestorFlowItem::netValueWon))
-                .toList();
     }
 
     /** 한 투자자의 확정 순매수/순매도 상위를 재정렬해 1건 발송한다. 둘 다 비면 미발송(false). */

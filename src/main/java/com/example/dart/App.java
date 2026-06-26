@@ -150,7 +150,9 @@ public class App {
                     : new GeminiClient(config.geminiApiKey(), config.geminiModel());
             kisPollerService = new KisPollerService(
                     kisClient,   // 주가추적과 공유 — 토큰 분당 1회 발급 한도 때문에 인스턴스를 나누지 않는다.
-                    kisNotifier, new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm);
+                    kisNotifier,     // 표·급등·섹터·수급 랭킹 → KIS 채널
+                    newsNotifier,    // 시황 매크로 분석(LLM) → 뉴스 채널
+                    new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm);
             kisPollerService.start();
         } else {
             kisPollerService = null;

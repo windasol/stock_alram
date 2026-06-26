@@ -53,6 +53,7 @@ public record AppConfig(
         String discordKisChannelId,
         boolean marketReportEnabled,
         int marketReportIntervalMin,
+        boolean marketReportGrounding,
         String llmProvider,
         String geminiApiKey,
         String geminiModel,
@@ -255,6 +256,9 @@ public record AppConfig(
         // 환경변수/.env에 MARKET_REPORT_ENABLED=false 를 명시한다. (키 없으면 호출이 실패해도 안전하게 건너뜀)
         boolean marketReportEnabled  = Boolean.parseBoolean(resolveOrDefault(dotenv, "MARKET_REPORT_ENABLED", "true"));
         int marketReportIntervalMin  = Integer.parseInt(resolveOrDefault(dotenv, "MARKET_REPORT_INTERVAL_MIN", "60"));
+        // 시황 분석에 실시간 검색 그라운딩(Gemini google_search) 사용 여부. 기본 true.
+        // 그라운딩은 Gemini 2.5에서 검색 호출당 과금 — 끄면(false) 평문 분석(검색 없이 국내 실측만).
+        boolean marketReportGrounding = Boolean.parseBoolean(resolveOrDefault(dotenv, "MARKET_REPORT_GROUNDING", "true"));
         // 요약 생성 공급자 — gemini(클라우드, 무료한도·렉없음) 또는 ollama(로컬, 무료·PC부하).
         String llmProvider           = resolveOrDefault(dotenv, "LLM_PROVIDER", "gemini").trim().toLowerCase();
         // Gemini(Google AI Studio) — 키는 시스템 환경변수/.env로 주입(env 우선). 모델은 무료 flash 계열 기본.
@@ -322,7 +326,7 @@ public record AppConfig(
                 kisMinChangePct, kisCooldownMin,
                 kisMarketDivCode, kisSectorSummaryMin, kisInvestorFlowMin, kisGainerAlertEnabled,
                 kisPaper, webexKisRoomId, discordKisChannelId,
-                marketReportEnabled, marketReportIntervalMin,
+                marketReportEnabled, marketReportIntervalMin, marketReportGrounding,
                 llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel);
     }
 
