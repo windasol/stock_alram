@@ -59,6 +59,9 @@ public class KisClient {
     private static final String FRGNMEM_TRADE_ESTIMATE_PATH =
             "/uapi/domestic-stock/v1/quotations/frgnmem-trade-estimate";
     private static final String TR_FRGNMEM_TRADE_ESTIMATE = "FHKST644100C0";   // 외국계 매매종목 가집계(HTS [0430], 실시간 추정)
+    private static final String INVESTOR_TIME_BY_MARKET_PATH =
+            "/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market";
+    private static final String TR_MARKET_INVESTOR_TIME = "FHPTJ04030000";   // 시장별 투자자매매동향(시세) — 시장 전체 외국인·기관 순매수(가집계, 시간별)
     /**
      * 가집계 순매수 거래대금(frgn/orgn_ntby_tr_pbmn) 단위 — 원이 아니라 백만원이라 원으로 환산해 저장한다.
      * (실측: 응답값 6자리 ≈ 360,000 → 백만원 환산 시 3,600억으로 현실적. 원이면 36만원으로 비현실적.)
@@ -309,6 +312,51 @@ public class KisClient {
         } catch (Exception e) {
             log.warn("KIS 동시매매 수급 조회 실패 ({}): {}", buySide ? "순매수" : "순매도", e.toString());
             return List.of();
+        }
+    }
+
+    /**
+     * 시장별 투자자매매동향(시세, TR FHPTJ04030000) — 시장(코스피/코스닥) '전체'의 외국인·기관 순매수 가집계.
+     * 종목별 랭킹과 달리 시장 합계 한 건을 돌려준다. 장중 시간별로 갱신되는 추정치(가집계)다.
+     *
+     * @param marketLabel  표시·로그용 시장명("코스피"/"코스닥")
+     * @param fidInputIscd  FID_INPUT_ISCD(시장구분 코드) — ⚠ 첫 호출 로그로 검증 후 확정
+     * @param fidInputIscd2 FID_INPUT_ISCD_2(업종구분 코드) — ⚠ 첫 호출 로그로 검증 후 확정
+     * @return 시장 전체 외국인·기관 순매수(원). 실패·거부·빈 응답이면 null.
+     */
+    public MarketInvestorFlow marketInvestorFlow(String marketLabel, String fidInputIscd, String fidInputIscd2) {
+        try {
+            throttleFiCall();   // 유량제한 회피 — 가집계 계열과 호출 간격 공유
+            String query = "FID_INPUT_ISCD=" + fidInputIscd
+                    + "&FID_INPUT_ISCD_2=" + fidInputIscd2;
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + INVESTOR_TIME_BY_MARKET_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_MARKET_INVESTOR_TIME)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            MarketInvestorFlow flow = parseMarketInvestorFlow(response.body(), marketLabel);
+            // [시장수급진단 — 임시] 스키마(필드·시장코드·단위·행정렬) 확정 전까지 원본/결과를 로그로 남긴다.
+            if (flow == null) {
+                String body = response.body();
+                log.warn("[시장수급진단] {} 파싱 실패/빈응답 — 원본응답: {}", marketLabel,
+                        body.length() > 700 ? body.substring(0, 700) : body);
+            } else {
+                log.info("[시장수급진단] {} 외국인 {}원 · 기관 {}원", marketLabel,
+                        flow.foreignNetWon(), flow.institutionNetWon());
+            }
+            return flow;
+        } catch (Exception e) {
+            log.warn("KIS 시장 수급 조회 실패 ({}): {}", marketLabel, e.toString());
+            return null;
         }
     }
 
@@ -673,6 +721,32 @@ public class KisClient {
             log.warn("KIS 동시매매 수급 파싱 실패: {}", e.toString());
         }
         return result;
+    }
+
+    /**
+     * 시장별 투자자매매동향(시세) 응답에서 시장 전체 외국인·기관 순매수 거래대금을 읽는다.
+     * 시계열 output 중 최신 누적 행(output[0] 가정 — ⚠ 행 정렬은 첫 호출 로그로 검증)에서
+     * frgn/orgn_ntby_tr_pbmn을 백만원→원으로 환산({@link #NTBY_PBMN_UNIT_WON}). rt_cd!="0"·빈 응답이면 null.
+     * (네트워크 분리 — 테스트용 패키지 가시성)
+     */
+    static MarketInvestorFlow parseMarketInvestorFlow(String json, String marketLabel) {
+        try {
+            JsonNode root = new ObjectMapper().readTree(json);
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                log.warn("KIS 시장 수급({}) 비정상 응답: rt_cd={} msg={}",
+                        marketLabel, root.path("rt_cd").asText(), root.path("msg1").asText());
+                return null;
+            }
+            JsonNode out = root.path("output");
+            JsonNode row = out.isArray() ? (out.isEmpty() ? null : out.get(0)) : out;
+            if (row == null || row.isMissingNode()) return null;
+            long frgn = parseLong(row.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON;
+            long orgn = parseLong(row.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON;
+            return new MarketInvestorFlow(marketLabel, frgn, orgn);
+        } catch (Exception e) {
+            log.warn("KIS 시장 수급({}) 파싱 실패: {}", marketLabel, e.toString());
+            return null;
+        }
     }
 
     /**

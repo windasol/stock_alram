@@ -229,11 +229,18 @@ class KisPollerServiceTest {
                 "005930", "반도체", "000660", "반도체", "373220", "2차전지", "035720", "미분류");
 
         String facts = KisPollerService.buildFlowFacts(
+                "🇰🇷 **국내 지수** | 코스피 -0.8%, 코스닥 +0.5%",
+                "📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억",
+                "💱 **원달러** | 1,350.2원 (+0.9%)",
                 "🌎 **미국 선물** | S&P +0.4%", frgnBuys, frgnSells, instBuys, instSells,
                 dualBuy, "💰 거래대금 섹터 랭킹 ...", sectors);
 
-        // 미선물 한 줄이 맨 앞
-        assertTrue(facts.startsWith("🌎 **미국 선물** | S&P +0.4%"), facts);
+        // 인과 사슬 순서: 지수(맨 앞) → 시장 전체 수급 → 환율 → 미선물 → 종목별 수급
+        assertTrue(facts.startsWith("🇰🇷 **국내 지수** | 코스피 -0.8%, 코스닥 +0.5%"), facts);
+        assertTrue(facts.indexOf("국내 지수") < facts.indexOf("시장 수급"), facts);
+        assertTrue(facts.indexOf("시장 수급") < facts.indexOf("원달러"), facts);
+        assertTrue(facts.indexOf("원달러") < facts.indexOf("미국 선물"), facts);
+        assertTrue(facts.indexOf("미국 선물") < facts.indexOf("[외국인]"), facts);
         // 외국인 순매수에 업종 주석 + 금액
         assertTrue(facts.contains("삼성전자(반도체) +1,200억"), facts);
         assertTrue(facts.contains("SK하이닉스(반도체) +800억"), facts);
@@ -257,15 +264,39 @@ class KisPollerServiceTest {
         Map<String, String> sectors = Map.of("005930", "반도체");
 
         String facts = KisPollerService.buildFlowFacts(
-                null, frgnBuys, List.of(), List.of(), List.of(),
+                null, null, null, null, frgnBuys, List.of(), List.of(), List.of(),
                 List.of(), null, sectors);
 
-        // 미선물 없으면 외국인 줄로 시작
+        // 지수·시장수급·환율·미선물 없으면 외국인 줄로 시작
         assertTrue(facts.startsWith("[외국인] 순매수: 삼성전자(반도체) +1,200억"), facts);
         // 양매수 섹션 없음
         assertFalse(facts.contains("양매수"), facts);
         // 거래대금 랭킹 없음
         assertFalse(facts.contains("거래대금"), facts);
+    }
+
+    @Test
+    void 시장_전체수급_헤드라인은_코스피_코스닥_외국인_기관을_보여준다() {
+        List<MarketInvestorFlow> flows = List.of(
+                new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L),
+                new MarketInvestorFlow("코스닥", 42_000_000_000L, -18_000_000_000L));
+        String msg = KisPollerService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
+
+        assertTrue(msg.startsWith("📊 **시장 수급** | 13:40  (가집계)"), msg);
+        assertTrue(msg.contains("코스피"), msg);
+        assertTrue(msg.contains("🌍 외국인 -3,200억"), msg);
+        assertTrue(msg.contains("🏛 기관 +1,500억"), msg);
+        assertTrue(msg.contains("코스닥"), msg);
+        assertTrue(msg.contains("🌍 외국인 +420억"), msg);
+        assertTrue(msg.contains("🏛 기관 -180억"), msg);
+    }
+
+    @Test
+    void 시장_전체수급_리포트라인은_컴팩트_한줄이고_비면_null() {
+        assertNull(KisPollerService.marketFlowLine(List.of()));
+        String line = KisPollerService.marketFlowLine(List.of(
+                new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L)));
+        assertEquals("📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억", line);
     }
 
     @Test

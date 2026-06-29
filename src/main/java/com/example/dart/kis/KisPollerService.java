@@ -2,6 +2,7 @@ package com.example.dart.kis;
 
 import com.example.dart.config.AppConfig;
 import com.example.dart.llm.LlmClient;
+import com.example.dart.market.DomesticMarketClient;
 import com.example.dart.market.UsFuturesClient;
 import com.example.dart.notify.Notifier;
 import org.slf4j.Logger;
@@ -108,6 +109,8 @@ public class KisPollerService {
     private final int sectorSummaryMin;
     /** 장중 외국인·기관 수급 랭킹 주기(분). 0이면 비활성. */
     private final int investorFlowMin;
+    /** 코스피·코스닥 '시장 전체' 외국인·기관 순매수 헤드라인 주기(분). 0이면 비활성. */
+    private final int marketFlowMin;
     /** 급등(개별 종목) 알림 활성 여부. false면 급등 알림을 보내지 않는다(수급 랭킹만 운용 등). */
     private final boolean gainerAlertEnabled;
     /** 장 흐름 분석 리포트용 LLM(Gemini/Ollama). null이면 리포트 비활성. */
@@ -118,6 +121,14 @@ public class KisPollerService {
     private final boolean reportGrounding;
     /** 리포트 '대외 여건'용 미국 선물 조회기. 실패해도 국내 리포트는 계속된다. */
     private final UsFuturesClient usFutures = new UsFuturesClient();
+    /** 리포트 '국내 지수(코스피·코스닥)·원달러 환율'용 조회기. 실패해도 국내 리포트는 계속된다. */
+    private final DomesticMarketClient domesticMarket = new DomesticMarketClient();
+    /** 시장 전체 수급(시세) 시장/업종 코드 — ⚠ 첫 호출 [시장수급진단] 로그로 검증 후 조정. */
+    private static final String MARKET_FLOW_KOSPI_ISCD = "0001";    // 코스피 종합
+    private static final String MARKET_FLOW_KOSDAQ_ISCD = "1001";   // 코스닥 종합
+    private static final String MARKET_FLOW_ISCD2 = "0001";         // 업종구분(종합)
+    /** 최신 시장 전체 수급 스냅샷 — 틱이 갱신하고 시황 리포트가 읽는다. */
+    private volatile List<MarketInvestorFlow> lastMarketFlows = List.of();
 
     /** 종목코드 → 마지막 알림 시각. 쿨다운 내 재알림 억제. */
     private final Map<String, Instant> lastAlert = new ConcurrentHashMap<>();
@@ -153,6 +164,7 @@ public class KisPollerService {
         this.cooldown = Duration.ofMinutes(config.kisCooldownMin());
         this.sectorSummaryMin = config.kisSectorSummaryMin();
         this.investorFlowMin = config.kisInvestorFlowMin();
+        this.marketFlowMin = config.kisMarketFlowMin();
         this.gainerAlertEnabled = config.kisGainerAlertEnabled();
         this.sectorsFile = sectorsFile;
         // 리포트는 LLM이 주입되고 활성 설정일 때만 동작(둘 중 하나라도 없으면 비활성).
@@ -181,6 +193,13 @@ public class KisPollerService {
             // 재시작 즉시 1회 발송(initialDelay=0)한 뒤 주기 반복 — 벽시계 정렬을 두지 않는다. (수급 표만, 분석은 별도 스케줄)
             scheduler.scheduleWithFixedDelay(this::investorFlowTick, 0, periodSec, TimeUnit.SECONDS);
             log.info("KIS 외국인·기관 수급 랭킹 활성 ({}분 주기, 재시작 즉시 발송)", investorFlowMin);
+        }
+
+        // 시장 전체(코스피·코스닥) 외국인·기관 순매수 헤드라인 — N분 주기로 KIS 채널에 한 줄 발송.
+        if (marketFlowMin > 0) {
+            long periodSec = marketFlowMin * 60L;
+            scheduler.scheduleWithFixedDelay(this::marketFlowTick, 0, periodSec, TimeUnit.SECONDS);
+            log.info("KIS 시장 전체 수급 헤드라인 활성 ({}분 주기, 재시작 즉시 발송)", marketFlowMin);
         }
 
         // 시황 매크로 분석(시간당) — 실시간 검색 그라운딩으로 "지금 왜?"(미선물 이유·경제 일정·시황)를 뉴스 채널로.
@@ -476,8 +495,13 @@ public class KisPollerService {
         Map<String, String> sectorByCode = resolveSectors(codes);
 
         String turnover = buildTurnoverRanking(sess, sess.label, time);  // 거래대금 섹터 랭킹(null 가능)
+        String indexLine = domesticMarket.indexSummaryLine();            // 국내 지수 코스피·코스닥(null 가능)
+        String fxLine = domesticMarket.fxSummaryLine();                  // 원달러 환율(null 가능)
         String usFuturesLine = usFutures.summaryLine();                  // 대외 여건(null 가능)
-        String facts = buildFlowFacts(usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
+        // 시장 전체 수급 — 틱이 저장한 최신 스냅샷을 쓰되, 없으면(헤드라인 비활성 등) 즉석 조회.
+        List<MarketInvestorFlow> mf = lastMarketFlows.isEmpty() ? fetchMarketFlows() : lastMarketFlows;
+        String marketFlowLine = marketFlowLine(mf);                      // 시장 전체 외국인·기관(null 가능)
+        String facts = buildFlowFacts(indexLine, marketFlowLine, fxLine, usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
 
         // 그라운딩 ON이면 실시간 검색으로 "왜?"를 끌어온다. 단 무료 티어/권한 문제로 그라운딩이 실패할 수 있어
         // 실패하면 평문(chat)으로 폴백한다 — 분석이 통째로 빠지지 않게(평문은 국내 실측만, "왜?"는 약함).
@@ -504,13 +528,19 @@ public class KisPollerService {
      * 미선물 한 줄(있으면) → 외국인/기관 순매수·순매도(종목명(업종) +금액, TOP) → 외국인+기관 양매수 →
      * 거래대금 섹터 랭킹(있으면) 순. 업종은 sectorByCode에서 붙이되 미상·미분류면 생략한다.
      */
-    static String buildFlowFacts(String usFuturesLine,
+    static String buildFlowFacts(String indexLine, String marketFlowLine, String fxLine, String usFuturesLine,
                                  List<InvestorFlowItem> frgnBuys, List<InvestorFlowItem> frgnSells,
                                  List<InvestorFlowItem> instBuys, List<InvestorFlowItem> instSells,
                                  List<InvestorPairItem> dualBuy, String turnoverRanking,
                                  Map<String, String> sectorByCode) {
         StringBuilder sb = new StringBuilder();
-        if (usFuturesLine != null) sb.append(usFuturesLine).append("\n\n");
+        // 인과 사슬 순서로 맨 앞에: 지수(결과) → 시장 전체 수급(누가 사고파나) → 환율·미선물(대외 원인) → 그 뒤 종목별 수급.
+        boolean hasMarket = false;
+        if (indexLine != null) { sb.append(indexLine).append("\n"); hasMarket = true; }
+        if (marketFlowLine != null) { sb.append(marketFlowLine).append("\n"); hasMarket = true; }
+        if (fxLine != null) { sb.append(fxLine).append("\n"); hasMarket = true; }
+        if (usFuturesLine != null) { sb.append(usFuturesLine).append("\n"); hasMarket = true; }
+        if (hasMarket) sb.append("\n");
         sb.append("[외국인] 순매수: ").append(flowLine(frgnBuys, sectorByCode));
         sb.append("\n         순매도: ").append(flowLine(frgnSells, sectorByCode));
         sb.append("\n[기관] 순매수: ").append(flowLine(instBuys, sectorByCode));
@@ -540,16 +570,23 @@ public class KisPollerService {
     }
 
     private static final String MACRO_SYSTEM_PROMPT =
-            "너는 한국 주식시장 시황 분석가다. 아래 '국내 실측 데이터'(외국인·기관 수급 상위·업종, 외국인+기관 양매수, "
-            + "거래대금 섹터 랭킹, 미국 선물 등락률)는 사실이다. 여기에 더해 Google 검색으로 지금 시점의 "
-            + "① 미국 주가지수 선물이 오르거나 내리는 '이유' ② 오늘과 이번 주 주요 경제 일정(FOMC·CPI·고용지표·주요 기업 실적 등) "
-            + "③ 현재 글로벌 시장 분위기를 확인하라. 그런 다음 검색으로 확인된 사실과 국내 수급을 엮어 "
-            + "'지금 시장이 왜 이런지'를 한국어로 설명한다. 검색으로 확인되지 않은 추측·소문은 쓰지 마라. "
-            + "과장·투자권유 금지. 5~8문장으로 쓰고, 마지막에 '오늘/이번 주 체크포인트'를 2~3개 불릿으로 정리한다.";
+            "너는 한국 주식시장 시황 분석가다. 아래 '국내 실측 데이터'(국내 지수 코스피·코스닥 등락, "
+            + "시장 전체 외국인·기관 순매수(가집계), 원달러 환율, "
+            + "미국 선물 등락률, 외국인·기관 수급 상위·업종, 외국인+기관 양매수, 거래대금 섹터 랭킹)는 사실이다. "
+            + "여기에 더해 Google 검색으로 지금 시점의 ① 미국 선물·해외 증시가 오르거나 내리는 '이유' "
+            + "② 한국의 정책 발표나 외국인 매도(또는 매수)를 유발한 이벤트, 원달러 환율이 움직인 배경 "
+            + "③ 오늘과 이번 주 주요 경제 일정(FOMC·CPI·고용지표·주요 기업 실적 등)을 확인하라. "
+            + "그런 다음 다음 순서로 '지금 시장이 왜 이렇게 움직이는지'를 한국어로 설명한다: "
+            + "(1) 코스피·코스닥 지수 현황을 짚되 둘이 엇갈리면(디버전스) 그 점을 먼저 설명한다 "
+            + "(2) 외국인·기관이 각각 무엇을 사고/파는지 수급을 정리한다 "
+            + "(3) 외국인 매도(또는 매수)의 '이유'를 원달러 환율·미국 선물·국내 정책 발표·해외 이벤트와 엮어 설명한다 "
+            + "(4) 마지막에 '오늘/이번 주 체크포인트'를 2~3개 불릿으로 정리한다. "
+            + "검색으로 확인되지 않은 추측·소문은 쓰지 마라. 과장·투자권유 금지. 본문은 5~8문장.";
 
     private static final String MACRO_USER_PROMPT =
-            "아래는 지금 국내 수급·미국 선물 실측이다. 위 지침대로 검색을 활용해 '왜 지금 시장이 이런지'"
-            + "(미선물 등락 이유, 경제 일정, 글로벌 시황)를 국내 수급과 엮어 분석해줘.";
+            "아래는 지금 국내 지수·환율·미국 선물·수급 실측이다. 위 지침의 순서(지수 디버전스 → 수급 → "
+            + "외국인 매매 이유(환율·미선물·정책·해외 이벤트) → 체크포인트)대로, 검색을 활용해 "
+            + "'왜 지금 시장이 이렇게 움직이는지'를 분석해줘.";
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.
@@ -691,6 +728,34 @@ public class KisPollerService {
             }
             case ESTIMATE -> sendEstimateFlow(time);   // 정규장 추정 10분 폴링(표 + 분석)
         }
+    }
+
+    /**
+     * 시장 전체(코스피·코스닥) 외국인·기관 순매수 헤드라인을 주기로 KIS 채널에 보낸다(장중·평일만).
+     * 종목별 랭킹과 별개로 "시장 전체로 누가 사고/파는지"를 한눈에. 최신 스냅샷은 시황 리포트도 읽는다.
+     */
+    private void marketFlowTick() {
+        ZonedDateTime now = ZonedDateTime.now(KST);
+        if (currentSession(now) == null) return;   // 장외·주말이면 스킵
+        LocalTime time = now.toLocalTime();
+        List<MarketInvestorFlow> flows = fetchMarketFlows();
+        if (flows.isEmpty()) return;   // 조회 실패(거부·빈응답) — 채널엔 안 보냄(로그만)
+        lastMarketFlows = flows;       // 시황 리포트가 읽도록 저장
+        try {
+            notifier.send(composeMarketFlow(flows, time, "가집계"));   // 급등·수급표와 같은 KIS 채널
+        } catch (Exception e) {
+            log.warn("시장 전체 수급 헤드라인 전송 실패", e);
+        }
+    }
+
+    /** 코스피·코스닥 시장 전체 수급을 각각 조회해 성공분만 모은다(가집계 시계열의 최신 누적). */
+    private List<MarketInvestorFlow> fetchMarketFlows() {
+        List<MarketInvestorFlow> flows = new ArrayList<>();
+        MarketInvestorFlow kospi = client.marketInvestorFlow("코스피", MARKET_FLOW_KOSPI_ISCD, MARKET_FLOW_ISCD2);
+        if (kospi != null) flows.add(kospi);
+        MarketInvestorFlow kosdaq = client.marketInvestorFlow("코스닥", MARKET_FLOW_KOSDAQ_ISCD, MARKET_FLOW_ISCD2);
+        if (kosdaq != null) flows.add(kosdaq);
+        return flows;
     }
 
     /**
@@ -890,6 +955,35 @@ public class KisPollerService {
      * Webex 마크다운은 표(| |)를 렌더하지 않으므로 코드블록(고정폭) 안에 한글 표시폭을 맞춰 ASCII로 정렬한다.
      * 셀은 종목명 + 순매수금액(컴팩트, 등락률 생략). 같은 순위 행에 매수·매도가 함께 온다. (순수 함수 — 테스트용)
      */
+    /**
+     * 시장 전체(코스피·코스닥) 외국인·기관 순매수 헤드라인 메시지. (순수 함수 — 테스트용)
+     * 예: "📊 **시장 수급** | 13:40 (가집계)\n코스피  🌍 외국인 -3,200억 · 🏛 기관 +1,500억\n코스닥 ...".
+     */
+    static String composeMarketFlow(List<MarketInvestorFlow> flows, LocalTime time, String tag) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("📊 **시장 수급** | %s  (%s)", SUMMARY_TIME_FMT.format(time), tag));
+        for (MarketInvestorFlow f : flows) {
+            sb.append(String.format("%n%s  %s %s · %s %s",
+                    f.market(),
+                    KisClient.Investor.FOREIGN.label(), formatNetWon(f.foreignNetWon()),
+                    KisClient.Investor.INSTITUTION.label(), formatNetWon(f.institutionNetWon())));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 시황 리포트 facts용 시장 전체 수급 한 줄(컴팩트). 비면 null.
+     * 예: "📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억 / 코스닥 외국인 +420억·기관 -180억". (순수 함수 — 테스트용)
+     */
+    static String marketFlowLine(List<MarketInvestorFlow> flows) {
+        if (flows.isEmpty()) return null;
+        String body = flows.stream()
+                .map(f -> String.format("%s 외국인 %s·기관 %s",
+                        f.market(), formatNetWon(f.foreignNetWon()), formatNetWon(f.institutionNetWon())))
+                .collect(Collectors.joining(" / "));
+        return "📊 시장 수급 | " + body;
+    }
+
     static String composeInvestorFlow(KisClient.Investor inv, List<InvestorFlowItem> buys,
                                       List<InvestorFlowItem> sells, String session, LocalTime time, String tag) {
         StringBuilder sb = new StringBuilder();
