@@ -272,8 +272,8 @@ class KisClientTest {
                 {
                   "rt_cd": "0", "msg1": "정상처리",
                   "output": [
-                    { "frgn_ntby_tr_pbmn": "-320,000", "orgn_ntby_tr_pbmn": "150,000" },
-                    { "frgn_ntby_tr_pbmn": "-100,000", "orgn_ntby_tr_pbmn": "50,000" }
+                    { "frgn_ntby_tr_pbmn": "-320,000", "orgn_ntby_tr_pbmn": "150,000", "prsn_ntby_tr_pbmn": "170,000" },
+                    { "frgn_ntby_tr_pbmn": "-100,000", "orgn_ntby_tr_pbmn": "50,000", "prsn_ntby_tr_pbmn": "50,000" }
                   ]
                 }
                 """;
@@ -281,15 +281,17 @@ class KisClientTest {
         assertEquals("코스피", f.market());
         assertEquals(-320_000L * 1_000_000L, f.foreignNetWon());     // -3,200억(순매도)
         assertEquals(150_000L * 1_000_000L, f.institutionNetWon());  // +1,500억(순매수)
+        assertEquals(170_000L * 1_000_000L, f.individualNetWon());   // +1,700억(개인 순매수)
     }
 
     @Test
     void 시장_전체수급_output이_객체여도_파싱한다() {
         // 일부 응답은 output이 배열이 아니라 단일 객체일 수 있다 — 그대로 읽는다.
-        String json = "{\"rt_cd\":\"0\",\"output\":{\"frgn_ntby_tr_pbmn\":\"42,000\",\"orgn_ntby_tr_pbmn\":\"-18,000\"}}";
+        String json = "{\"rt_cd\":\"0\",\"output\":{\"frgn_ntby_tr_pbmn\":\"42,000\",\"orgn_ntby_tr_pbmn\":\"-18,000\",\"prsn_ntby_tr_pbmn\":\"-24,000\"}}";
         MarketInvestorFlow f = KisClient.parseMarketInvestorFlow(json, "코스닥");
         assertEquals(42_000L * 1_000_000L, f.foreignNetWon());
         assertEquals(-18_000L * 1_000_000L, f.institutionNetWon());
+        assertEquals(-24_000L * 1_000_000L, f.individualNetWon());
     }
 
     @Test

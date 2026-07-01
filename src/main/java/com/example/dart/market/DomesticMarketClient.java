@@ -62,6 +62,19 @@ public class DomesticMarketClient {
     }
 
     /**
+     * 수급 알림 헤드라인용 국내 지수 한 줄 — 지수 값(레벨)과 전일 대비 방향·등락률까지.
+     * 예: "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%".
+     * {@link #indexSummaryLine()}(등락률만, 시황 리포트용)과 달리 현재 값(레벨)을 보존한다. 전부 실패면 null.
+     */
+    public String indexHeadlineLine() {
+        List<IndexQuote> quotes = new ArrayList<>();
+        for (Symbol s : INDICES) {
+            fetch(s.code()).ifPresent(snap -> quotes.add(new IndexQuote(s.label(), snap.price(), snap.pct())));
+        }
+        return formatIndexHeadline(quotes);
+    }
+
+    /**
      * 원달러 환율 한 줄(예: "💱 **원달러** | 1,350.2원 (+0.9%)"). 실패면 null.
      * 환율은 등락률뿐 아니라 레벨까지 표기한다 — "1,350원 돌파" 같은 절대값이 외국인 매매에 직접 작용하기 때문.
      */
@@ -121,6 +134,22 @@ public class DomesticMarketClient {
         return sb.toString();
     }
 
+    /**
+     * 지수 값·방향·등락률 목록을 "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%" 한 줄로.
+     * 화살표는 상승 ▲ / 하락 ▼ / 보합 —. 빈 목록이면 null. (순수 함수 — 테스트용)
+     */
+    static String formatIndexHeadline(List<IndexQuote> quotes) {
+        if (quotes.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder("🇰🇷 ");
+        for (int i = 0; i < quotes.size(); i++) {
+            if (i > 0) sb.append(" · ");
+            IndexQuote q = quotes.get(i);
+            String arrow = q.pct() > 0 ? "▲" : q.pct() < 0 ? "▼" : "—";
+            sb.append(String.format("%s %,.2f %s %+.2f%%", q.label(), q.price(), arrow, q.pct()));
+        }
+        return sb.toString();
+    }
+
     /** 환율 스냅샷을 "💱 **원달러** | 1,350.2원 (+0.9%)" 한 줄로. (순수 함수 — 테스트용) */
     static String formatFx(Snapshot snap) {
         return String.format("💱 **원달러** | %,.1f원 (%+.1f%%)", snap.price(), snap.pct());
@@ -131,6 +160,9 @@ public class DomesticMarketClient {
 
     /** 표시 라벨 + 등락률(%). */
     record Quote(String label, double pct) {}
+
+    /** 표시 라벨 + 현재 값(레벨) + 전일 대비 등락률(%). (수급 헤드라인용) */
+    record IndexQuote(String label, double price, double pct) {}
 
     /** 현재가(레벨) + 전일 대비 등락률(%). */
     record Snapshot(double price, double pct) {}

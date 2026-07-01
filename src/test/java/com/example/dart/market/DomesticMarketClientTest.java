@@ -76,6 +76,26 @@ class DomesticMarketClientTest {
     }
 
     @Test
+    void 지수_헤드라인은_값과_화살표와_부호붙은_퍼센트를_가운뎃점으로_잇는다() {
+        String line = DomesticMarketClient.formatIndexHeadline(List.of(
+                new DomesticMarketClient.IndexQuote("코스피", 2750.32, 0.82),
+                new DomesticMarketClient.IndexQuote("코스닥", 850.10, -0.35)));
+        assertEquals("🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%", line);
+    }
+
+    @Test
+    void 지수_헤드라인_보합이면_대시_화살표() {
+        String line = DomesticMarketClient.formatIndexHeadline(List.of(
+                new DomesticMarketClient.IndexQuote("코스피", 2700.00, 0.0)));
+        assertEquals("🇰🇷 코스피 2,700.00 — +0.00%", line);
+    }
+
+    @Test
+    void 지수_헤드라인_빈목록이면_null() {
+        assertNull(DomesticMarketClient.formatIndexHeadline(List.of()));
+    }
+
+    @Test
     void 환율_포맷은_천단위쉼표_레벨과_등락률() {
         String line = DomesticMarketClient.formatFx(new Snapshot(1350.2, 0.9));
         assertEquals("💱 **원달러** | 1,350.2원 (+0.9%)", line);

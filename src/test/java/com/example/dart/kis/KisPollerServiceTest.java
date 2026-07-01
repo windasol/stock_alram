@@ -150,6 +150,36 @@ class KisPollerServiceTest {
     }
 
     @Test
+    void 수급_랭킹_지수라인을_넘기면_제목_아래에_코스피_헤드라인이_붙는다() {
+        List<InvestorFlowItem> buys = List.of(
+                new InvestorFlowItem("005930", "삼성전자", 123_400_000_000L, 2.1));
+        String indexLine = "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%";
+
+        String msg = KisPollerService.composeInvestorFlow(
+                KisClient.Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간", indexLine);
+
+        assertTrue(msg.contains(indexLine), msg);
+        // 제목 줄 바로 다음(코드블록 시작 전)에 지수 헤드라인이 온다
+        List<String> lines = msg.lines().toList();
+        assertTrue(lines.get(0).contains("외국인") && lines.get(0).contains("수급 TOP"), lines.get(0));
+        assertEquals(indexLine, lines.get(1));
+    }
+
+    @Test
+    void 수급_랭킹_지수라인이_null이면_헤드라인_없이_기존과_동일() {
+        List<InvestorFlowItem> buys = List.of(
+                new InvestorFlowItem("005930", "삼성전자", 123_400_000_000L, 2.1));
+
+        String withNull = KisPollerService.composeInvestorFlow(
+                KisClient.Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간", null);
+        String sixArg = KisPollerService.composeInvestorFlow(
+                KisClient.Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간");
+
+        assertEquals(sixArg, withNull);
+        assertFalse(withNull.contains("🇰🇷"), withNull);
+    }
+
+    @Test
     void 수급_랭킹_양쪽_다_비면_데이터없음_표기() {
         String msg = KisPollerService.composeInvestorFlow(
                 KisClient.Investor.INSTITUTION, List.of(), List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
@@ -276,27 +306,44 @@ class KisPollerServiceTest {
     }
 
     @Test
-    void 시장_전체수급_헤드라인은_코스피_코스닥_외국인_기관을_보여준다() {
+    void 시장_전체수급_헤드라인은_시장전체_외국인_기관을_접두어없이_보여준다() {
+        // 시장 전체(빈 라벨) 한 건 — 코스피/코스닥 분리 없이 한 줄.
         List<MarketInvestorFlow> flows = List.of(
-                new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L),
-                new MarketInvestorFlow("코스닥", 42_000_000_000L, -18_000_000_000L));
+                new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L));
         String msg = KisPollerService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
 
         assertTrue(msg.startsWith("📊 **시장 수급** | 13:40  (가집계)"), msg);
-        assertTrue(msg.contains("코스피"), msg);
         assertTrue(msg.contains("🌍 외국인 -3,200억"), msg);
         assertTrue(msg.contains("🏛 기관 +1,500억"), msg);
-        assertTrue(msg.contains("코스닥"), msg);
-        assertTrue(msg.contains("🌍 외국인 +420억"), msg);
-        assertTrue(msg.contains("🏛 기관 -180억"), msg);
+        assertTrue(msg.contains("👤 개인 +1,700억"), msg);
+        // 빈 시장 라벨이면 접두어("코스피"/"코스닥")가 붙지 않는다.
+        assertFalse(msg.contains("코스피"), msg);
+        assertFalse(msg.contains("코스닥"), msg);
+        // 라벨 자리 앞 공백 없이 외국인 라벨이 줄 맨 앞에 온다.
+        assertTrue(msg.contains("\n🌍 외국인 -3,200억"), msg);
+    }
+
+    @Test
+    void 시장_전체수급_헤드라인에_지수라인을_넘기면_제목_아래에_코스피가_붙는다() {
+        List<MarketInvestorFlow> flows = List.of(
+                new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L));
+        String indexLine = "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%";
+
+        String msg = KisPollerService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계", indexLine);
+
+        // 제목(0) → 지수(1) → 수급(2) 순서
+        List<String> lines = msg.lines().toList();
+        assertTrue(lines.get(0).startsWith("📊 **시장 수급**"), lines.get(0));
+        assertEquals(indexLine, lines.get(1));
+        assertTrue(lines.get(2).contains("🌍 외국인 -3,200억"), lines.get(2));
     }
 
     @Test
     void 시장_전체수급_리포트라인은_컴팩트_한줄이고_비면_null() {
         assertNull(KisPollerService.marketFlowLine(List.of()));
         String line = KisPollerService.marketFlowLine(List.of(
-                new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L)));
-        assertEquals("📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억", line);
+                new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L)));
+        assertEquals("📊 시장 수급 | 외국인 -3,200억·기관 +1,500억·개인 +1,700억", line);
     }
 
     @Test
