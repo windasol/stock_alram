@@ -13,6 +13,7 @@ kis_token.txt
 kis_gainers.txt
 kis_sectors.txt
 disclosure_price_stats.jsonl
+kis_marketflow_probe.txt
 app.lock
 bash.exe.stackdump
 grep.exe.stackdump

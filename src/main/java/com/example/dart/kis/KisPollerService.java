@@ -124,15 +124,34 @@ public class KisPollerService {
     /** 리포트 '국내 지수(코스피·코스닥)·원달러 환율'용 조회기. 실패해도 국내 리포트는 계속된다. */
     private final DomesticMarketClient domesticMarket = new DomesticMarketClient();
     /**
-     * 시장 전체 수급(시세) 시장/업종 코드 — KIS 공식 표준 호출값(TR FHPTJ04030000).
-     * 프로브 실측상 0001/1001(코스피/코스닥)·0000 등은 rt_cd=0이지만 값이 전부 0이고,
-     * 999/S001 조합만 실데이터(시장 전체 한 행)를 돌려준다. 시장별 분리 코드는 미검증이라 전체 한 줄로 본다.
+     * 시장 '전체' 수급(시세) 코드 — TR FHPTJ04030000의 표준 호출값(999/S001).
+     * 코스피/코스닥 분리 코드를 못 찾을 때의 폴백(합친 한 줄)로 쓴다.
      */
     private static final String MARKET_FLOW_ISCD  = "999";
     private static final String MARKET_FLOW_ISCD2 = "S001";
+    /**
+     * 코스피·코스닥 '시장별' 수급 후보 코드 — {@link KisClient#marketInvestorFlow}에 넘길 조합.
+     * 직전 프로브에서 0001/S001·1001/S001(div 없음)은 전부 0이었으므로, FID_COND_MRKT_DIV_CODE(U 업종/J 주식)를
+     * 붙인 변형과 빈 ISCD_2 변형을 앞에 둔다. 시장별로 '외국인·기관이 0이 아닌' 첫 응답을 채택하고 캐시한다.
+     * 전부 실패하면 위 999/S001(전체) 한 줄로 폴백 — 지금 동작을 절대 깨지 않는다.
+     */
+    private record MarketFlowCode(String label, String iscd, String iscd2, String div) {}
+    private static final List<MarketFlowCode> KOSPI_CANDIDATES = List.of(
+            new MarketFlowCode("코스피", "0001", "S001", "U"),
+            new MarketFlowCode("코스피", "0001", "S001", "J"),
+            new MarketFlowCode("코스피", "0001", "",     "U"),
+            new MarketFlowCode("코스피", "0001", "S001", ""));
+    private static final List<MarketFlowCode> KOSDAQ_CANDIDATES = List.of(
+            new MarketFlowCode("코스닥", "1001", "S001", "U"),
+            new MarketFlowCode("코스닥", "1001", "S001", "J"),
+            new MarketFlowCode("코스닥", "1001", "",     "U"),
+            new MarketFlowCode("코스닥", "1001", "S001", ""));
+    /** 시장별로 확정된 유효 코드 캐시 — 한 번 찾으면 그 조합만 호출(매 틱 전체 후보 재탐색 방지). null=미확정. */
+    private volatile MarketFlowCode kospiFlowCode;
+    private volatile MarketFlowCode kosdaqFlowCode;
     /** 개인 투자자 표시 라벨 — Investor enum(외국인·기관)엔 없어 시장 전체 수급용으로 별도 정의. */
     private static final String INDIVIDUAL_LABEL = "👤 개인";
-    /** 최신 시장 전체 수급 스냅샷 — 틱이 갱신하고 시황 리포트가 읽는다. */
+    /** 최신 시장 수급 스냅샷(코스피·코스닥 분리 또는 전체 폴백) — 틱이 갱신하고 시황 리포트가 읽는다. */
     private volatile List<MarketInvestorFlow> lastMarketFlows = List.of();
 
     /** 종목코드 → 마지막 알림 시각. 쿨다운 내 재알림 억제. */
@@ -766,20 +785,23 @@ public class KisPollerService {
             log.info("[시장수급진단] 장외 — 코드 탐색 스킵(장중에 재시작해 다시 시도)");
             return;
         }
-        // 목표: 코스피/코스닥 분리 코드 확정. S001(작동하는 ISCD_2)에 시장코드(999=전체 대신 0001=코스피·1001=코스닥·
-        // 2001=코스피200)를 짝지운 조합을 최우선으로 본다 — 이전 탐색이 놓친 자리다.
-        // 판정: 0001/S001 + 1001/S001 의 외국인·기관 합이 999/S001(전체)과 대략 일치하면 시장별 분리 성공.
+        // 목표: 코스피/코스닥 분리 코드 확정. 각 조합은 {FID_INPUT_ISCD, FID_INPUT_ISCD_2, FID_COND_MRKT_DIV_CODE}.
+        // 직전 프로브(0001/S001·1001/S001·2001/S001)가 전부 0을 반환해, 이번엔 미검증 조합을 추가한다:
+        //  ① 시장코드+빈 ISCD_2  ② 시장코드 자기 짝  ③ FID_COND_MRKT_DIV_CODE(U=업종·J=주식) 추가.
+        // 판정: 코스피 + 코스닥 후보의 외국인·기관 합이 999/S001(전체)과 대략 일치하면 시장별 분리 성공.
         String[][] combos = {
-                {"0001", "S001"}, {"1001", "S001"}, {"2001", "S001"},   // ★ 코스피·코스닥·코스피200 후보(최우선)
-                {"999", "S001"}, {"999", "S002"}, {"999", "S003"}, {"999", "S004"}, {"999", "S005"},
-                {"999", "S006"}, {"999", "S007"}, {"999", "S008"}, {"999", "S009"}, {"999", "S010"},
-                {"999", "0001"}, {"999", "1001"}, {"999", "2001"}, {"999", "0000"}, {"999", "U001"},
-                {"0001", "999"}, {"1001", "999"}, {"0000", "S001"}
+                {"0001", "", ""}, {"1001", "", ""}, {"2001", "", ""},            // ★ 시장코드+빈 ISCD_2
+                {"0001", "0001", ""}, {"1001", "1001", ""},                       // ★ 시장코드 자기 짝
+                {"0001", "S001", "U"}, {"1001", "S001", "U"}, {"2001", "S001", "U"}, // ★ 업종 div
+                {"0001", "S001", "J"}, {"1001", "S001", "J"},                     // ★ 주식 div
+                {"0001", "", "U"}, {"1001", "", "U"},                             // ★ 빈 ISCD_2 + 업종 div
+                {"0001", "S001", ""}, {"1001", "S001", ""}, {"2001", "S001", ""}, // 직전과 동일(대조군)
+                {"999", "S001", ""},                                             // 전체(기준값)
         };
         StringBuilder sb = new StringBuilder("=== 시장수급 코드 탐색 ").append(ZonedDateTime.now(KST))
-                .append(" (외국인매도량 큰 + 기관 매수방향 일치 코드가 시장 전체) ===\n");
+                .append(" (코스피+코스닥 외국인·기관 합 ≈ 999/S001 전체면 분리 성공) ===\n");
         for (String[] c : combos) {
-            sb.append(client.marketFlowProbeLine(c[0], c[1])).append('\n');
+            sb.append(client.marketFlowProbeLine(c[0], c[1], c[2])).append('\n');
         }
         String report = sb.toString();
         try {
@@ -790,14 +812,51 @@ public class KisPollerService {
         }
     }
 
-    /** 시장 전체 수급(가집계 시계열의 최신 누적)을 한 번 조회한다. 시장 라벨은 비워 둔다(전체이므로).
-     *  외국인·기관이 둘 다 0이면 제외한다(시장코드가 또 어긋나거나 장 초반 0인 동안 헤드라인 오발송 방지). */
+    /**
+     * 시장 수급을 조회한다 — 먼저 코스피·코스닥을 '분리'로 시도하고(각 시장 두 줄), 분리 코드가 하나도 안 통하면
+     * 전체(999/S001) 한 줄로 폴백한다. 외국인·기관이 둘 다 0인 항목은 제외한다(장 초반 0이나 코드 불일치 시 오발송 방지).
+     */
     private List<MarketInvestorFlow> fetchMarketFlows() {
-        MarketInvestorFlow flow = client.marketInvestorFlow("", MARKET_FLOW_ISCD, MARKET_FLOW_ISCD2);
-        if (flow != null && (flow.foreignNetWon() != 0 || flow.institutionNetWon() != 0)) {
-            return List.of(flow);
+        List<MarketInvestorFlow> split = new ArrayList<>();
+        MarketInvestorFlow kospi = resolveMarketFlow(KOSPI_CANDIDATES, kospiFlowCode, c -> kospiFlowCode = c);
+        MarketInvestorFlow kosdaq = resolveMarketFlow(KOSDAQ_CANDIDATES, kosdaqFlowCode, c -> kosdaqFlowCode = c);
+        if (kospi != null) split.add(kospi);
+        if (kosdaq != null) split.add(kosdaq);
+        if (!split.isEmpty()) return split;   // 분리 성공(한 시장이라도) → 두 줄(또는 한 줄)로
+
+        // 분리 불가 — 전체 한 줄 폴백(기존 동작 유지).
+        MarketInvestorFlow all = client.marketInvestorFlow("", MARKET_FLOW_ISCD, MARKET_FLOW_ISCD2, "");
+        if (all != null && (all.foreignNetWon() != 0 || all.institutionNetWon() != 0)) {
+            return List.of(all);
         }
         return List.of();
+    }
+
+    /**
+     * 한 시장(코스피/코스닥)의 수급을 조회한다. 캐시된 코드가 있으면 그것만 쓰고, 없거나 캐시가 0을 주면
+     * 후보를 순서대로 시도해 '외국인·기관이 0이 아닌' 첫 응답을 채택·캐시한다. 전부 0/실패면 null(→전체 폴백).
+     */
+    private MarketInvestorFlow resolveMarketFlow(List<MarketFlowCode> candidates, MarketFlowCode cached,
+                                                 java.util.function.Consumer<MarketFlowCode> cacheSetter) {
+        if (cached != null) {
+            MarketInvestorFlow f = callMarketFlow(cached);
+            if (f != null && (f.foreignNetWon() != 0 || f.institutionNetWon() != 0)) return f;
+        }
+        for (MarketFlowCode c : candidates) {
+            if (c.equals(cached)) continue;   // 방금 시도한 캐시는 건너뜀
+            MarketInvestorFlow f = callMarketFlow(c);
+            if (f != null && (f.foreignNetWon() != 0 || f.institutionNetWon() != 0)) {
+                cacheSetter.accept(c);
+                log.info("[시장수급] {} 분리 코드 확정: iscd={} iscd2={} div={}",
+                        c.label(), c.iscd(), c.iscd2(), c.div().isBlank() ? "-" : c.div());
+                return f;
+            }
+        }
+        return null;
+    }
+
+    private MarketInvestorFlow callMarketFlow(MarketFlowCode c) {
+        return client.marketInvestorFlow(c.label(), c.iscd(), c.iscd2(), c.div());
     }
 
     /**

@@ -320,16 +320,21 @@ public class KisClient {
      * 종목별 랭킹과 달리 시장 합계 한 건을 돌려준다. 장중 시간별로 갱신되는 추정치(가집계)다.
      * 표준 호출값은 999/S001(KIS 공식 예제·프로브 실측 확인 — 0001/1001 등은 rt_cd=0이나 값이 전부 0).
      *
-     * @param marketLabel  표시·로그용 시장명(시장 전체면 빈 문자열)
-     * @param fidInputIscd  FID_INPUT_ISCD(시장구분 코드) — "999"
+     * @param marketLabel  표시·로그용 시장명(시장 전체면 빈 문자열, 코스피/코스닥 분리면 그 라벨)
+     * @param fidInputIscd  FID_INPUT_ISCD(시장구분 코드) — 전체 "999", 코스피 "0001", 코스닥 "1001"
      * @param fidInputIscd2 FID_INPUT_ISCD_2(업종구분 코드) — "S001"
-     * @return 시장 전체 외국인·기관 순매수(원). 실패·거부·빈 응답이면 null.
+     * @param mrktDivCode   FID_COND_MRKT_DIV_CODE(시장분류) — 비면 미전송. 코스피/코스닥 분리 시 "U"(업종) 등.
+     * @return 해당 시장 외국인·기관 순매수(원). 실패·거부·빈 응답이면 null.
      */
-    public MarketInvestorFlow marketInvestorFlow(String marketLabel, String fidInputIscd, String fidInputIscd2) {
+    public MarketInvestorFlow marketInvestorFlow(String marketLabel, String fidInputIscd, String fidInputIscd2,
+                                                 String mrktDivCode) {
         try {
             throttleFiCall();   // 유량제한 회피 — 가집계 계열과 호출 간격 공유
             String query = "FID_INPUT_ISCD=" + fidInputIscd
                     + "&FID_INPUT_ISCD_2=" + fidInputIscd2;
+            if (mrktDivCode != null && !mrktDivCode.isBlank()) {
+                query += "&FID_COND_MRKT_DIV_CODE=" + mrktDivCode;
+            }
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + INVESTOR_TIME_BY_MARKET_PATH + "?" + query))
@@ -345,15 +350,15 @@ public class KisClient {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             MarketInvestorFlow flow = parseMarketInvestorFlow(response.body(), marketLabel);
-            // [시장수급진단 — 임시] 스키마(필드·시장코드·단위·행정렬) 확정 전까지 원본/결과를 로그로 남긴다.
-            // null(거부·빈응답)이거나 외국인·기관이 둘 다 0(필드명/시장코드 불일치 의심)이면 원본 JSON을 통째로 찍는다.
-            if (flow == null || (flow.foreignNetWon() == 0 && flow.institutionNetWon() == 0)) {
+            // [시장수급진단 — 임시] 값이 있으면 요약 로그. 0/0·파싱실패 원본 덤프는 '전체(빈 라벨)' 호출에만 남긴다 —
+            // 코스피/코스닥 분리는 여러 후보 코드를 순차 탐색하며 대부분 0을 돌려주므로 원본 덤프는 로그 폭주가 된다.
+            if (flow != null && (flow.foreignNetWon() != 0 || flow.institutionNetWon() != 0)) {
+                log.info("[시장수급진단] {} 외국인 {}원 · 기관 {}원",
+                        marketLabel.isBlank() ? "전체" : marketLabel, flow.foreignNetWon(), flow.institutionNetWon());
+            } else if (marketLabel.isBlank()) {
                 String body = response.body();
-                log.warn("[시장수급진단] {} 값 0/0 또는 파싱실패 — 원본응답(필드명·시장코드 확인): {}", marketLabel,
+                log.warn("[시장수급진단] 전체 값 0/0 또는 파싱실패 — 원본응답(필드명·시장코드 확인): {}",
                         body.length() > 1500 ? body.substring(0, 1500) : body);
-            } else {
-                log.info("[시장수급진단] {} 외국인 {}원 · 기관 {}원", marketLabel,
-                        flow.foreignNetWon(), flow.institutionNetWon());
             }
             return flow;
         } catch (Exception e) {
@@ -366,12 +371,22 @@ public class KisClient {
      * [임시 진단] 시장별 투자자매매동향(시세) 한 코드 조합을 호출해 한 줄 요약을 돌려준다 —
      * 여러 시장/업종 코드를 배치로 찍어 '시장 전체'(거래량 큼 + 외국인·기관 방향이 실제 시장과 일치) 코드를 찾는 용도.
      * 외국인 매도수량(frgn_seln_vol)은 규모 가늠용(시장 전체면 수천만 주 단위)이고, 순매수는 raw 값(단위 미확정)이다.
+     * {@code mrktDivCode}가 비어있지 않으면 FID_COND_MRKT_DIV_CODE도 함께 보낸다(코스피/코스닥 분리 코드 탐색용).
      * 확정 후 이 메서드·호출·진단 코드는 제거한다.
      */
     String marketFlowProbeLine(String fidInputIscd, String fidInputIscd2) {
+        return marketFlowProbeLine(fidInputIscd, fidInputIscd2, "");
+    }
+
+    String marketFlowProbeLine(String fidInputIscd, String fidInputIscd2, String mrktDivCode) {
+        String tag = fidInputIscd + "/" + fidInputIscd2
+                + (mrktDivCode.isBlank() ? "" : "/div=" + mrktDivCode);
         try {
             throttleFiCall();
             String query = "FID_INPUT_ISCD=" + fidInputIscd + "&FID_INPUT_ISCD_2=" + fidInputIscd2;
+            if (!mrktDivCode.isBlank()) {
+                query += "&FID_COND_MRKT_DIV_CODE=" + mrktDivCode;
+            }
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + INVESTOR_TIME_BY_MARKET_PATH + "?" + query))
                     .timeout(Duration.ofSeconds(15))
@@ -388,18 +403,18 @@ public class KisClient {
             String rtCd = root.path("rt_cd").asText();
             JsonNode out = root.path("output");
             if (!out.isArray() || out.isEmpty()) {
-                return String.format("%s/%s  rt=%s  rows=%d (빈 응답)",
-                        fidInputIscd, fidInputIscd2, rtCd, out.isArray() ? out.size() : 0);
+                return String.format("%s  rt=%s  rows=%d (빈 응답)",
+                        tag, rtCd, out.isArray() ? out.size() : 0);
             }
             JsonNode r = out.get(0);
             long frgn = parseLong(r.path("frgn_ntby_tr_pbmn").asText());
             long orgn = parseLong(r.path("orgn_ntby_tr_pbmn").asText());
             long prsn = parseLong(r.path("prsn_ntby_tr_pbmn").asText());
             long frgnSellVol = parseLong(r.path("frgn_seln_vol").asText());
-            return String.format("%s/%s  rt=%s rows=%d  외국인순매수=%d 기관순매수=%d 개인순매수=%d  외국인매도량=%d",
-                    fidInputIscd, fidInputIscd2, rtCd, out.size(), frgn, orgn, prsn, frgnSellVol);
+            return String.format("%s  rt=%s rows=%d  외국인순매수=%d 기관순매수=%d 개인순매수=%d  외국인매도량=%d",
+                    tag, rtCd, out.size(), frgn, orgn, prsn, frgnSellVol);
         } catch (Exception e) {
-            return String.format("%s/%s  ERROR: %s", fidInputIscd, fidInputIscd2, e);
+            return String.format("%s  ERROR: %s", tag, e);
         }
     }
 

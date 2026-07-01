@@ -324,6 +324,29 @@ class KisPollerServiceTest {
     }
 
     @Test
+    void 시장수급_헤드라인은_코스피_코스닥을_각각_접두어붙여_두줄로_보여준다() {
+        // 코스피·코스닥 분리 — 두 엔트리면 시장 접두어를 붙여 각각 한 줄씩.
+        List<MarketInvestorFlow> flows = List.of(
+                new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L),
+                new MarketInvestorFlow("코스닥", 80_000_000_000L, -30_000_000_000L, -50_000_000_000L));
+        String msg = KisPollerService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
+
+        assertTrue(msg.contains("코스피  🌍 외국인 -3,200억 · 🏛 기관 +1,500억 · 👤 개인 +1,700억"), msg);
+        assertTrue(msg.contains("코스닥  🌍 외국인 +800억 · 🏛 기관 -300억 · 👤 개인 -500억"), msg);
+        // 코스피·코스닥이 서로 다른 줄에 온다(제목 제외 2줄).
+        assertEquals(3, msg.lines().count(), msg);
+    }
+
+    @Test
+    void 시장수급_리포트라인은_코스피_코스닥을_슬래시로_구분한다() {
+        String line = KisPollerService.marketFlowLine(List.of(
+                new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L),
+                new MarketInvestorFlow("코스닥", 80_000_000_000L, -30_000_000_000L, -50_000_000_000L)));
+        assertEquals("📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억·개인 +1,700억 / "
+                + "코스닥 외국인 +800억·기관 -300억·개인 -500억", line);
+    }
+
+    @Test
     void 시장_전체수급_헤드라인에_지수라인을_넘기면_제목_아래에_코스피가_붙는다() {
         List<MarketInvestorFlow> flows = List.of(
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L));
