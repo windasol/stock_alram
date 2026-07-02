@@ -757,12 +757,15 @@ public class KisPollerService {
     }
 
     /**
-     * 시장 전체(코스피·코스닥) 외국인·기관 순매수 헤드라인을 주기로 KIS 채널에 보낸다(장중·평일만).
+     * 시장 전체(코스피·코스닥) 외국인·기관 순매수 헤드라인을 주기로 KIS 채널에 보낸다(정규장·평일만).
      * 종목별 랭킹과 별개로 "시장 전체로 누가 사고/파는지"를 한눈에. 최신 스냅샷은 시황 리포트도 읽는다.
+     *
+     * 가집계(TR FHPTJ04030000)는 KRX 정규장 추정치라 14:30 동결·마감 후 갱신되지 않는다. 그래서 NXT 애프터마켓엔
+     * 코스피/코스닥 가집계가 stale이 되므로 이 구간엔 헤드라인을 보내지 않는다(정규장에서만 발송).
      */
     private void marketFlowTick() {
         ZonedDateTime now = ZonedDateTime.now(KST);
-        if (currentSession(now) == null) return;   // 장외·주말이면 스킵
+        if (currentSession(now) != Session.REGULAR) return;   // 장외·주말·NXT 애프터마켓이면 스킵(가집계는 정규장 전용)
         LocalTime time = now.toLocalTime();
         List<MarketInvestorFlow> flows = fetchMarketFlows();
         if (flows.isEmpty()) return;   // 조회 실패(거부·빈응답) — 채널엔 안 보냄(로그만)
