@@ -7,6 +7,7 @@ import com.example.dart.parse.DocumentParser;
 import com.example.dart.quote.StockQuoteClient;
 import com.example.dart.util.DisclosureKeys;
 import com.example.dart.util.KoreanMoney;
+import com.example.dart.util.MarketCalendar;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +66,8 @@ public class KindPollerService {
     private final StockQuoteClient quoteClient;
     private final SeenStore seenStore;
     private final SeenStore disclosureKeys;
+    /** 거래일 판정(주말·공휴일). 휴장일엔 거래소 공시가 없어 폴링을 건너뛴다. */
+    private final MarketCalendar calendar;
     private final Set<String> allowedMarkets;
     private final int intervalSec;
     private final ScheduledExecutorService scheduler;
@@ -76,8 +79,10 @@ public class KindPollerService {
     public KindPollerService(KindClient client, NewsFilter newsFilter, Notifier notifier,
                              KindAlertComposer alertComposer, KindDocumentClient docClient,
                              DocumentParser documentParser, StockQuoteClient quoteClient,
-                             SeenStore seenStore, SeenStore disclosureKeys, AppConfig config) {
+                             SeenStore seenStore, SeenStore disclosureKeys, AppConfig config,
+                             MarketCalendar calendar) {
         this.client = client;
+        this.calendar = calendar;
         this.newsFilter = newsFilter;
         this.notifier = notifier;
         this.alertComposer = alertComposer;
@@ -126,6 +131,7 @@ public class KindPollerService {
             return;
         }
         ZonedDateTime now = ZonedDateTime.now(KST);
+        if (!calendar.isTradingDay(now.toLocalDate())) return;   // 주말·공휴일엔 거래소 공시 없음
         LocalTime t = now.toLocalTime();
         if (t.isBefore(OPEN) || t.isAfter(CLOSE)) return;
 

@@ -5,6 +5,7 @@ import com.example.dart.kis.MinuteCandle;
 import com.example.dart.model.Disclosure;
 import com.example.dart.notify.Notifier;
 import com.example.dart.quote.StockQuoteClient;
+import com.example.dart.util.MarketCalendar;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
@@ -15,7 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.DayOfWeek;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -71,16 +71,19 @@ public class DisclosurePriceTracker {
     private final KisClient kisClient;
     private final Notifier notifier;
     private final Path storeFile;
+    /** 거래일 판정(주말·공휴일). 휴장일에 뜬 공시는 분봉이 없어 추적을 건너뛴다. */
+    private final MarketCalendar calendar;
     private final ObjectMapper mapper = new ObjectMapper();
     private final ScheduledExecutorService pool =
             Executors.newScheduledThreadPool(2, r -> new Thread(r, "price-tracker"));
 
     public DisclosurePriceTracker(StockQuoteClient quoteClient, KisClient kisClient,
-                                  Notifier notifier, Path storeFile) {
+                                  Notifier notifier, Path storeFile, MarketCalendar calendar) {
         this.quoteClient = quoteClient;
         this.kisClient = kisClient;
         this.notifier = notifier;
         this.storeFile = storeFile;
+        this.calendar = calendar;
     }
 
     /**
@@ -308,8 +311,7 @@ public class DisclosurePriceTracker {
     }
 
     private boolean withinWindow(ZonedDateTime now) {
-        DayOfWeek d = now.getDayOfWeek();
-        if (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY) return false;
+        if (!calendar.isTradingDay(now.toLocalDate())) return false;   // 주말·공휴일
         LocalTime t = now.toLocalTime();
         return !t.isBefore(TRACK_OPEN) && !t.isAfter(TRACK_CLOSE);
     }

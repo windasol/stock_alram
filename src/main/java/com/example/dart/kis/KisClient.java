@@ -15,7 +15,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
@@ -62,6 +64,9 @@ public class KisClient {
     private static final String INVESTOR_TIME_BY_MARKET_PATH =
             "/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market";
     private static final String TR_MARKET_INVESTOR_TIME = "FHPTJ04030000";   // 시장별 투자자매매동향(시세) — 시장 전체 외국인·기관 순매수(가집계, 시간별)
+    private static final String HOLIDAY_PATH = "/uapi/domestic-stock/v1/quotations/chk-holiday";
+    private static final String TR_HOLIDAY = "CTCA0903R";   // 국내휴장일조회 — 기준일 이후 개장 여부(opnd_yn)
+    private static final DateTimeFormatter YYYYMMDD = DateTimeFormatter.ofPattern("yyyyMMdd");
     /**
      * 가집계 순매수 거래대금(frgn/orgn_ntby_tr_pbmn) 단위 — 원이 아니라 백만원이라 원으로 환산해 저장한다.
      * (실측: 응답값 6자리 ≈ 360,000 → 백만원 환산 시 3,600억으로 현실적. 원이면 36만원으로 비현실적.)
@@ -260,15 +265,11 @@ public class KisClient {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             List<InvestorFlowItem> items = parseInvestorFlow(response.body(), inv);
-            // [수급진단 — 임시] 매수/매도별 건수. 0건이면 KIS 원본 응답을 그대로 찍어 원인(빈 output·rt_cd·권한)을 가린다.
-            String side = buySide ? "순매수상위" : "순매도상위";
-            if (items.isEmpty()) {
+            if (items.isEmpty() && log.isDebugEnabled()) {
+                // 0건이면 원인(빈 output·rt_cd·권한) 파악용으로 원본 응답을 debug로만 남긴다.
                 String body = response.body();
-                log.warn("[수급진단] {} {} 0건 — 원본응답: {}", inv, side,
+                log.debug("KIS 수급 0건 ({} {}) — 원본응답: {}", inv, buySide ? "순매수상위" : "순매도상위",
                         body.length() > 700 ? body.substring(0, 700) : body);
-            } else {
-                InvestorFlowItem top = items.get(0);
-                log.info("[수급진단] {} {} {}건 (1위 {} {}원)", inv, side, items.size(), top.name(), top.netValueWon());
             }
             return items;
         } catch (Exception e) {
@@ -350,71 +351,18 @@ public class KisClient {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             MarketInvestorFlow flow = parseMarketInvestorFlow(response.body(), marketLabel);
-            // [시장수급진단 — 임시] 값이 있으면 요약 로그. 0/0·파싱실패 원본 덤프는 '전체(빈 라벨)' 호출에만 남긴다 —
-            // 코스피/코스닥 분리는 여러 후보 코드를 순차 탐색하며 대부분 0을 돌려주므로 원본 덤프는 로그 폭주가 된다.
-            if (flow != null && (flow.foreignNetWon() != 0 || flow.institutionNetWon() != 0)) {
-                log.info("[시장수급진단] {} 외국인 {}원 · 기관 {}원",
-                        marketLabel.isBlank() ? "전체" : marketLabel, flow.foreignNetWon(), flow.institutionNetWon());
-            } else if (marketLabel.isBlank()) {
+            // 전체(빈 라벨) 조회가 0/0·파싱실패면 원인(필드명·시장코드) 파악용으로 원본 응답을 debug로만 남긴다.
+            // (코스피/코스닥 분리는 여러 후보를 순차 탐색하며 대부분 0을 돌려주므로 로그를 남기지 않는다.)
+            boolean empty = flow == null || (flow.foreignNetWon() == 0 && flow.institutionNetWon() == 0);
+            if (empty && marketLabel.isBlank() && log.isDebugEnabled()) {
                 String body = response.body();
-                log.warn("[시장수급진단] 전체 값 0/0 또는 파싱실패 — 원본응답(필드명·시장코드 확인): {}",
+                log.debug("KIS 시장 수급 전체 0/0 또는 파싱실패 — 원본응답: {}",
                         body.length() > 1500 ? body.substring(0, 1500) : body);
             }
             return flow;
         } catch (Exception e) {
             log.warn("KIS 시장 수급 조회 실패 ({}): {}", marketLabel, e.toString());
             return null;
-        }
-    }
-
-    /**
-     * [임시 진단] 시장별 투자자매매동향(시세) 한 코드 조합을 호출해 한 줄 요약을 돌려준다 —
-     * 여러 시장/업종 코드를 배치로 찍어 '시장 전체'(거래량 큼 + 외국인·기관 방향이 실제 시장과 일치) 코드를 찾는 용도.
-     * 외국인 매도수량(frgn_seln_vol)은 규모 가늠용(시장 전체면 수천만 주 단위)이고, 순매수는 raw 값(단위 미확정)이다.
-     * {@code mrktDivCode}가 비어있지 않으면 FID_COND_MRKT_DIV_CODE도 함께 보낸다(코스피/코스닥 분리 코드 탐색용).
-     * 확정 후 이 메서드·호출·진단 코드는 제거한다.
-     */
-    String marketFlowProbeLine(String fidInputIscd, String fidInputIscd2) {
-        return marketFlowProbeLine(fidInputIscd, fidInputIscd2, "");
-    }
-
-    String marketFlowProbeLine(String fidInputIscd, String fidInputIscd2, String mrktDivCode) {
-        String tag = fidInputIscd + "/" + fidInputIscd2
-                + (mrktDivCode.isBlank() ? "" : "/div=" + mrktDivCode);
-        try {
-            throttleFiCall();
-            String query = "FID_INPUT_ISCD=" + fidInputIscd + "&FID_INPUT_ISCD_2=" + fidInputIscd2;
-            if (!mrktDivCode.isBlank()) {
-                query += "&FID_COND_MRKT_DIV_CODE=" + mrktDivCode;
-            }
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + INVESTOR_TIME_BY_MARKET_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_MARKET_INVESTOR_TIME)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-            String body = httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
-            JsonNode root = mapper.readTree(body);
-            String rtCd = root.path("rt_cd").asText();
-            JsonNode out = root.path("output");
-            if (!out.isArray() || out.isEmpty()) {
-                return String.format("%s  rt=%s  rows=%d (빈 응답)",
-                        tag, rtCd, out.isArray() ? out.size() : 0);
-            }
-            JsonNode r = out.get(0);
-            long frgn = parseLong(r.path("frgn_ntby_tr_pbmn").asText());
-            long orgn = parseLong(r.path("orgn_ntby_tr_pbmn").asText());
-            long prsn = parseLong(r.path("prsn_ntby_tr_pbmn").asText());
-            long frgnSellVol = parseLong(r.path("frgn_seln_vol").asText());
-            return String.format("%s  rt=%s rows=%d  외국인순매수=%d 기관순매수=%d 개인순매수=%d  외국인매도량=%d",
-                    tag, rtCd, out.size(), frgn, orgn, prsn, frgnSellVol);
-        } catch (Exception e) {
-            return String.format("%s  ERROR: %s", tag, e);
         }
     }
 
@@ -451,15 +399,11 @@ public class KisClient {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             List<InvestorFlowItem> items = parseForeignMemberEstimate(response.body());
-            // [외국계진단] — 0건이면 원본 응답을 찍어 원인(NX 미지원·권한·시간대)을 드러낸다. (특히 NX 실측 확인용)
-            String side = buySide ? "매수순" : "매도순";
-            if (items.isEmpty()) {
+            if (items.isEmpty() && log.isDebugEnabled()) {
+                // 0건이면 원인(NX 미지원·권한·시간대) 파악용으로 원본 응답을 debug로만 남긴다.
                 String body = response.body();
-                log.warn("[외국계진단] {} {} 0건 — 원본응답: {}", marketDiv, side,
+                log.debug("KIS 외국계 가집계 0건 ({} {}) — 원본응답: {}", marketDiv, buySide ? "매수순" : "매도순",
                         body.length() > 700 ? body.substring(0, 700) : body);
-            } else {
-                InvestorFlowItem top = items.get(0);
-                log.info("[외국계진단] {} {} {}건 (1위 {} {}원)", marketDiv, side, items.size(), top.name(), top.netValueWon());
             }
             return items;
         } catch (Exception e) {
@@ -917,6 +861,54 @@ public class KisClient {
             }
         }
         lastFiCallAt = System.currentTimeMillis();
+    }
+
+    /**
+     * 국내 휴장일 조회(CTCA0903R) — 기준일부터 약 한 달간의 개장 여부(opnd_yn)를 받아 '휴장'인 날짜를 돌려준다.
+     * 공휴일·임시공휴일·연말 폐장일 등 KRX가 실제로 쉬는 날을 실측으로 얻는 용도다(주말은 캘린더가 따로 거른다).
+     * 단일 페이지(~1개월)면 당일 게이트에 충분하다. 실패·거부 시 빈 목록(주말만 거르는 기존 동작으로 폴백).
+     *
+     * @param from 기준일(보통 오늘, KST)
+     * @return 기준일 이후 휴장일(개장 안 하는 날) 목록. 실패 시 빈 목록.
+     */
+    public List<LocalDate> marketClosedDays(LocalDate from) {
+        try {
+            String query = "BASS_DT=" + from.format(YYYYMMDD) + "&CTX_AREA_NK=&CTX_AREA_FK=";
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + HOLIDAY_PATH + "?" + query))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("authorization", "Bearer " + token())
+                    .header("appkey", appKey)
+                    .header("appsecret", appSecret)
+                    .header("tr_id", TR_HOLIDAY)
+                    .header("custtype", "P")
+                    .header("Content-Type", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            JsonNode root = mapper.readTree(response.body());
+            if (!"0".equals(root.path("rt_cd").asText())) {
+                log.warn("KIS 휴장일 조회 거부 — 주말만 거른다: {}", root.path("msg1").asText());
+                return List.of();
+            }
+            List<LocalDate> closed = new ArrayList<>();
+            for (JsonNode r : root.path("output")) {
+                String dt = r.path("bass_dt").asText("");
+                if (dt.length() == 8 && "N".equals(r.path("opnd_yn").asText(""))) {
+                    try {
+                        closed.add(LocalDate.parse(dt, YYYYMMDD));
+                    } catch (Exception ignore) {
+                        // 형식 이상 행은 건너뛴다(부분 파싱 허용)
+                    }
+                }
+            }
+            log.info("KIS 휴장일 조회 {}건 (기준 {})", closed.size(), from);
+            return closed;
+        } catch (Exception e) {
+            log.warn("KIS 휴장일 조회 실패 — 주말만 거른다: {}", e.toString());
+            return List.of();
+        }
     }
 
     // ---- 토큰 관리 ----

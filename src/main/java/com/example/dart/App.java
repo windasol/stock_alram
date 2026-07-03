@@ -30,6 +30,7 @@ import com.example.dart.quote.StockQuoteClient;
 import com.example.dart.service.DisclosurePriceTracker;
 import com.example.dart.service.DocumentService;
 import com.example.dart.service.PollerService;
+import com.example.dart.util.MarketCalendar;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +42,11 @@ import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 /** 조립 루트 — 의존성 생성·연결과 생명주기 관리만 담당한다. */
 public class App {
@@ -105,9 +111,13 @@ public class App {
                         config.kisMarketDivCode(), config.kisPaper(), Path.of("kis_token.txt"))
                 : null;
 
+        // 거래일 캘린더 — 캐시 파일(krx_holidays.txt)의 휴장일을 읽고, KIS가 있으면 실측 휴장일을 조회해 최신화한다.
+        // 공휴일 데이터가 비면 주말만 걸러 기존 동작으로 안전하게 폴백한다.
+        MarketCalendar marketCalendar = buildMarketCalendar(kisClient);
+
         // 공시 후 주가 추적(통계) — 호재 공시 감지 시각 기준 10분간 주가 변동을 기록·요약한다.
         DisclosurePriceTracker priceTracker = new DisclosurePriceTracker(
-                quoteClient, kisClient, notifier, Path.of("disclosure_price_stats.jsonl"));
+                quoteClient, kisClient, notifier, Path.of("disclosure_price_stats.jsonl"), marketCalendar);
 
         PollerService pollerService = new PollerService(
                 dartClient, newsFilter, notifier, alertComposer,
@@ -120,7 +130,7 @@ public class App {
             kindPollerService = new KindPollerService(
                     kindClient, newsFilter, notifier, new KindAlertComposer(),
                     kindDocumentClient, documentParser, quoteClient,
-                    new SeenStore(Path.of("seen_kind.txt")), disclosureKeys, config);
+                    new SeenStore(Path.of("seen_kind.txt")), disclosureKeys, config, marketCalendar);
             kindPollerService.start();
         } else {
             kindPollerService = null;
@@ -152,7 +162,7 @@ public class App {
                     kisClient,   // 주가추적과 공유 — 토큰 분당 1회 발급 한도 때문에 인스턴스를 나누지 않는다.
                     kisNotifier,     // 표·급등·섹터·수급 랭킹 → KIS 채널
                     newsNotifier,    // 시황 매크로 분석(LLM) → 뉴스 채널
-                    new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm);
+                    new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm, marketCalendar);
             kisPollerService.start();
         } else {
             kisPollerService = null;
@@ -172,7 +182,8 @@ public class App {
             NewsArticleFilter articleFilter = new NewsArticleFilter(
                     config.newsExcludeKeywords(), Duration.ofMinutes(config.newsMaxAgeMin()),
                     Path.of("seen_news_titles.txt"));
-            SeenStore newsSeenStore = new SeenStore(Path.of("seen_news.txt"));
+            // 뉴스 링크는 오래되면 재등장하지 않으므로 접수번호 계열보다 작은 상한으로 유지한다.
+            SeenStore newsSeenStore = new SeenStore(Path.of("seen_news.txt"), 50_000);
             BreakingNews breakingNews = new BreakingNews(config.newsBreakingKeywords());
             newsPollerService = new NewsPollerService(
                     new RssClient(), RssFeed.parseList(config.newsRssFeeds()),
@@ -202,7 +213,24 @@ public class App {
         }));
     }
 
-    /** @param channelOverride 채널/룸 ID 재지정 (null이면 기본 채널) */
+    /**
+     * 거래일 캘린더를 만든다 — 휴장일 캐시 파일(krx_holidays.txt)을 읽고, KIS가 있으면 국내휴장일 조회로
+     * 실측 휴장일을 받아 캐시를 최신화한다. 조회 실패·KIS 미설정이면 캐시 파일만(없으면 주말만 거른다).
+     */
+    private static MarketCalendar buildMarketCalendar(KisClient kisClient) {
+        Path holidayFile = Path.of("krx_holidays.txt");
+        Set<LocalDate> holidays = new TreeSet<>(MarketCalendar.loadFile(holidayFile));
+        if (kisClient != null) {
+            List<LocalDate> fetched = kisClient.marketClosedDays(LocalDate.now(ZoneId.of("Asia/Seoul")));
+            if (!fetched.isEmpty()) {
+                holidays.addAll(fetched);
+                MarketCalendar.saveFile(holidayFile, holidays);   // 실측 성공 시에만 캐시 갱신(빈 조회로 덮어쓰지 않음)
+            }
+        }
+        log.info("거래일 캘린더 준비 — 휴장일 {}건 (주말은 항상 제외)", holidays.size());
+        return new MarketCalendar(holidays);
+    }
+
     /**
      * 인스턴스가 하나만 뜨도록 파일 락을 건다. 이미 다른 프로세스가 잡고 있으면 즉시 종료한다.
      * 두 인스턴스가 동시에 돌면 각자 메모리 중복필터(SeenStore·NewsArticleFilter.recentAlerts)를

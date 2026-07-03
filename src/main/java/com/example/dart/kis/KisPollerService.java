@@ -5,13 +5,13 @@ import com.example.dart.llm.LlmClient;
 import com.example.dart.market.DomesticMarketClient;
 import com.example.dart.market.UsFuturesClient;
 import com.example.dart.notify.Notifier;
+import com.example.dart.util.MarketCalendar;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -98,6 +98,8 @@ public class KisPollerService {
     private LocalDate nxtConfirmedSentDate = null;
 
     private final KisClient client;
+    /** 거래일 판정(주말·공휴일 게이트). 폴러가 휴장일에 stale 데이터로 동작하지 않게 한다. */
+    private final MarketCalendar calendar;
     private final Notifier notifier;
     /** 시황 분석(LLM) 전용 발송 채널 — 뉴스 채널. 표·급등·섹터는 {@link #notifier}(KIS 채널), 분석만 여기로. */
     private final Notifier reportNotifier;
@@ -178,8 +180,9 @@ public class KisPollerService {
 
     public KisPollerService(KisClient client, Notifier notifier, Notifier reportNotifier,
                             KisAlertComposer alertComposer, AppConfig config, Path sectorsFile,
-                            LlmClient llm) {
+                            LlmClient llm, MarketCalendar calendar) {
         this.client = client;
+        this.calendar = calendar;
         this.notifier = notifier;
         this.reportNotifier = reportNotifier;
         this.alertComposer = alertComposer;
@@ -224,8 +227,6 @@ public class KisPollerService {
             long periodSec = marketFlowMin * 60L;
             scheduler.scheduleWithFixedDelay(this::marketFlowTick, 0, periodSec, TimeUnit.SECONDS);
             log.info("KIS 시장 전체 수급 헤드라인 활성 ({}분 주기, 재시작 즉시 발송)", marketFlowMin);
-            // [임시 진단] 시작 1회 — 999/S001 시계열 행 구조(누적/구간·정렬·단위) 확정용. 확정 후 제거.
-            scheduler.schedule(this::dumpMarketFlowProbe, 3, TimeUnit.SECONDS);
         }
 
         // 시황 매크로 분석(시간당) — 실시간 검색 그라운딩으로 "지금 왜?"(미선물 이유·경제 일정·시황)를 뉴스 채널로.
@@ -497,9 +498,8 @@ public class KisPollerService {
     private void generateMacroReport() {
         if (llm == null) return;
         ZonedDateTime now = ZonedDateTime.now(KST);
-        if (now.getDayOfWeek() == DayOfWeek.SATURDAY || now.getDayOfWeek() == DayOfWeek.SUNDAY) return;
         Session sess = currentSession(now);
-        if (sess == null) return;   // 장중에만
+        if (sess == null) return;   // 장중(거래일)에만 — currentSession이 주말·공휴일도 거른다
         LocalTime time = now.toLocalTime();
 
         // 국내 실측 facts(지지 근거) — 외국인은 외국계 실시간(J), 기관·양매수는 거래소 가집계.
@@ -730,8 +730,7 @@ public class KisPollerService {
 
     private void investorFlowTick() {
         ZonedDateTime now = ZonedDateTime.now(KST);
-        DayOfWeek d = now.getDayOfWeek();
-        if (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY) return;   // 주말 제외
+        if (!calendar.isTradingDay(now.toLocalDate())) return;   // 주말·공휴일 제외
         LocalTime time = now.toLocalTime();
         LocalDate today = now.toLocalDate();
         FlowPhase phase = flowPhaseAt(time);
@@ -778,42 +777,6 @@ public class KisPollerService {
         }
     }
 
-    /**
-     * [임시 진단] 여러 시장/업종 코드 조합을 한 번에 호출해 '시장 전체' 코드를 찾는다.
-     * 결과를 kis_marketflow_probe.txt 에 한 줄씩 남기고 로그에도 찍는다. 외국인 매도수량이 수천만 주 규모이고
-     * 외국인·기관 순매수 방향이 실제 시장과 일치하는 코드가 시장 전체. 확정 후 이 메서드·호출·진단코드는 제거.
-     */
-    private void dumpMarketFlowProbe() {
-        if (currentSession(ZonedDateTime.now(KST)) == null) {
-            log.info("[시장수급진단] 장외 — 코드 탐색 스킵(장중에 재시작해 다시 시도)");
-            return;
-        }
-        // 목표: 코스피/코스닥 분리 코드 확정. 각 조합은 {FID_INPUT_ISCD, FID_INPUT_ISCD_2, FID_COND_MRKT_DIV_CODE}.
-        // 직전 프로브(0001/S001·1001/S001·2001/S001)가 전부 0을 반환해, 이번엔 미검증 조합을 추가한다:
-        //  ① 시장코드+빈 ISCD_2  ② 시장코드 자기 짝  ③ FID_COND_MRKT_DIV_CODE(U=업종·J=주식) 추가.
-        // 판정: 코스피 + 코스닥 후보의 외국인·기관 합이 999/S001(전체)과 대략 일치하면 시장별 분리 성공.
-        String[][] combos = {
-                {"0001", "", ""}, {"1001", "", ""}, {"2001", "", ""},            // ★ 시장코드+빈 ISCD_2
-                {"0001", "0001", ""}, {"1001", "1001", ""},                       // ★ 시장코드 자기 짝
-                {"0001", "S001", "U"}, {"1001", "S001", "U"}, {"2001", "S001", "U"}, // ★ 업종 div
-                {"0001", "S001", "J"}, {"1001", "S001", "J"},                     // ★ 주식 div
-                {"0001", "", "U"}, {"1001", "", "U"},                             // ★ 빈 ISCD_2 + 업종 div
-                {"0001", "S001", ""}, {"1001", "S001", ""}, {"2001", "S001", ""}, // 직전과 동일(대조군)
-                {"999", "S001", ""},                                             // 전체(기준값)
-        };
-        StringBuilder sb = new StringBuilder("=== 시장수급 코드 탐색 ").append(ZonedDateTime.now(KST))
-                .append(" (코스피+코스닥 외국인·기관 합 ≈ 999/S001 전체면 분리 성공) ===\n");
-        for (String[] c : combos) {
-            sb.append(client.marketFlowProbeLine(c[0], c[1], c[2])).append('\n');
-        }
-        String report = sb.toString();
-        try {
-            Files.writeString(Path.of("kis_marketflow_probe.txt"), report);
-            log.info("[시장수급진단] 코드 탐색 기록 완료 → kis_marketflow_probe.txt\n{}", report);
-        } catch (Exception e) {
-            log.warn("[시장수급진단] 코드 탐색 파일 기록 실패: {}", e.toString());
-        }
-    }
 
     /**
      * 시장 수급을 조회한다 — 먼저 코스피·코스닥을 '분리'로 시도하고(각 시장 두 줄), 분리 코드가 하나도 안 통하면
@@ -1240,10 +1203,9 @@ public class KisPollerService {
         return last == null || Duration.between(last, now).compareTo(cooldown) >= 0;
     }
 
-    /** 현재 시각의 시장 세션 — 주말·운영시간 밖이면 null(폴링·요약 안 함). */
+    /** 현재 시각의 시장 세션 — 주말·공휴일·운영시간 밖이면 null(폴링·요약 안 함). */
     private Session currentSession(ZonedDateTime now) {
-        DayOfWeek d = now.getDayOfWeek();
-        if (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY) return null;
+        if (!calendar.isTradingDay(now.toLocalDate())) return null;
         return sessionAt(now.toLocalTime());
     }
 }
