@@ -265,39 +265,4 @@ class KisClientTest {
         assertNull(KisClient.parseInvestorConfirmed("{\"rt_cd\":\"0\",\"output\":[]}"));
     }
 
-    @Test
-    void 시장_전체수급은_최신행_외국인_기관을_백만원에서_원으로_환산한다() {
-        // 시장별 투자자매매동향(시세) — output 시계열의 최신 누적 행(맨앞 가정)에서 frgn·orgn 순매수대금을 ×1,000,000.
-        String json = """
-                {
-                  "rt_cd": "0", "msg1": "정상처리",
-                  "output": [
-                    { "frgn_ntby_tr_pbmn": "-320,000", "orgn_ntby_tr_pbmn": "150,000", "prsn_ntby_tr_pbmn": "170,000" },
-                    { "frgn_ntby_tr_pbmn": "-100,000", "orgn_ntby_tr_pbmn": "50,000", "prsn_ntby_tr_pbmn": "50,000" }
-                  ]
-                }
-                """;
-        MarketInvestorFlow f = KisClient.parseMarketInvestorFlow(json, "코스피");
-        assertEquals("코스피", f.market());
-        assertEquals(-320_000L * 1_000_000L, f.foreignNetWon());     // -3,200억(순매도)
-        assertEquals(150_000L * 1_000_000L, f.institutionNetWon());  // +1,500억(순매수)
-        assertEquals(170_000L * 1_000_000L, f.individualNetWon());   // +1,700억(개인 순매수)
-    }
-
-    @Test
-    void 시장_전체수급_output이_객체여도_파싱한다() {
-        // 일부 응답은 output이 배열이 아니라 단일 객체일 수 있다 — 그대로 읽는다.
-        String json = "{\"rt_cd\":\"0\",\"output\":{\"frgn_ntby_tr_pbmn\":\"42,000\",\"orgn_ntby_tr_pbmn\":\"-18,000\",\"prsn_ntby_tr_pbmn\":\"-24,000\"}}";
-        MarketInvestorFlow f = KisClient.parseMarketInvestorFlow(json, "코스닥");
-        assertEquals(42_000L * 1_000_000L, f.foreignNetWon());
-        assertEquals(-18_000L * 1_000_000L, f.institutionNetWon());
-        assertEquals(-24_000L * 1_000_000L, f.individualNetWon());
-    }
-
-    @Test
-    void 시장_전체수급_비정상이거나_빈output이면_null() {
-        assertNull(KisClient.parseMarketInvestorFlow("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}", "코스피"));
-        assertNull(KisClient.parseMarketInvestorFlow("not json", "코스피"));
-        assertNull(KisClient.parseMarketInvestorFlow("{\"rt_cd\":\"0\",\"output\":[]}", "코스피"));
-    }
 }

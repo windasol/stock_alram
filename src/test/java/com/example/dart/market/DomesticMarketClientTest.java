@@ -100,4 +100,35 @@ class DomesticMarketClientTest {
         String line = DomesticMarketClient.formatFx(new Snapshot(1350.2, 0.9));
         assertEquals("💱 **원달러** | 1,350.2원 (+0.9%)", line);
     }
+
+    @Test
+    void 네이버_지수_투자자트렌드를_파싱하고_억원을_원으로_환산한다() {
+        // 예: 코스피 개인 +26,018억 · 외국인 -16,042억 · 기관 -10,933억 (실측값 형식). 부호·콤마 포함.
+        String json = "{\"bizdate\":\"20260706\",\"personalValue\":\"+26,018\","
+                + "\"foreignValue\":\"-16,042\",\"institutionalValue\":\"-10,933\"}";
+        Optional<DomesticMarketClient.InvestorNet> n = DomesticMarketClient.parseInvestorNet(json, "코스피");
+        assertTrue(n.isPresent());
+        assertEquals("코스피", n.get().market());
+        assertEquals(26_018L * 100_000_000L, n.get().individualWon());    // 개인 +2조6,018억(순매수)
+        assertEquals(-16_042L * 100_000_000L, n.get().foreignWon());      // 외국인 -1조6,042억(순매도)
+        assertEquals(-10_933L * 100_000_000L, n.get().institutionWon());  // 기관 -1조933억(순매도)
+    }
+
+    @Test
+    void 투자자트렌드_세값이_전부_0이거나_빈값이면_empty() {
+        // 장 시작 전 등 값이 없을 때는 헤드라인을 보내지 않도록 empty.
+        assertFalse(DomesticMarketClient.parseInvestorNet(
+                "{\"personalValue\":\"0\",\"foreignValue\":\"0\",\"institutionalValue\":\"0\"}", "코스피").isPresent());
+        assertFalse(DomesticMarketClient.parseInvestorNet("{}", "코스닥").isPresent());
+        assertFalse(DomesticMarketClient.parseInvestorNet("not json", "코스피").isPresent());
+    }
+
+    @Test
+    void 부호_콤마_억원_문자열을_원으로_환산한다() {
+        assertEquals(26_018L * 100_000_000L, DomesticMarketClient.parseEokWon("+26,018"));
+        assertEquals(-16_042L * 100_000_000L, DomesticMarketClient.parseEokWon("-16,042"));
+        assertEquals(0L, DomesticMarketClient.parseEokWon(""));
+        assertEquals(0L, DomesticMarketClient.parseEokWon("-"));
+        assertEquals(0L, DomesticMarketClient.parseEokWon("N/A"));
+    }
 }

@@ -38,6 +38,18 @@ public class DomesticMarketClient {
     /** 원달러 환율 야후 심볼 (USD/KRW). 레벨(예: 1,350원)이 절대값으로 의미가 커 따로 다룬다. */
     private static final String FX_SYMBOL = "KRW=X";
 
+    /**
+     * 네이버 실시간 지수 투자자 트렌드 API — 코스피/코스닥 개인·외국인·기관 순매수(억원).
+     * KIS 오픈API(FHPTJ04030000)는 시장코드 0001이 전부 0이라 코스피만 못 주고 전체(999)로 폴백돼 값이 틀렸다.
+     * 네이버는 코스피/코스닥을 정확히 분리해 실시간으로 준다. 예: {"personalValue":"+26,018","foreignValue":"-16,042",...}
+     */
+    private static final String INVESTOR_TREND_API = "https://m.stock.naver.com/api/index/%s/trend";
+    private static final List<Symbol> INVESTOR_MARKETS = List.of(
+            new Symbol("KOSPI", "코스피"),
+            new Symbol("KOSDAQ", "코스닥"));
+    /** 네이버 투자자 순매수 값 단위: 억원 → 원 환산 계수. */
+    private static final long EOK_TO_WON = 100_000_000L;
+
     private final HttpClient httpClient;
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -82,6 +94,34 @@ public class DomesticMarketClient {
         return fetch(FX_SYMBOL).map(DomesticMarketClient::formatFx).orElse(null);
     }
 
+    /**
+     * 코스피·코스닥 '시장 전체' 투자자 순매수(개인·외국인·기관)를 네이버 실시간 지수 트렌드에서 가져온다.
+     * KIS 오픈API가 코스피만 분리해 주지 못해(0001=0) 값이 계속 틀렸던 것을 대체한다. 값은 억원이라 원으로 환산한다.
+     * 실패한 시장은 건너뛰고, 전부 실패면 빈 목록을 돌려 헤드라인이 발송되지 않게 한다(앱을 멈추지 않는다).
+     */
+    public List<InvestorNet> investorFlows() {
+        List<InvestorNet> flows = new ArrayList<>();
+        for (Symbol m : INVESTOR_MARKETS) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(String.format(INVESTOR_TREND_API, m.code())))
+                        .timeout(Duration.ofSeconds(10))
+                        .header("User-Agent", "Mozilla/5.0")   // 네이버도 UA 없으면 거부
+                        .GET()
+                        .build();
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() != 200) {
+                    log.warn("네이버 시장 수급 조회 실패 ({}): status={}", m.label(), response.statusCode());
+                    continue;
+                }
+                parseInvestorNet(response.body(), m.label()).ifPresent(flows::add);
+            } catch (Exception e) {
+                log.warn("네이버 시장 수급 조회 중 오류 ({}): {}", m.label(), e.toString());
+            }
+        }
+        return flows;
+    }
+
     private Optional<Snapshot> fetch(String symbol) {
         try {
             String url = String.format(API, URLEncoder.encode(symbol, StandardCharsets.UTF_8));
@@ -119,6 +159,36 @@ public class DomesticMarketClient {
         } catch (Exception e) {
             log.warn("국내 지수·환율 JSON 파싱 실패: {}", e.toString());
             return Optional.empty();
+        }
+    }
+
+    /**
+     * 네이버 지수 투자자 트렌드 응답에서 개인/외국인/기관 순매수를 읽어 억원→원으로 환산한다.
+     * 예: {"personalValue":"+26,018","foreignValue":"-16,042","institutionalValue":"-10,933"} (부호·콤마 포함).
+     * 세 값이 전부 0/빈값(장 시작 전 등)이면 empty. (네트워크 분리 — 테스트용 정적 메서드)
+     */
+    static Optional<InvestorNet> parseInvestorNet(String json, String marketLabel) {
+        try {
+            JsonNode n = new ObjectMapper().readTree(json);
+            long frgn = parseEokWon(n.path("foreignValue").asText(""));
+            long orgn = parseEokWon(n.path("institutionalValue").asText(""));
+            long prsn = parseEokWon(n.path("personalValue").asText(""));
+            if (frgn == 0 && orgn == 0 && prsn == 0) return Optional.empty();
+            return Optional.of(new InvestorNet(marketLabel, frgn, orgn, prsn));
+        } catch (Exception e) {
+            log.warn("네이버 시장 수급({}) JSON 파싱 실패: {}", marketLabel, e.toString());
+            return Optional.empty();
+        }
+    }
+
+    /** "+26,018"·"-16,042" 등 부호·콤마 포함 억원 문자열을 원(long)으로. 빈값·"-"·파싱실패는 0. (테스트용) */
+    static long parseEokWon(String s) {
+        String cleaned = s.replace(",", "").replace("+", "").trim();
+        if (cleaned.isEmpty() || cleaned.equals("-")) return 0L;
+        try {
+            return Long.parseLong(cleaned) * EOK_TO_WON;
+        } catch (NumberFormatException e) {
+            return 0L;
         }
     }
 
@@ -163,6 +233,9 @@ public class DomesticMarketClient {
 
     /** 표시 라벨 + 현재 값(레벨) + 전일 대비 등락률(%). (수급 헤드라인용) */
     record IndexQuote(String label, double price, double pct) {}
+
+    /** 시장 라벨 + 개인/외국인/기관 순매수(원). 네이버 지수 투자자 트렌드에서 파싱 — kis.MarketInvestorFlow로 매핑된다. */
+    public record InvestorNet(String market, long foreignWon, long institutionWon, long individualWon) {}
 
     /** 현재가(레벨) + 전일 대비 등락률(%). */
     record Snapshot(double price, double pct) {}

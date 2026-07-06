@@ -123,37 +123,14 @@ public class KisPollerService {
     private final boolean reportGrounding;
     /** 리포트 '대외 여건'용 미국 선물 조회기. 실패해도 국내 리포트는 계속된다. */
     private final UsFuturesClient usFutures = new UsFuturesClient();
-    /** 리포트 '국내 지수(코스피·코스닥)·원달러 환율'용 조회기. 실패해도 국내 리포트는 계속된다. */
+    /**
+     * 리포트 '국내 지수(코스피·코스닥)·원달러 환율'용 조회기 + 네이버 시장 수급(코스피/코스닥 개인·외국인·기관) 소스.
+     * 실패해도 국내 리포트는 계속된다.
+     */
     private final DomesticMarketClient domesticMarket = new DomesticMarketClient();
-    /**
-     * 시장 '전체' 수급(시세) 코드 — TR FHPTJ04030000의 표준 호출값(999/S001).
-     * 코스피/코스닥 분리 코드를 못 찾을 때의 폴백(합친 한 줄)로 쓴다.
-     */
-    private static final String MARKET_FLOW_ISCD  = "999";
-    private static final String MARKET_FLOW_ISCD2 = "S001";
-    /**
-     * 코스피·코스닥 '시장별' 수급 후보 코드 — {@link KisClient#marketInvestorFlow}에 넘길 조합.
-     * 직전 프로브에서 0001/S001·1001/S001(div 없음)은 전부 0이었으므로, FID_COND_MRKT_DIV_CODE(U 업종/J 주식)를
-     * 붙인 변형과 빈 ISCD_2 변형을 앞에 둔다. 시장별로 '외국인·기관이 0이 아닌' 첫 응답을 채택하고 캐시한다.
-     * 전부 실패하면 위 999/S001(전체) 한 줄로 폴백 — 지금 동작을 절대 깨지 않는다.
-     */
-    private record MarketFlowCode(String label, String iscd, String iscd2, String div) {}
-    private static final List<MarketFlowCode> KOSPI_CANDIDATES = List.of(
-            new MarketFlowCode("코스피", "0001", "S001", "U"),
-            new MarketFlowCode("코스피", "0001", "S001", "J"),
-            new MarketFlowCode("코스피", "0001", "",     "U"),
-            new MarketFlowCode("코스피", "0001", "S001", ""));
-    private static final List<MarketFlowCode> KOSDAQ_CANDIDATES = List.of(
-            new MarketFlowCode("코스닥", "1001", "S001", "U"),
-            new MarketFlowCode("코스닥", "1001", "S001", "J"),
-            new MarketFlowCode("코스닥", "1001", "",     "U"),
-            new MarketFlowCode("코스닥", "1001", "S001", ""));
-    /** 시장별로 확정된 유효 코드 캐시 — 한 번 찾으면 그 조합만 호출(매 틱 전체 후보 재탐색 방지). null=미확정. */
-    private volatile MarketFlowCode kospiFlowCode;
-    private volatile MarketFlowCode kosdaqFlowCode;
     /** 개인 투자자 표시 라벨 — Investor enum(외국인·기관)엔 없어 시장 전체 수급용으로 별도 정의. */
     private static final String INDIVIDUAL_LABEL = "👤 개인";
-    /** 최신 시장 수급 스냅샷(코스피·코스닥 분리 또는 전체 폴백) — 틱이 갱신하고 시황 리포트가 읽는다. */
+    /** 최신 시장 수급 스냅샷(코스피·코스닥) — 틱이 갱신하고 시황 리포트가 읽는다. */
     private volatile List<MarketInvestorFlow> lastMarketFlows = List.of();
 
     /** 종목코드 → 마지막 알림 시각. 쿨다운 내 재알림 억제. */
@@ -759,19 +736,19 @@ public class KisPollerService {
      * 시장 전체(코스피·코스닥) 외국인·기관 순매수 헤드라인을 주기로 KIS 채널에 보낸다(정규장·평일만).
      * 종목별 랭킹과 별개로 "시장 전체로 누가 사고/파는지"를 한눈에. 최신 스냅샷은 시황 리포트도 읽는다.
      *
-     * 가집계(TR FHPTJ04030000)는 KRX 정규장 추정치라 14:30 동결·마감 후 갱신되지 않는다. 그래서 NXT 애프터마켓엔
-     * 코스피/코스닥 가집계가 stale이 되므로 이 구간엔 헤드라인을 보내지 않는다(정규장에서만 발송).
+     * 소스는 네이버 실시간 지수 투자자 트렌드(코스피/코스닥 분리, 개인·외국인·기관) — KIS 오픈API가 코스피만 못 줘 값이
+     * 계속 틀렸던 것을 대체한다. 정규장(09:00~15:40)에만 발송한다(장중 헤드라인 성격 유지).
      */
     private void marketFlowTick() {
         ZonedDateTime now = ZonedDateTime.now(KST);
-        if (currentSession(now) != Session.REGULAR) return;   // 장외·주말·NXT 애프터마켓이면 스킵(가집계는 정규장 전용)
+        if (currentSession(now) != Session.REGULAR) return;   // 장외·주말·NXT 애프터마켓이면 스킵(장중 헤드라인)
         LocalTime time = now.toLocalTime();
         List<MarketInvestorFlow> flows = fetchMarketFlows();
         if (flows.isEmpty()) return;   // 조회 실패(거부·빈응답) — 채널엔 안 보냄(로그만)
         lastMarketFlows = flows;       // 시황 리포트가 읽도록 저장
         String indexLine = domesticMarket.indexHeadlineLine();   // 현재 코스피·코스닥(전일 대비, null 가능)
         try {
-            notifier.send(composeMarketFlow(flows, time, "가집계", indexLine));   // 급등·수급표와 같은 KIS 채널
+            notifier.send(composeMarketFlow(flows, time, "잠정", indexLine));   // 급등·수급표와 같은 KIS 채널
         } catch (Exception e) {
             log.warn("시장 전체 수급 헤드라인 전송 실패", e);
         }
@@ -779,50 +756,14 @@ public class KisPollerService {
 
 
     /**
-     * 시장 수급을 조회한다 — 먼저 코스피·코스닥을 '분리'로 시도하고(각 시장 두 줄), 분리 코드가 하나도 안 통하면
-     * 전체(999/S001) 한 줄로 폴백한다. 외국인·기관이 둘 다 0인 항목은 제외한다(장 초반 0이나 코드 불일치 시 오발송 방지).
+     * 코스피·코스닥 시장 전체 수급(개인·외국인·기관)을 네이버 실시간 지수 트렌드에서 가져온다.
+     * KIS 오픈API(FHPTJ04030000)는 코스피 코드(0001)가 전부 0이라 전체(999)로 폴백돼 값이 계속 틀렸다 —
+     * 네이버는 코스피/코스닥을 정확히 분리해 준다({@link DomesticMarketClient#investorFlows()}). 전부 실패면 빈 목록.
      */
     private List<MarketInvestorFlow> fetchMarketFlows() {
-        List<MarketInvestorFlow> split = new ArrayList<>();
-        MarketInvestorFlow kospi = resolveMarketFlow(KOSPI_CANDIDATES, kospiFlowCode, c -> kospiFlowCode = c);
-        MarketInvestorFlow kosdaq = resolveMarketFlow(KOSDAQ_CANDIDATES, kosdaqFlowCode, c -> kosdaqFlowCode = c);
-        if (kospi != null) split.add(kospi);
-        if (kosdaq != null) split.add(kosdaq);
-        if (!split.isEmpty()) return split;   // 분리 성공(한 시장이라도) → 두 줄(또는 한 줄)로
-
-        // 분리 불가 — 전체 한 줄 폴백(기존 동작 유지).
-        MarketInvestorFlow all = client.marketInvestorFlow("", MARKET_FLOW_ISCD, MARKET_FLOW_ISCD2, "");
-        if (all != null && (all.foreignNetWon() != 0 || all.institutionNetWon() != 0)) {
-            return List.of(all);
-        }
-        return List.of();
-    }
-
-    /**
-     * 한 시장(코스피/코스닥)의 수급을 조회한다. 캐시된 코드가 있으면 그것만 쓰고, 없거나 캐시가 0을 주면
-     * 후보를 순서대로 시도해 '외국인·기관이 0이 아닌' 첫 응답을 채택·캐시한다. 전부 0/실패면 null(→전체 폴백).
-     */
-    private MarketInvestorFlow resolveMarketFlow(List<MarketFlowCode> candidates, MarketFlowCode cached,
-                                                 java.util.function.Consumer<MarketFlowCode> cacheSetter) {
-        if (cached != null) {
-            MarketInvestorFlow f = callMarketFlow(cached);
-            if (f != null && (f.foreignNetWon() != 0 || f.institutionNetWon() != 0)) return f;
-        }
-        for (MarketFlowCode c : candidates) {
-            if (c.equals(cached)) continue;   // 방금 시도한 캐시는 건너뜀
-            MarketInvestorFlow f = callMarketFlow(c);
-            if (f != null && (f.foreignNetWon() != 0 || f.institutionNetWon() != 0)) {
-                cacheSetter.accept(c);
-                log.info("[시장수급] {} 분리 코드 확정: iscd={} iscd2={} div={}",
-                        c.label(), c.iscd(), c.iscd2(), c.div().isBlank() ? "-" : c.div());
-                return f;
-            }
-        }
-        return null;
-    }
-
-    private MarketInvestorFlow callMarketFlow(MarketFlowCode c) {
-        return client.marketInvestorFlow(c.label(), c.iscd(), c.iscd2(), c.div());
+        return domesticMarket.investorFlows().stream()
+                .map(n -> new MarketInvestorFlow(n.market(), n.foreignWon(), n.institutionWon(), n.individualWon()))
+                .toList();
     }
 
     /**

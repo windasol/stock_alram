@@ -61,9 +61,6 @@ public class KisClient {
     private static final String FRGNMEM_TRADE_ESTIMATE_PATH =
             "/uapi/domestic-stock/v1/quotations/frgnmem-trade-estimate";
     private static final String TR_FRGNMEM_TRADE_ESTIMATE = "FHKST644100C0";   // 외국계 매매종목 가집계(HTS [0430], 실시간 추정)
-    private static final String INVESTOR_TIME_BY_MARKET_PATH =
-            "/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market";
-    private static final String TR_MARKET_INVESTOR_TIME = "FHPTJ04030000";   // 시장별 투자자매매동향(시세) — 시장 전체 외국인·기관 순매수(가집계, 시간별)
     private static final String HOLIDAY_PATH = "/uapi/domestic-stock/v1/quotations/chk-holiday";
     private static final String TR_HOLIDAY = "CTCA0903R";   // 국내휴장일조회 — 기준일 이후 개장 여부(opnd_yn)
     private static final DateTimeFormatter YYYYMMDD = DateTimeFormatter.ofPattern("yyyyMMdd");
@@ -316,55 +313,6 @@ public class KisClient {
         }
     }
 
-    /**
-     * 시장별 투자자매매동향(시세, TR FHPTJ04030000) — 시장 '전체'의 외국인·기관 순매수 가집계.
-     * 종목별 랭킹과 달리 시장 합계 한 건을 돌려준다. 장중 시간별로 갱신되는 추정치(가집계)다.
-     * 표준 호출값은 999/S001(KIS 공식 예제·프로브 실측 확인 — 0001/1001 등은 rt_cd=0이나 값이 전부 0).
-     *
-     * @param marketLabel  표시·로그용 시장명(시장 전체면 빈 문자열, 코스피/코스닥 분리면 그 라벨)
-     * @param fidInputIscd  FID_INPUT_ISCD(시장구분 코드) — 전체 "999", 코스피 "0001", 코스닥 "1001"
-     * @param fidInputIscd2 FID_INPUT_ISCD_2(업종구분 코드) — "S001"
-     * @param mrktDivCode   FID_COND_MRKT_DIV_CODE(시장분류) — 비면 미전송. 코스피/코스닥 분리 시 "U"(업종) 등.
-     * @return 해당 시장 외국인·기관 순매수(원). 실패·거부·빈 응답이면 null.
-     */
-    public MarketInvestorFlow marketInvestorFlow(String marketLabel, String fidInputIscd, String fidInputIscd2,
-                                                 String mrktDivCode) {
-        try {
-            throttleFiCall();   // 유량제한 회피 — 가집계 계열과 호출 간격 공유
-            String query = "FID_INPUT_ISCD=" + fidInputIscd
-                    + "&FID_INPUT_ISCD_2=" + fidInputIscd2;
-            if (mrktDivCode != null && !mrktDivCode.isBlank()) {
-                query += "&FID_COND_MRKT_DIV_CODE=" + mrktDivCode;
-            }
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + INVESTOR_TIME_BY_MARKET_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_MARKET_INVESTOR_TIME)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            MarketInvestorFlow flow = parseMarketInvestorFlow(response.body(), marketLabel);
-            // 전체(빈 라벨) 조회가 0/0·파싱실패면 원인(필드명·시장코드) 파악용으로 원본 응답을 debug로만 남긴다.
-            // (코스피/코스닥 분리는 여러 후보를 순차 탐색하며 대부분 0을 돌려주므로 로그를 남기지 않는다.)
-            boolean empty = flow == null || (flow.foreignNetWon() == 0 && flow.institutionNetWon() == 0);
-            if (empty && marketLabel.isBlank() && log.isDebugEnabled()) {
-                String body = response.body();
-                log.debug("KIS 시장 수급 전체 0/0 또는 파싱실패 — 원본응답: {}",
-                        body.length() > 1500 ? body.substring(0, 1500) : body);
-            }
-            return flow;
-        } catch (Exception e) {
-            log.warn("KIS 시장 수급 조회 실패 ({}): {}", marketLabel, e.toString());
-            return null;
-        }
-    }
 
     /**
      * 외국계 매매종목 가집계(HTS [0430], TR FHKST644100C0) — 외국계 증권사 창구 기준 종목별 외국인 순매수/순매도 상위.
@@ -723,33 +671,6 @@ public class KisClient {
             log.warn("KIS 동시매매 수급 파싱 실패: {}", e.toString());
         }
         return result;
-    }
-
-    /**
-     * 시장별 투자자매매동향(시세) 응답에서 시장 전체 외국인·기관 순매수 거래대금을 읽는다.
-     * 시계열 output 중 최신 누적 행(output[0] 가정 — ⚠ 행 정렬은 첫 호출 로그로 검증)에서
-     * frgn/orgn/prsn_ntby_tr_pbmn을 백만원→원으로 환산({@link #NTBY_PBMN_UNIT_WON}). rt_cd!="0"·빈 응답이면 null.
-     * (네트워크 분리 — 테스트용 패키지 가시성)
-     */
-    static MarketInvestorFlow parseMarketInvestorFlow(String json, String marketLabel) {
-        try {
-            JsonNode root = new ObjectMapper().readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                log.warn("KIS 시장 수급({}) 비정상 응답: rt_cd={} msg={}",
-                        marketLabel, root.path("rt_cd").asText(), root.path("msg1").asText());
-                return null;
-            }
-            JsonNode out = root.path("output");
-            JsonNode row = out.isArray() ? (out.isEmpty() ? null : out.get(0)) : out;
-            if (row == null || row.isMissingNode()) return null;
-            long frgn = parseLong(row.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON;
-            long orgn = parseLong(row.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON;
-            long prsn = parseLong(row.path("prsn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON;   // 개인 순매수(원)
-            return new MarketInvestorFlow(marketLabel, frgn, orgn, prsn);
-        } catch (Exception e) {
-            log.warn("KIS 시장 수급({}) 파싱 실패: {}", marketLabel, e.toString());
-            return null;
-        }
     }
 
     /**
