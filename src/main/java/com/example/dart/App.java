@@ -13,11 +13,9 @@ import com.example.dart.kis.KisPollerService;
 import com.example.dart.llm.GeminiClient;
 import com.example.dart.llm.LlmClient;
 import com.example.dart.llm.OllamaClient;
-import com.example.dart.news.BreakingNews;
 import com.example.dart.news.GoogleNewsFeeds;
 import com.example.dart.news.NaverNewsClient;
-import com.example.dart.news.NewsAlertComposer;
-import com.example.dart.news.NewsArticleFilter;
+import com.example.dart.news.NewsHeadlineBuffer;
 import com.example.dart.news.NewsPollerService;
 import com.example.dart.news.RssClient;
 import com.example.dart.news.RssFeed;
@@ -41,7 +39,6 @@ import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
@@ -96,7 +93,7 @@ public class App {
                 : "📋 공시 알림이 시작되었습니다.");
         if (separateNewsChannel) {
             newsNotifier.start();
-            newsNotifier.send("🚨 속보 뉴스 알림이 시작되었습니다. (속보·긴급 기사만 알려드려요)");
+            newsNotifier.send("🗞️ 시황·뉴스 종합 리포트 채널이 시작되었습니다. (지난 1시간 뉴스를 시황 분석에 녹여 시간당 발송)");
             log.info("뉴스 알림 채널 분리 (channel/room: {})", newsChannelId);
         }
 
@@ -137,6 +134,10 @@ public class App {
             log.info("KIND 폴링 비활성화 (KIND_ENABLED=false)");
         }
 
+        // 뉴스 헤드라인 버퍼 — 뉴스 폴러가 신규 기사를 쌓고, 시황 리포트가 지난 1시간치를 읽어 분석 재료로 쓴다.
+        // (개별 속보 발송을 대체 — 정치·뻔한 지수 뉴스 대신 시간당 시황 리포트에 뉴스 맥락을 녹인다.)
+        NewsHeadlineBuffer newsHeadlineBuffer = new NewsHeadlineBuffer();
+
         // KIS 변동성 폴러 — 거래량 폭증(평소 대비 RVOL) + 급등 종목을 정찰. 키는 시스템 환경변수로 주입.
         // 전용 채널이 설정되면 분리(공시·뉴스와 성격이 다른 시세 반응 신호라 섞지 않는다), 아니면 공시 채널 공유.
         KisPollerService kisPollerService;
@@ -162,7 +163,8 @@ public class App {
                     kisClient,   // 주가추적과 공유 — 토큰 분당 1회 발급 한도 때문에 인스턴스를 나누지 않는다.
                     kisNotifier,     // 표·급등·섹터·수급 랭킹 → KIS 채널
                     newsNotifier,    // 시황 매크로 분석(LLM) → 뉴스 채널
-                    new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm, marketCalendar);
+                    new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm, marketCalendar,
+                    newsHeadlineBuffer);   // 지난 1시간 뉴스 헤드라인을 분석 재료로 읽는다
             kisPollerService.start();
         } else {
             kisPollerService = null;
@@ -179,17 +181,12 @@ public class App {
             if (newsClient == null) {
                 log.info("네이버 검색 보완망 비활성화 (NAVER_CLIENT_ID/SECRET 미설정) — RSS만 사용");
             }
-            NewsArticleFilter articleFilter = new NewsArticleFilter(
-                    config.newsExcludeKeywords(), Duration.ofMinutes(config.newsMaxAgeMin()),
-                    Path.of("seen_news_titles.txt"));
             // 뉴스 링크는 오래되면 재등장하지 않으므로 접수번호 계열보다 작은 상한으로 유지한다.
             SeenStore newsSeenStore = new SeenStore(Path.of("seen_news.txt"), 50_000);
-            BreakingNews breakingNews = new BreakingNews(config.newsBreakingKeywords());
             newsPollerService = new NewsPollerService(
                     new RssClient(), RssFeed.parseList(config.newsRssFeeds()),
                     GoogleNewsFeeds.of(config.newsGoogleKeywords()),
-                    newsClient, breakingNews, articleFilter, newsNotifier,
-                    new NewsAlertComposer(), newsSeenStore, config);
+                    newsClient, newsHeadlineBuffer, newsSeenStore, config);
             newsPollerService.start();
         } else {
             newsPollerService = null;
@@ -233,8 +230,8 @@ public class App {
 
     /**
      * 인스턴스가 하나만 뜨도록 파일 락을 건다. 이미 다른 프로세스가 잡고 있으면 즉시 종료한다.
-     * 두 인스턴스가 동시에 돌면 각자 메모리 중복필터(SeenStore·NewsArticleFilter.recentAlerts)를
-     * 따로 들고 있어 서로의 알림을 못 막고, 같은 기사를 인스턴스 수만큼 중복 전송하기 때문이다.
+     * 두 인스턴스가 동시에 돌면 각자 메모리 중복필터(SeenStore)와 뉴스 버퍼를 따로 들고 있어
+     * 서로의 알림을 못 막고, 같은 기사를 인스턴스 수만큼 중복 반영하기 때문이다.
      */
     private static void ensureSingleInstance() {
         Path lockFile = Path.of("app.lock");

@@ -66,6 +66,8 @@ public class DisclosurePriceTracker {
      * 공시 알림을 지연시키지 않지만, 이 지연으로 "공시 먼저, 가격은 그 뒤" 순서를 확실히 보장한다.
      */
     private static final long ENTRY_PRICE_DELAY_SEC = 2;
+    /** "100만원이면 몇 주?" 가늠용 기준 예산(원) — 진입가 줄에 100만원 ≈ N주를 함께 보여준다. */
+    private static final long BUDGET_WON = 1_000_000L;
     /** 분석 예약 지연 — 공시+10분 봉이 완성되도록 30초 버퍼를 더한다. */
     private static final long ANALYZE_DELAY_SEC = WINDOW_MIN * 60L + 30;
     /** 횡보/유의미 변동을 가르는 임계(%). 이보다 작은 변동은 "안 움직였다"로 본다. */
@@ -140,7 +142,7 @@ public class DisclosurePriceTracker {
                     return;
                 }
                 long prdyClose = quoteClient.previousCloseWon(code).orElse(0L);
-                notifier.send(composeEntryPrice(d.corpName(), base, prdyClose));
+                notifier.send(composeEntryPrice(base, prdyClose));
             } catch (Exception e) {
                 log.warn("공시 직전 가격 스냅샷 실패: {} - {}", d.corpName(), d.reportNm(), e);
             }
@@ -333,16 +335,28 @@ public class DisclosurePriceTracker {
     }
 
     /**
-     * 공시 직전 가격 한 줄 — "🕘 {회사} {HH:mm} 가격 {원} ({±등락률%})". 전일종가가 0(조회 실패)이면 % 생략.
+     * 공시 직전 가격 한 줄 + 100만원 매수 가늠 — 콤팩트하게 "{원} ({±등락률%})\n💰 100만원 ≈ {N}주".
+     * (회사명·시각·"가격" 라벨은 뺀다 — 회사명은 바로 위 공시 헤더에 있다.) 전일종가가 0이면 % 생략.
      * (순수 함수 — 테스트용 패키지 가시성)
      */
-    static String composeEntryPrice(String corpName, MinuteCandle base, long prdyClose) {
-        if (prdyClose > 0) {
-            double pct = (base.close() - prdyClose) * 100.0 / prdyClose;
-            return String.format("🕘 %s %s 가격 %,d원 (%+.1f%%)",
-                    corpName, CLOCK.format(base.time()), base.close(), pct);
-        }
-        return String.format("🕘 %s %s 가격 %,d원", corpName, CLOCK.format(base.time()), base.close());
+    static String composeEntryPrice(MinuteCandle base, long prdyClose) {
+        long price = base.close();
+        String head = prdyClose > 0
+                ? String.format("%,d원 (%+.1f%%)", price, (price - prdyClose) * 100.0 / prdyClose)
+                : String.format("%,d원", price);
+        return head + "\n" + budgetShares(price);
+    }
+
+    /**
+     * 100만원으로 살 수 있는 주식 수 한 줄 — "💰 100만원 ≈ 28주"(100만÷가격, 내림).
+     * 1주가 100만원을 넘으면 살 수 없으므로 1주 가격을 안내한다. (순수 함수 — 테스트용)
+     */
+    static String budgetShares(long price) {
+        if (price <= 0) return "💰 100만원 ≈ -";
+        long shares = BUDGET_WON / price;
+        return shares > 0
+                ? String.format("💰 100만원 ≈ %,d주", shares)
+                : String.format("💰 1주 %,d원 (100만원 초과)", price);
     }
 
     /** 기준가 대비 변동률(%). */

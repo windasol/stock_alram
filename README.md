@@ -28,30 +28,30 @@ KindPollerService (07:00~20:00 KST, 연속 실패 시 점진 백오프)
   → KindAlertComposer.compose()     헤더만 즉시 전송 (상세는 KIND 뷰어 링크)
 ```
 
-뉴스 폴러는 공시 폴러와 **독립된 스레드에서 병렬로** 동작한다 (Notifier만 공유).
-속도 우선으로 소스를 계층화했다: **언론사 RSS 속보 직접 폴링**(포털 색인 지연 없음, 키 불필요)이 주력이고,
+뉴스 폴러는 공시 폴러와 **독립된 스레드에서 병렬로** 동작한다.
+속도 우선으로 소스를 계층화했다: **언론사 RSS 직접 폴링**(포털 색인 지연 없음, 키 불필요)이 주력이고,
 네이버 검색 API(NAVER_CLIENT_ID/SECRET 설정 시)는 RSS에 없는 매체를 잡는 보완망이다.
+
+뉴스는 **개별 속보로 즉시 발송하지 않는다.** 예전엔 제목 속보 말머리([속보]/[긴급])만 골라 바로 알렸으나,
+그 방식은 "언론사가 속보 딱지를 붙였나"라는 형식 판단일 뿐 트레이딩 가치와 무관해(정치 속보·"코스피 급락"
+같은 뻔한 후행 정보) 폐기했다. 지금은 신규 기사를 **헤드라인 버퍼에 쌓기만** 하고,
+시황 리포트(`KisPollerService`)가 **지난 1시간치를 읽어 "시장 상황·주도 테마/종목"을 분석하는 재료**로 쓴다.
 
 ```
 NewsPollerService (별도 스레드 1개에서 세 주기 운용)
   ├─ RssClient.fetch()              언론사·정부 보도자료 RSS 17개 피드 (30초 주기, 기본)
   ├─ RssClient.fetch(구글뉴스)       키워드 검색 RSS — 네이버 사각지대 보완 (120초 주기, 키 불필요)
   └─ NaverNewsClient.search()       키워드별 네이버 뉴스 검색 (240초 주기, 키 설정 시)
-  → SeenStore                       이미 알린 기사(링크) 스킵, seen_news.txt로 유지
-  → BreakingNews                    속보 말머리 게이트 — 제목에 [속보]/[긴급]/[1보] 등이 없으면 버림
-  → NewsArticleFilter               제외 키워드 / 오래된 기사(기본 30분) / 유사 제목 중복(24시간 창)
-  → NewsAlertComposer.compose()     🚨 **속보** | 제목 형식 마크다운 조립
-  → Notifier.send()                 공시와 같은 채널로 전송
-```
+  → SeenStore                       이미 본 기사(링크) 스킵, seen_news.txt로 유지
+  → (NEWS_EXCLUDE_KEYWORDS 제목 컷)  스포츠·연예 등 잡음 제목은 적재 전 제외
+  → NewsHeadlineBuffer.add()        신규 기사를 시간창(2시간) 롤링 버퍼에 적재
 
-**속보 게이트** (BreakingNews):
-- 알림은 **속보인 기사만** 나간다 — 호재/악재 분류는 없다. 호재든 악재든 속보면 전부 알린다.
-- 제목이 속보 키워드(속보·긴급·특보·플래시·브레이킹, `NEWS_BREAKING_KEYWORDS`로 조정)를
-  괄호류(`[]`·`<>`·`()`·`【】`)로 감싸 달면 속보로 본다. 매체마다 표기가 달라 설정으로 뺐다.
-- 연합뉴스식 보도 차수 말머리(`[1보]`·`[2보]`…)도 속보 시리즈이므로 자동 인식.
-  정리성 `[종합2보]`·`[단독]`은 속보성이 아니라 기본 제외(필요하면 설정에 추가).
-- 본문 속 일반어("긴급 점검")는 괄호류로 감싸지 않으면 무시 — 오탐 방지.
-- RSS가 먼저 알린 이슈는 유사 제목 중복 필터가 네이버 쪽 같은 기사를 자동 억제한다.
+KisPollerService.generateMacroReport() (시간당, kis-poller 스레드)
+  → NewsHeadlineBuffer.recent(60분)  지난 1시간 헤드라인을 정규화 dedup 후 최대 60건
+  → buildFlowFacts + 뉴스 헤드라인    국내 실측 수급 + 뉴스를 한 프롬프트로
+  → LlmClient.chatGrounded()         Gemini 그라운딩으로 "시장 상황·우세 종목/섹터" 분석
+  → Notifier.send()                  🌐 시황 분석 → 뉴스 채널로 시간당 1건
+```
 
 ## 패키지 구조
 
@@ -72,10 +72,8 @@ com.example.dart
 │   ├── GoogleNewsFeeds      구글뉴스 키워드 검색 RSS 피드 팩토리 (키 불필요)
 │   ├── NaverNewsClient      네이버 뉴스 검색 Open API 클라이언트 (보완망)
 │   ├── NewsArticle          기사 1건 DTO (HTML 제거된 평문)
-│   ├── BreakingNews         속보 말머리 게이트 (속보·긴급·특보·[N보] 등)
-│   ├── NewsArticleFilter    제외 키워드·나이·유사 제목 중복 필터
-│   ├── NewsAlertComposer    뉴스 알림 메시지 조립
-│   └── NewsPollerService    RSS·네이버 이원 폴링 루프 (별도 스레드)
+│   ├── NewsHeadlineBuffer   지난 1시간 헤드라인 롤링 버퍼 (시황 리포트 재료)
+│   └── NewsPollerService    RSS·구글·네이버 폴링 → 버퍼 적재 (별도 스레드)
 ├── model/Disclosure     공시 1건 DTO (corp_cls → 코스피/코스닥 변환 포함)
 ├── parse/DocumentParser 원문 ZIP → 평문 변환, 핵심 정보 요약 추출
 ├── service

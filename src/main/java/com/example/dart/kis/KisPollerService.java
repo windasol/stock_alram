@@ -4,6 +4,8 @@ import com.example.dart.config.AppConfig;
 import com.example.dart.llm.LlmClient;
 import com.example.dart.market.DomesticMarketClient;
 import com.example.dart.market.UsFuturesClient;
+import com.example.dart.news.NewsArticle;
+import com.example.dart.news.NewsHeadlineBuffer;
 import com.example.dart.notify.Notifier;
 import com.example.dart.util.MarketCalendar;
 import org.slf4j.Logger;
@@ -23,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -121,6 +124,10 @@ public class KisPollerService {
     private final int reportIntervalMin;
     /** 시황 분석에 실시간 검색 그라운딩을 켤지. true면 chatGrounded(과금·실시간), false면 평문 chat. */
     private final boolean reportGrounding;
+    /** 지난 1시간 뉴스 헤드라인 버퍼 — 뉴스 폴러가 쌓고 시황 리포트가 재료로 읽는다. null이면 뉴스 섹션 생략. */
+    private final NewsHeadlineBuffer headlineBuffer;
+    /** 시황 리포트에 넣을 뉴스 헤드라인 최대 건수 — 정규화 dedup 후 상한(토큰 절약). */
+    private static final int NEWS_HEADLINES_MAX = 60;
     /** 리포트 '대외 여건'용 미국 선물 조회기. 실패해도 국내 리포트는 계속된다. */
     private final UsFuturesClient usFutures = new UsFuturesClient();
     /**
@@ -157,9 +164,10 @@ public class KisPollerService {
 
     public KisPollerService(KisClient client, Notifier notifier, Notifier reportNotifier,
                             KisAlertComposer alertComposer, AppConfig config, Path sectorsFile,
-                            LlmClient llm, MarketCalendar calendar) {
+                            LlmClient llm, MarketCalendar calendar, NewsHeadlineBuffer headlineBuffer) {
         this.client = client;
         this.calendar = calendar;
+        this.headlineBuffer = headlineBuffer;
         this.notifier = notifier;
         this.reportNotifier = reportNotifier;
         this.alertComposer = alertComposer;
@@ -506,6 +514,13 @@ public class KisPollerService {
         String marketFlowLine = marketFlowLine(mf);                      // 시장 전체 외국인·기관(null 가능)
         String facts = buildFlowFacts(indexLine, marketFlowLine, fxLine, usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
 
+        // 지난 리포트 주기(시간당) 동안 수집된 뉴스 헤드라인을 재료로 덧붙인다 — 개별 속보 발송을 대체하는 핵심.
+        if (headlineBuffer != null) {
+            List<NewsArticle> headlines = headlineBuffer.recent(Duration.ofMinutes(reportIntervalMin), NEWS_HEADLINES_MAX);
+            String newsBlock = buildNewsHeadlines(headlines, NEWS_HEADLINES_MAX);
+            if (newsBlock != null) facts = facts + "\n\n" + newsBlock;
+        }
+
         // 그라운딩 ON이면 실시간 검색으로 "왜?"를 끌어온다. 단 무료 티어/권한 문제로 그라운딩이 실패할 수 있어
         // 실패하면 평문(chat)으로 폴백한다 — 분석이 통째로 빠지지 않게(평문은 국내 실측만, "왜?"는 약함).
         String narrative = null;
@@ -572,10 +587,53 @@ public class KisPollerService {
         return (s != null && !s.isBlank() && !UNCLASSIFIED.equals(s)) ? "(" + s + ")" : "";
     }
 
+    /**
+     * 지난 리포트 주기 동안 수집된 뉴스 헤드라인을 LLM 입력용 블록으로 만든다(순수 함수 — 전송 없음, 테스트용).
+     * 정규화 제목(대괄호·문장부호·공백 제거) 기준으로 중복을 접어 토큰을 아끼고, 최대 max건만 남긴다.
+     * 각 줄은 "HH:mm 출처 | 제목"(발행 시각을 모르면 시각 생략). 헤드라인이 없으면 null → 섹션 생략.
+     */
+    static String buildNewsHeadlines(List<NewsArticle> articles, int max) {
+        if (articles == null || articles.isEmpty()) return null;
+        LinkedHashMap<String, NewsArticle> unique = new LinkedHashMap<>();
+        for (NewsArticle a : articles) {
+            String key = normalizeTitle(a.title());
+            if (key.isEmpty()) continue;
+            unique.putIfAbsent(key, a);
+            if (unique.size() >= max) break;
+        }
+        if (unique.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder("[지난 1시간 주요 뉴스 헤드라인]");
+        for (NewsArticle a : unique.values()) {
+            sb.append("\n");
+            if (a.publishedAt() != null) {
+                sb.append(SUMMARY_TIME_FMT.format(a.publishedAt().withZoneSameInstant(KST))).append(" ");
+            }
+            sb.append(a.source()).append(" | ").append(a.title());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 제목 dedup 키 — 대괄호·꺾쇠·괄호 구간을 '내용째' 지운 뒤 남은 문장부호·공백을 제거하고 소문자화한다.
+     * 말머리를 통째로 없애야 "[속보] A사, 5조원 수주"(RSS) ≈ "A사 5조원 수주"(네이버)가 같은 키로 접힌다.
+     */
+    private static String normalizeTitle(String title) {
+        if (title == null) return "";
+        String stripped = title
+                .replaceAll("\\[[^\\]]*\\]", "")               // [속보] 등 대괄호 구간 통째 제거
+                .replaceAll("<[^>]*>", "")                     // <특보>
+                .replaceAll("\\([^)]*\\)", "")                 // (플래시)
+                .replaceAll("\\uFF08[^\\uFF09]*\\uFF09", "")   // 전각 괄호 （ ）
+                .replaceAll("\\u3010[^\\u3011]*\\u3011", "");   // 【 】
+        return stripped.replaceAll("[\\s\"'\\u201C\\u201D\\u00B7,.\\-\\u2026]", "")
+                .toLowerCase(java.util.Locale.ROOT);
+    }
+
     private static final String MACRO_SYSTEM_PROMPT =
             "너는 한국 주식시장 시황 분석가다. 아래 '국내 실측 데이터'(국내 지수 코스피·코스닥 등락, "
             + "시장 전체 외국인·기관 순매수(가집계), 원달러 환율, "
-            + "미국 선물 등락률, 외국인·기관 수급 상위·업종, 외국인+기관 양매수, 거래대금 섹터 랭킹)는 사실이다. "
+            + "미국 선물 등락률, 외국인·기관 수급 상위·업종, 외국인+기관 양매수, 거래대금 섹터 랭킹)와 "
+            + "'지난 1시간 주요 뉴스 헤드라인'(있으면)은 사실이다. "
             + "여기에 더해 Google 검색으로 지금 시점의 ① 미국 선물·해외 증시가 오르거나 내리는 '이유' "
             + "② 한국의 정책 발표나 외국인 매도(또는 매수)를 유발한 이벤트, 원달러 환율이 움직인 배경 "
             + "③ 오늘과 이번 주 주요 경제 일정(FOMC·CPI·고용지표·주요 기업 실적 등)을 확인하라. "
@@ -583,13 +641,18 @@ public class KisPollerService {
             + "(1) 코스피·코스닥 지수 현황을 짚되 둘이 엇갈리면(디버전스) 그 점을 먼저 설명한다 "
             + "(2) 외국인·기관이 각각 무엇을 사고/파는지 수급을 정리한다 "
             + "(3) 외국인 매도(또는 매수)의 '이유'를 원달러 환율·미국 선물·국내 정책 발표·해외 이벤트와 엮어 설명한다 "
-            + "(4) 마지막에 '오늘/이번 주 체크포인트'를 2~3개 불릿으로 정리한다. "
-            + "검색으로 확인되지 않은 추측·소문은 쓰지 마라. 과장·투자권유 금지. 본문은 5~8문장.";
+            + "(4) '지난 1시간 주요 뉴스 헤드라인'이 주어지면, 그 헤드라인들에서 오늘의 주도 테마·업종과 "
+            + "개별 종목 재료(수주·실적·신약·규제·M&A 등)를 읽어내 수급 흐름과 엮어 '어떤 종목/섹터가 우세한지'를 짚는다. "
+            + "단 정치·단순 지수 등락(코스피 급락 등)처럼 종목 선택에 도움이 안 되는 뻔한 내용은 재료로 취급하지 말고, "
+            + "특정 종목·업종 주가에 실제 영향을 주는 것만 골라라. 헤드라인에 없는 사실은 지어내지 마라. "
+            + "(5) 마지막에 '오늘/이번 주 체크포인트'를 2~3개 불릿으로 정리한다. "
+            + "검색으로 확인되지 않은 추측·소문은 쓰지 마라. 과장·투자권유 금지. 본문은 6~9문장.";
 
     private static final String MACRO_USER_PROMPT =
-            "아래는 지금 국내 지수·환율·미국 선물·수급 실측이다. 위 지침의 순서(지수 디버전스 → 수급 → "
-            + "외국인 매매 이유(환율·미선물·정책·해외 이벤트) → 체크포인트)대로, 검색을 활용해 "
-            + "'왜 지금 시장이 이렇게 움직이는지'를 분석해줘.";
+            "아래는 지금 국내 지수·환율·미국 선물·수급 실측과, 지난 1시간 동안 수집된 뉴스 헤드라인이다. "
+            + "위 지침의 순서(지수 디버전스 → 수급 → 외국인 매매 이유(환율·미선물·정책·해외 이벤트) → "
+            + "뉴스가 가리키는 주도 테마·우세 종목/섹터 → 체크포인트)대로, 검색을 활용해 "
+            + "'지금 시장 상황이 어떻고 어떤 종목/섹터가 우세한지'를 분석해줘.";
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.

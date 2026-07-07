@@ -1,13 +1,17 @@
 package com.example.dart.kis;
 
+import com.example.dart.news.NewsArticle;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -367,6 +371,31 @@ class KisPollerServiceTest {
         String line = KisPollerService.marketFlowLine(List.of(
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L)));
         assertEquals("📊 시장 수급 | 외국인 -3,200억·기관 +1,500억·개인 +1,700억", line);
+    }
+
+    @Test
+    void 뉴스_헤드라인_블록은_정규화중복을_접고_출처_제목을_시각과_함께_보여준다() {
+        ZonedDateTime t = ZonedDateTime.of(2026, 7, 7, 13, 20, 0, 0, ZoneId.of("Asia/Seoul"));
+        List<NewsArticle> articles = List.of(
+                new NewsArticle("한국경제", "[속보] A사, 5조원 수주", "l1", null, "d", t),
+                new NewsArticle("연합뉴스", "A사 5조원 수주", "l2", null, "d", t.plusMinutes(1)),  // 정규화하면 중복
+                new NewsArticle("이데일리", "B사 신약 FDA 승인", "l3", null, "d", null));           // 발행시각 없음
+
+        String block = KisPollerService.buildNewsHeadlines(articles, 60);
+
+        assertNotNull(block);
+        assertTrue(block.startsWith("[지난 1시간 주요 뉴스 헤드라인]"), block);
+        // 첫 헤드라인(한국경제)만 남고 정규화 중복(연합뉴스)은 접힌다
+        assertTrue(block.contains("13:20 한국경제 | [속보] A사, 5조원 수주"), block);
+        assertFalse(block.contains("연합뉴스"), block);
+        // 발행시각을 모르면 시각 없이 "출처 | 제목"
+        assertTrue(block.contains("이데일리 | B사 신약 FDA 승인"), block);
+    }
+
+    @Test
+    void 뉴스_헤드라인_블록은_비면_null() {
+        assertNull(KisPollerService.buildNewsHeadlines(List.of(), 60));
+        assertNull(KisPollerService.buildNewsHeadlines(null, 60));
     }
 
     @Test

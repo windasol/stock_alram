@@ -1,28 +1,28 @@
 package com.example.dart.news;
 
 import com.example.dart.config.AppConfig;
-import com.example.dart.notify.Notifier;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
+import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 뉴스 폴러 — 공시 폴러(PollerService)와 독립된 스레드에서 병렬로 동작하며 Notifier만 공유한다.
+ * 뉴스 폴러 — 공시 폴러(PollerService)와 독립된 스레드에서 병렬로 동작한다.
  *
- * 세 소스를 같은 스레드에서 다른 주기로 폴링한다 (필터 상태 공유, 동기화 불필요):
- *  - RSS      : 언론사 속보 피드 직접 폴링. 포털 색인 지연이 없어 가장 빠르다. 무료·무제한이라 짧은 주기.
+ * 세 소스를 같은 스레드에서 다른 주기로 폴링한다 (SeenStore 상태 공유, 동기화 불필요):
+ *  - RSS      : 언론사 피드 직접 폴링. 포털 색인 지연이 없어 가장 빠르다. 무료·무제한이라 짧은 주기.
  *  - 구글뉴스  : 키워드 검색 RSS. 네이버 API 사각지대(중소매체·외신 한글판) 보완. 비공식 한도라 중간 주기.
  *  - 네이버    : 키워드 검색. RSS에 없는 매체를 잡는 보완망. 일 25,000회 한도라 긴 주기.
  *
- * 빠른 소스가 먼저 알린 이슈는 유사 제목 중복 필터가 느린 소스의 같은 기사를 자동 억제한다.
- * 흐름: 신규 기사(링크 기준) → 속보 말머리 감지 → 노이즈 필터 → 조립 → 전송.
+ * 예전엔 속보 말머리([속보]·[긴급])만 골라 개별 발송했으나, 그 방식은 "언론사가 속보 딱지를 붙였나"라는
+ * 형식 판단일 뿐 트레이딩 가치와 무관해(정치 속보·뻔한 지수 등락) 폐기했다. 지금은 신규 기사를
+ * {@link NewsHeadlineBuffer}에 쌓기만 하고, 시황 리포트(KisPollerService)가 지난 1시간치를 읽어
+ * "시장 상황·주도 테마/종목"을 분석하는 재료로 쓴다.
  */
 public class NewsPollerService {
 
@@ -33,27 +33,24 @@ public class NewsPollerService {
     private final List<RssFeed> rssFeeds;
     private final List<RssFeed> googleFeeds;
     private final NaverNewsClient newsClient;
-    private final BreakingNews breakingNews;
-    private final NewsArticleFilter articleFilter;
-    private final Notifier notifier;
-    private final NewsAlertComposer alertComposer;
+    private final NewsHeadlineBuffer headlineBuffer;
     private final SeenStore seenStore;
+    /** 잡음 제거용 제외 키워드(소문자). 제목에 포함되면 버퍼에 넣지 않는다(스포츠·연예 등). */
+    private final List<String> excludeKeywords;
     private final AppConfig config;
     private final ScheduledExecutorService scheduler;
 
     public NewsPollerService(RssClient rssClient, List<RssFeed> rssFeeds, List<RssFeed> googleFeeds,
-                             NaverNewsClient newsClient, BreakingNews breakingNews,
-                             NewsArticleFilter articleFilter, Notifier notifier,
-                             NewsAlertComposer alertComposer, SeenStore seenStore, AppConfig config) {
+                             NaverNewsClient newsClient, NewsHeadlineBuffer headlineBuffer,
+                             SeenStore seenStore, AppConfig config) {
         this.rssClient = rssClient;
         this.rssFeeds = rssFeeds;
         this.googleFeeds = googleFeeds;
         this.newsClient = newsClient;
-        this.breakingNews = breakingNews;
-        this.articleFilter = articleFilter;
-        this.notifier = notifier;
-        this.alertComposer = alertComposer;
+        this.headlineBuffer = headlineBuffer;
         this.seenStore = seenStore;
+        this.excludeKeywords = config.newsExcludeKeywords().stream()
+                .map(s -> s.toLowerCase(Locale.ROOT)).toList();
         this.config = config;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "news-poller"));
     }
@@ -61,7 +58,7 @@ public class NewsPollerService {
     public void start() {
         int queryCount = config.allNewsKeywords().size();
         long dailyCalls = (long) queryCount * 86_400 / config.newsPollIntervalSec();
-        log.info("뉴스 폴링 시작 (RSS {}개 피드 {}초 주기, 구글뉴스 {}개 키워드 {}초 주기, 네이버 키워드 {}개 {}초 주기 — 예상 일 호출 {}회)",
+        log.info("뉴스 수집 시작 (RSS {}개 피드 {}초 주기, 구글뉴스 {}개 키워드 {}초 주기, 네이버 키워드 {}개 {}초 주기 — 예상 일 호출 {}회, 시황 리포트 재료로 버퍼링)",
                 rssFeeds.size(), config.newsRssPollIntervalSec(),
                 googleFeeds.size(), config.newsGooglePollIntervalSec(),
                 queryCount, config.newsPollIntervalSec(), dailyCalls);
@@ -88,7 +85,7 @@ public class NewsPollerService {
             scheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        log.info("뉴스 폴링 중지 완료");
+        log.info("뉴스 수집 중지 완료");
     }
 
     private void pollRss() {
@@ -101,20 +98,14 @@ public class NewsPollerService {
 
     private void pollFeeds(List<RssFeed> feeds, String label) {
         try {
-            int fresh = 0, breaking = 0, alerted = 0;
+            int collected = 0;
             for (RssFeed feed : feeds) {
                 for (NewsArticle article : rssClient.fetch(feed)) {
-                    if (seenStore.contains(article.link())) continue;
-                    seenStore.add(article.link());
-                    fresh++;
-                    // 피드는 전체 기사 스트림 — 속보 말머리가 없으면 그냥 버린다.
-                    if (!breakingNews.isBreaking(article.title())) continue;
-                    breaking++;
-                    if (handle(article)) alerted++;
+                    if (collect(article)) collected++;
                 }
             }
-            if (fresh > 0) {
-                log.info("{} 폴링: 신규 {}건 → 속보 {}건 → 알림 {}건", label, fresh, breaking, alerted);
+            if (collected > 0) {
+                log.info("{} 폴링: 신규 {}건 수집 (버퍼 {}건)", label, collected, headlineBuffer.size());
             }
         } catch (Exception e) {
             log.error("{} 폴링 중 오류 발생", label, e);
@@ -123,37 +114,39 @@ public class NewsPollerService {
 
     private void pollNaver() {
         try {
-            int fresh = 0, breaking = 0, alerted = 0;
+            int collected = 0;
             for (String keyword : config.allNewsKeywords()) {
                 for (NewsArticle article : newsClient.search(keyword)) {
-                    if (seenStore.contains(article.link())) continue;
-                    seenStore.add(article.link());
-                    fresh++;
-                    // 검색어가 넓어서(임상, 적자 등) 속보 말머리가 붙은 기사만 알린다.
-                    if (!breakingNews.isBreaking(article.title())) continue;
-                    breaking++;
-                    if (handle(article)) alerted++;
+                    if (collect(article)) collected++;
                 }
             }
-            if (fresh > 0) {
-                log.info("네이버 폴링: 신규 {}건 → 속보 {}건 → 알림 {}건", fresh, breaking, alerted);
+            if (collected > 0) {
+                log.info("네이버 폴링: 신규 {}건 수집 (버퍼 {}건)", collected, headlineBuffer.size());
             }
         } catch (Exception e) {
             log.error("네이버 뉴스 폴링 중 오류 발생", e);
         }
     }
 
-    /** @return 알림을 보냈으면 true. */
-    private boolean handle(NewsArticle article) {
-        Instant now = Instant.now();
-        Optional<String> reject = articleFilter.rejectReason(article, now);
-        if (reject.isPresent()) {
-            log.info("뉴스 필터 제외 [{}]: {}", reject.get(), article.title());
-            return false;
-        }
-        articleFilter.markAlerted(article, now);
-        log.info("속보 뉴스 감지 [{}]: {}", article.source(), article.title());
-        notifier.send(alertComposer.compose(article));
+    /**
+     * 신규 기사(링크 기준 처음 본 것)를 버퍼에 쌓는다. 제외 키워드가 걸린 제목은 링크만 기억하고 버린다.
+     * @return 실제 버퍼에 적재했으면 true.
+     */
+    private boolean collect(NewsArticle article) {
+        if (seenStore.contains(article.link())) return false;
+        seenStore.add(article.link());
+        if (isExcluded(article.title())) return false;
+        headlineBuffer.add(article);
         return true;
+    }
+
+    /** 제목에 제외 키워드가 하나라도 포함되면 true(잡음 컷). 설정이 비면 항상 false. */
+    private boolean isExcluded(String title) {
+        if (excludeKeywords.isEmpty() || title == null) return false;
+        String lower = title.toLowerCase(Locale.ROOT);
+        for (String kw : excludeKeywords) {
+            if (lower.contains(kw)) return true;
+        }
+        return false;
     }
 }

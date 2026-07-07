@@ -93,17 +93,30 @@ class DisclosurePriceTrackerTest {
     // composeEntryPrice(corpName, base, prdyClose) — 공시 직전 가격 한 줄. %는 전일종가 대비 당일 등락률.
 
     @Test
-    void 공시직전_가격줄은_시각_가격_등락률을_담는다() {
+    void 공시직전_가격줄은_콤팩트하게_가격_등락률_100만원매수량() {
         String line = DisclosurePriceTracker.composeEntryPrice(
-                "삼성전자", c(17, 50, 0, 0, 0, 550_000L), 500_000L);   // 55만원, 전일 50만 → +10.0%
-        assertEquals("🕘 삼성전자 17:50 가격 550,000원 (+10.0%)", line);
+                c(17, 50, 0, 0, 0, 550_000L), 500_000L);   // 55만원, 전일 50만 → +10.0%, 100만÷55만=1주
+        assertEquals("550,000원 (+10.0%)\n💰 100만원 ≈ 1주", line);   // 회사명·시각·"가격" 라벨 없음
     }
 
     @Test
     void 공시직전_가격줄_전일종가_0이면_등락률_생략() {
         String line = DisclosurePriceTracker.composeEntryPrice(
-                "삼성전자", c(17, 50, 0, 0, 0, 550_000L), 0L);
-        assertEquals("🕘 삼성전자 17:50 가격 550,000원", line);
+                c(17, 50, 0, 0, 0, 550_000L), 0L);
+        assertEquals("550,000원\n💰 100만원 ≈ 1주", line);
+    }
+
+    // budgetShares(price) — 100만원 ÷ 가격(내림). 1주가 100만원 초과면 살 수 없음 안내.
+
+    @Test
+    void 백만원_매수량은_가격으로_내림한다() {
+        assertEquals("💰 100만원 ≈ 28주", DisclosurePriceTracker.budgetShares(35_000L));   // 1,000,000/35,000=28.5→28
+        assertEquals("💰 100만원 ≈ 1,000주", DisclosurePriceTracker.budgetShares(1_000L));
+    }
+
+    @Test
+    void 한주가_100만원_넘으면_초과안내() {
+        assertEquals("💰 1주 1,200,000원 (100만원 초과)", DisclosurePriceTracker.budgetShares(1_200_000L));
     }
 
     // computeStats(candles, t0Min, fromMin, toMin, prdyClose) — 분봉 창에서 통계 산출.
