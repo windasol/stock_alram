@@ -66,6 +66,46 @@ class DisclosurePriceTrackerTest {
         assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(18, 0)));   // 애프터마켓
     }
 
+    // pickAtOrBefore(candles, target) — "공시 2분 전 가격" 봉 선택(≤target 중 가장 늦은 봉).
+
+    @Test
+    void 공시2분전_봉은_target이하_가장_늦은_봉() {
+        List<MinuteCandle> candles = List.of(
+                c(17, 48, 500, 500, 500, 500), c(17, 49, 510, 510, 510, 510),
+                c(17, 50, 520, 520, 520, 520), c(17, 51, 530, 530, 530, 530));
+        MinuteCandle base = DisclosurePriceTracker.pickAtOrBefore(candles, LocalTime.of(17, 50));
+        assertEquals(520, base.close());   // 17:50 봉
+    }
+
+    @Test
+    void target이전_봉이_없으면_가장_이른_봉으로_폴백() {
+        List<MinuteCandle> candles = List.of(
+                c(9, 1, 100, 100, 100, 100), c(9, 2, 110, 110, 110, 110));
+        MinuteCandle base = DisclosurePriceTracker.pickAtOrBefore(candles, LocalTime.of(8, 59));
+        assertEquals(100, base.close());   // 가장 이른 봉(9:01)
+    }
+
+    @Test
+    void 분봉이_비면_null() {
+        assertNull(DisclosurePriceTracker.pickAtOrBefore(List.of(), LocalTime.of(17, 50)));
+    }
+
+    // composeEntryPrice(corpName, base, prdyClose) — 공시 직전 가격 한 줄. %는 전일종가 대비 당일 등락률.
+
+    @Test
+    void 공시직전_가격줄은_시각_가격_등락률을_담는다() {
+        String line = DisclosurePriceTracker.composeEntryPrice(
+                "삼성전자", c(17, 50, 0, 0, 0, 550_000L), 500_000L);   // 55만원, 전일 50만 → +10.0%
+        assertEquals("🕘 삼성전자 17:50 가격 550,000원 (+10.0%)", line);
+    }
+
+    @Test
+    void 공시직전_가격줄_전일종가_0이면_등락률_생략() {
+        String line = DisclosurePriceTracker.composeEntryPrice(
+                "삼성전자", c(17, 50, 0, 0, 0, 550_000L), 0L);
+        assertEquals("🕘 삼성전자 17:50 가격 550,000원", line);
+    }
+
     // computeStats(candles, t0Min, fromMin, toMin, prdyClose) — 분봉 창에서 통계 산출.
     // 표기 %는 전일종가(prdyClose) 대비 당일 등락률, prdyClose=0이면 기준가 대비로 폴백. 패턴은 항상 기준가 대비.
 

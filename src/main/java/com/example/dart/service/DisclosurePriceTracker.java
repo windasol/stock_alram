@@ -61,6 +61,11 @@ public class DisclosurePriceTracker {
 
     private static final int PRE_MIN = 2;       // 기준가를 잡는 공시 전 시점(분)
     private static final int WINDOW_MIN = 10;   // 공시 후 분석 창(분)
+    /**
+     * 공시 직전 가격은 헤더가 나간 '뒤'에 발송되도록 살짝 지연시킨다 — KIS 조회는 이미 별도 스레드라
+     * 공시 알림을 지연시키지 않지만, 이 지연으로 "공시 먼저, 가격은 그 뒤" 순서를 확실히 보장한다.
+     */
+    private static final long ENTRY_PRICE_DELAY_SEC = 2;
     /** 분석 예약 지연 — 공시+10분 봉이 완성되도록 30초 버퍼를 더한다. */
     private static final long ANALYZE_DELAY_SEC = WINDOW_MIN * 60L + 30;
     /** 횡보/유의미 변동을 가르는 임계(%). 이보다 작은 변동은 "안 움직였다"로 본다. */
@@ -105,6 +110,41 @@ public class DisclosurePriceTracker {
         pool.schedule(() -> analyze(d, category, t0), ANALYZE_DELAY_SEC, TimeUnit.SECONDS);
         log.info("주가 추적 예약 [{}] {} - {} — {}분 뒤 [공시-{}분~공시+{}분] 분봉 분석",
                 code, d.corpName(), d.reportNm(), WINDOW_MIN, PRE_MIN, WINDOW_MIN);
+    }
+
+    /**
+     * 공시 알림 직후 "공시 {@value #PRE_MIN}분 전 가격"을 한 줄로 즉시 보낸다(비동기).
+     * 알림을 받자마자 어디서 출발했는지 가늠할 기준점을 준다 — 값은 KIS 1분봉의 {@value #PRE_MIN}분 전 봉 종가,
+     * %는 전일종가 대비 당일 등락률(사용자가 종목 화면에서 보는 그 %). 10분 뒤 {@link #analyze}의 시작가와 같은 기준점이다.
+     * 종목코드 없음·KIS 미설정·장외·분봉 없음이면 조용히 생략한다.
+     */
+    public void sendEntryPrice(Disclosure d) {
+        String code = d.stockCode();
+        if (code == null || code.isBlank() || kisClient == null) return;   // 코넥스·비상장·KIS 미설정
+        ZonedDateTime now = ZonedDateTime.now(KST);
+        if (!withinWindow(now)) return;   // 장외 — 분봉 없음
+        // 별도 스레드 + 지연 발송 — 공시 헤더는 폴러 스레드에서 즉시 나가고, KIS 조회·가격줄은 그 뒤에.
+        pool.schedule(() -> {
+            try {
+                LocalTime nowMin = now.toLocalTime().truncatedTo(ChronoUnit.MINUTES);
+                LocalTime target = nowMin.minusMinutes(PRE_MIN);
+                if (target.isBefore(TRACK_OPEN)) target = TRACK_OPEN;
+                String endHms = nowMin.format(HHMMSS);
+                // 정규장 밖(프리·애프터마켓, NXT만 거래)이면 통합("UN") 분봉이 필요. UN이 비면 J로 폴백(analyze와 동일).
+                boolean extended = nxtSession(target) || nxtSession(nowMin);
+                List<MinuteCandle> candles = kisClient.minuteCandles(code, endHms, extended ? "UN" : "J");
+                if (candles.isEmpty() && extended) candles = kisClient.minuteCandles(code, endHms, "J");
+                MinuteCandle base = pickAtOrBefore(candles, target);
+                if (base == null) {
+                    log.info("공시 직전 가격 생략(분봉 없음): {} - {}", d.corpName(), d.reportNm());
+                    return;
+                }
+                long prdyClose = quoteClient.previousCloseWon(code).orElse(0L);
+                notifier.send(composeEntryPrice(d.corpName(), base, prdyClose));
+            } catch (Exception e) {
+                log.warn("공시 직전 가격 스냅샷 실패: {} - {}", d.corpName(), d.reportNm(), e);
+            }
+        }, ENTRY_PRICE_DELAY_SEC, TimeUnit.SECONDS);
     }
 
     public void stop() {
@@ -276,6 +316,33 @@ public class DisclosurePriceTracker {
         } catch (IOException e) {
             log.warn("주가 통계 저장 실패: {} - {}", d.corpName(), d.reportNm(), e);
         }
+    }
+
+    /**
+     * 오름차순 분봉 목록에서 target 시각 이하(≤)의 가장 늦은 봉을 고른다 — "공시 2분 전 가격".
+     * target 이전 봉이 하나도 없으면(장 초반 등) 가장 이른 봉으로 폴백한다. 목록이 비면 null.
+     * (네트워크 분리 — 테스트용 패키지 가시성)
+     */
+    static MinuteCandle pickAtOrBefore(List<MinuteCandle> candles, LocalTime target) {
+        MinuteCandle picked = null;
+        for (MinuteCandle c : candles) {
+            if (!c.time().isAfter(target)) picked = c;   // 오름차순이라 ≤target 중 마지막이 가장 늦은 봉
+        }
+        if (picked == null && !candles.isEmpty()) picked = candles.get(0);   // target 이전 봉이 없으면 가장 이른 봉
+        return picked;
+    }
+
+    /**
+     * 공시 직전 가격 한 줄 — "🕘 {회사} {HH:mm} 가격 {원} ({±등락률%})". 전일종가가 0(조회 실패)이면 % 생략.
+     * (순수 함수 — 테스트용 패키지 가시성)
+     */
+    static String composeEntryPrice(String corpName, MinuteCandle base, long prdyClose) {
+        if (prdyClose > 0) {
+            double pct = (base.close() - prdyClose) * 100.0 / prdyClose;
+            return String.format("🕘 %s %s 가격 %,d원 (%+.1f%%)",
+                    corpName, CLOCK.format(base.time()), base.close(), pct);
+        }
+        return String.format("🕘 %s %s 가격 %,d원", corpName, CLOCK.format(base.time()), base.close());
     }
 
     /** 기준가 대비 변동률(%). */

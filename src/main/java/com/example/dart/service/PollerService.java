@@ -123,6 +123,10 @@ public class PollerService {
         // 공시 후 주가 추적(통계) — 호재 공시면 감지 시각 기준 10분간 주가 변동을 기록한다.
         // DART는 종목코드를 즉시 보유하므로 교차중복(DART/KIND 선행) 여부와 무관하게 여기서 추적한다.
         priceTracker.track(d, m.category());
+        // "공시 2분 전 가격"을 한 줄로 후송한다 — 알림을 받자마자 어디서 출발했는지 가늠하게 한다.
+        // KIS 조회는 별도 스레드에서 지연 실행되므로 아래 공시 헤더 발송을 1ms도 늦추지 않는다(공시 먼저, 가격 뒤).
+        // 교차중복 여부와 무관하게 여기서 1회(감지당 1회) 예약한다.
+        priceTracker.sendEntryPrice(d);
 
         // 교차 중복: add가 원자적이라 먼저 잡은 쪽만 true를 받는다. true면 DART가 먼저이니 DART가
         // 헤더+규모 분석(DART 원문)을 책임진다. false면 KIND가 먼저이고, KIND 폴러가 헤더와 규모 분석(KIND
