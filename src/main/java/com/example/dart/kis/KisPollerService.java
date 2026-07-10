@@ -76,6 +76,9 @@ public class KisPollerService {
     }
 
     private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
+    /** 시황 분석 '기준 날짜' 앵커용 — 예: 2026-07-10(금). 요일까지 박아 LLM이 '오늘/이번 주'를 정확히 잡게 한다. */
+    private static final DateTimeFormatter MACRO_DATE_FMT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd(E)", java.util.Locale.KOREAN);
     /** 업종 미상 종목의 섹터 라벨. */
     private static final String UNCLASSIFIED = "미분류";
     /** 거래대금 섹터 랭킹에서 보여줄 상위 섹터 수. */
@@ -128,6 +131,12 @@ public class KisPollerService {
     private final NewsHeadlineBuffer headlineBuffer;
     /** 시황 리포트에 넣을 뉴스 헤드라인 최대 건수 — 정규화 dedup 후 상한(토큰 절약). */
     private static final int NEWS_HEADLINES_MAX = 60;
+    /**
+     * 재시작 후 첫 시황분석 발송 지연(초). 인메모리 뉴스 버퍼는 재시작 시 비므로, 뉴스 폴러
+     * (RSS 0s·네이버 5s·구글 10s)가 한 바퀴 돌아 버퍼를 채울 시간을 준 뒤 첫 리포트를 보낸다
+     * — 그래야 첫 발송에도 '오늘 촉매'·주도 테마가 실린다. 이후 발송은 정상 주기.
+     */
+    private static final long MACRO_FIRST_RUN_DELAY_SEC = 45;
     /** 리포트 '대외 여건'용 미국 선물 조회기. 실패해도 국내 리포트는 계속된다. */
     private final UsFuturesClient usFutures = new UsFuturesClient();
     /**
@@ -218,10 +227,12 @@ public class KisPollerService {
         // 10분이 아니라 시간당인 이유: 그라운딩이 호출당 과금이고 매크로 맥락은 10분마다 안 바뀐다.
         if (llm != null && reportIntervalMin > 0) {
             long periodSec = reportIntervalMin * 60L;
-            // 재시작 즉시 1회(장중이면 발송, 장외면 게이트로 스킵) 후 주기 반복 — 바로 동작 확인 가능.
-            scheduler.scheduleWithFixedDelay(this::generateMacroReport, 0, periodSec, TimeUnit.SECONDS);
-            log.info("🌐 시황 매크로 분석 활성 ({}분 주기, 모델 {}, 그라운딩 {}, 재시작 즉시 1회)",
-                    reportIntervalMin, llm.model(), reportGrounding ? "ON(검색)" : "OFF(평문)");
+            // 첫 발송은 뉴스 폴러가 버퍼를 채울 시간을 준 뒤 1회(장중이면 발송, 장외면 게이트로 스킵) 후 주기 반복.
+            // 버퍼가 없으면(뉴스 비활성) 지연 없이 즉시. 이후 발송은 정상 주기.
+            long firstDelaySec = headlineBuffer != null ? MACRO_FIRST_RUN_DELAY_SEC : 0;
+            scheduler.scheduleWithFixedDelay(this::generateMacroReport, firstDelaySec, periodSec, TimeUnit.SECONDS);
+            log.info("🌐 시황 매크로 분석 활성 ({}분 주기, 모델 {}, 그라운딩 {}, 첫 발송 {}초 후)",
+                    reportIntervalMin, llm.model(), reportGrounding ? "ON(검색)" : "OFF(평문)", firstDelaySec);
         }
 
         // 시작 시 LLM(Gemini/Ollama) 연결 1회 자가진단 — 장외에도 키·연결 정상 여부를 즉시 로그로 확인한다.
@@ -512,7 +523,12 @@ public class KisPollerService {
         // 시장 전체 수급 — 틱이 저장한 최신 스냅샷을 쓰되, 없으면(헤드라인 비활성 등) 즉석 조회.
         List<MarketInvestorFlow> mf = lastMarketFlows.isEmpty() ? fetchMarketFlows() : lastMarketFlows;
         String marketFlowLine = marketFlowLine(mf);                      // 시장 전체 외국인·기관(null 가능)
-        String facts = buildFlowFacts(indexLine, marketFlowLine, fxLine, usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
+        // 기준 날짜·시각을 맨 앞에 박는다 — 이게 없으면 LLM/그라운딩이 '오늘/이번 주'를 몰라 지난(엉뚱한 날짜) 일정을 끌어온다.
+        String dateAnchor = String.format(
+                "[기준 시각] %s %s KST — '오늘/이번 주'는 이 시각 기준이다. 이 날짜보다 과거인 지난 일정은 절대 넣지 마라.",
+                MACRO_DATE_FMT.format(now), SUMMARY_TIME_FMT.format(time));
+        String facts = dateAnchor + "\n\n"
+                + buildFlowFacts(indexLine, marketFlowLine, fxLine, usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
 
         // 지난 리포트 주기(시간당) 동안 수집된 뉴스 헤드라인을 재료로 덧붙인다 — 개별 속보 발송을 대체하는 핵심.
         if (headlineBuffer != null) {
@@ -532,13 +548,31 @@ public class KisPollerService {
             narrative = llm.chat(MACRO_SYSTEM_PROMPT, MACRO_USER_PROMPT + "\n\n" + facts);
         }
         if (narrative == null) return;  // LLM 실패 — 이미 로깅됨, 분석만 거른다
-        String msg = String.format("🌐 **시황 분석** | %s%n%n%s", SUMMARY_TIME_FMT.format(time), narrative);
+        String msg = composeMacroMessage(narrative, time);
         try {
             reportNotifier.send(msg);   // 뉴스 채널로
             log.info("🌐 시황 매크로 분석 발송 (그라운딩 {})", reportGrounding ? "ON" : "OFF");
         } catch (Exception e) {
             log.warn("시황 매크로 분석 전송 실패", e);
         }
+    }
+
+    /**
+     * LLM 응답을 '현재 시황·시장상황'과 '캘린더' 두 타이틀 섹션으로 조립한다(순수 함수 — 전송 없음, 테스트용).
+     * 프롬프트가 두 블록을 {@link #CALENDAR_MARKER}로 가르므로 그 토큰으로 쪼갠다. 마커가 없으면(형식 이탈)
+     * 전체를 시황 섹션 하나로만 내보내 최소한 분석은 빠지지 않게 한다.
+     */
+    static String composeMacroMessage(String narrative, LocalTime time) {
+        String ts = SUMMARY_TIME_FMT.format(time);
+        String[] parts = narrative.split(CALENDAR_MARKER, 2);
+        String marketBody = parts[0].strip();
+        String calendarBody = parts.length > 1 ? parts[1].strip() : "";
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("🌐 **현재 시황·시장상황** | %s%n%n%s", ts, marketBody));
+        if (!calendarBody.isEmpty()) {
+            sb.append(String.format("%n%n📅 **캘린더** | %s%n%n%s", ts, calendarBody));
+        }
+        return sb.toString();
     }
 
     /**
@@ -631,28 +665,31 @@ public class KisPollerService {
 
     private static final String MACRO_SYSTEM_PROMPT =
             "너는 한국 주식시장 시황 분석가다. 아래 '국내 실측 데이터'(국내 지수 코스피·코스닥 등락, "
-            + "시장 전체 외국인·기관 순매수(가집계), 원달러 환율, "
-            + "미국 선물 등락률, 외국인·기관 수급 상위·업종, 외국인+기관 양매수, 거래대금 섹터 랭킹)와 "
-            + "'지난 1시간 주요 뉴스 헤드라인'(있으면)은 사실이다. "
-            + "여기에 더해 Google 검색으로 지금 시점의 ① 미국 선물·해외 증시가 오르거나 내리는 '이유' "
-            + "② 한국의 정책 발표나 외국인 매도(또는 매수)를 유발한 이벤트, 원달러 환율이 움직인 배경 "
-            + "③ 오늘과 이번 주 주요 경제 일정(FOMC·CPI·고용지표·주요 기업 실적 등)을 확인하라. "
-            + "그런 다음 다음 순서로 '지금 시장이 왜 이렇게 움직이는지'를 한국어로 설명한다: "
-            + "(1) 코스피·코스닥 지수 현황을 짚되 둘이 엇갈리면(디버전스) 그 점을 먼저 설명한다 "
-            + "(2) 외국인·기관이 각각 무엇을 사고/파는지 수급을 정리한다 "
-            + "(3) 외국인 매도(또는 매수)의 '이유'를 원달러 환율·미국 선물·국내 정책 발표·해외 이벤트와 엮어 설명한다 "
-            + "(4) '지난 1시간 주요 뉴스 헤드라인'이 주어지면, 그 헤드라인들에서 오늘의 주도 테마·업종과 "
-            + "개별 종목 재료(수주·실적·신약·규제·M&A 등)를 읽어내 수급 흐름과 엮어 '어떤 종목/섹터가 우세한지'를 짚는다. "
-            + "단 정치·단순 지수 등락(코스피 급락 등)처럼 종목 선택에 도움이 안 되는 뻔한 내용은 재료로 취급하지 말고, "
-            + "특정 종목·업종 주가에 실제 영향을 주는 것만 골라라. 헤드라인에 없는 사실은 지어내지 마라. "
-            + "(5) 마지막에 '오늘/이번 주 체크포인트'를 2~3개 불릿으로 정리한다. "
-            + "검색으로 확인되지 않은 추측·소문은 쓰지 마라. 과장·투자권유 금지. 본문은 6~9문장.";
+            + "시장 전체 외국인·기관 순매수(가집계), 원달러 환율, 미국 선물 등락률, 외국인·기관 수급 상위·업종, "
+            + "외국인+기관 양매수, 거래대금 섹터 랭킹)와 '지난 1시간 주요 뉴스 헤드라인'(있으면)은 사실이다. "
+            + "여기에 더해 Google 검색으로 ① 오늘 개별 종목·섹터가 오르거나 내린 실제 촉매(ADR 편입·상장, "
+            + "수주·실적·신약·규제·M&A, 해외 증시·미국 선물이 움직인 이유) ② 입력의 '[기준 시각]' 이후(오늘 포함) "
+            + "아직 지나지 않은 주요 경제 일정(FOMC·CPI·고용지표·주요 기업 실적·MSCI 리밸런싱 등의 날짜)을 확인하라. "
+            + "기준 시각보다 과거인 일정은 넣지 마라. "
+            + "그런 다음 아래 두 블록으로만, 군더더기 없이 콤팩트하게 한국어로 답한다. 다른 제목·머리말·인사말은 절대 쓰지 마라.\n"
+            + "[블록1] 정확히 3개 번호 항목(각 1~2문장):\n"
+            + "1. 지수: 코스피·코스닥 방향과 오늘 주도 섹터를 한 줄로. 둘이 엇갈리면(디버전스) 그 점을 짚는다.\n"
+            + "2. 오늘 촉매: 오늘 특정 종목/섹터가 움직인 '이유'를 검색으로 확인해 1~2개만(예: 하이닉스 ADR 편입일이라 상승). "
+            + "정치·단순 지수 급락처럼 종목 선택에 도움 안 되는 뻔한 내용은 빼고, 특정 종목 주가에 실제 영향을 준 이벤트만.\n"
+            + "3. 수급: 외국인·기관이 각각 사고/파는 대표 종목과 방향을 1줄로 요약한다(길게 나열하지 마라).\n"
+            + "[구분] 블록1이 끝나면 한 줄에 정확히 @@CAL@@ 만 출력한다.\n"
+            + "[블록2] 캘린더: '•'로 시작하는 1~3개 불릿으로, 입력 '[기준 시각]' 이후(오늘 포함) 아직 지나지 않은 "
+            + "꼭 봐야 할 일정만 'M/D(요일)' 날짜와 함께 짚고, 그로 인한 관망·주의 포인트를 덧붙인다. "
+            + "기준 시각보다 과거인 일정(이미 발표된 지난 실적·지표)은 절대 넣지 마라. 확실한 일정이 없으면 '예정된 주요 일정 없음'이라고만 쓴다.\n"
+            + "검색으로 확인되지 않은 추측·소문·헤드라인에 없는 사실은 쓰지 마라. 과장·투자권유 금지.";
+
+    /** 시황 분석 응답에서 '시황·시장상황' 블록과 '캘린더' 블록을 가르는 구분자(프롬프트가 이 토큰만 한 줄 출력). */
+    private static final String CALENDAR_MARKER = "@@CAL@@";
 
     private static final String MACRO_USER_PROMPT =
             "아래는 지금 국내 지수·환율·미국 선물·수급 실측과, 지난 1시간 동안 수집된 뉴스 헤드라인이다. "
-            + "위 지침의 순서(지수 디버전스 → 수급 → 외국인 매매 이유(환율·미선물·정책·해외 이벤트) → "
-            + "뉴스가 가리키는 주도 테마·우세 종목/섹터 → 체크포인트)대로, 검색을 활용해 "
-            + "'지금 시장 상황이 어떻고 어떤 종목/섹터가 우세한지'를 분석해줘.";
+            + "위 형식(블록1: 1.지수 → 2.오늘 촉매 → 3.수급 1줄, 그다음 @@CAL@@ 한 줄, 블록2: 캘린더 불릿)대로, "
+            + "검색을 활용해 오늘 시장이 왜 이렇게 움직이는지와 앞으로 봐야 할 일정만 핵심으로 짚어줘.";
 
     /**
      * 급등 종목들의 업종 분포를 종목 수 비율 내림차순으로 정렬해 요약 메시지로 만든다.
