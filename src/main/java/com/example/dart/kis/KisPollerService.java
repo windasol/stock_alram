@@ -76,9 +76,9 @@ public class KisPollerService {
     }
 
     private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
-    /** 시황 분석 '기준 날짜' 앵커용 — 예: 2026-07-10(금). 요일까지 박아 LLM이 '오늘/이번 주'를 정확히 잡게 한다. */
+    /** 시황 분석 '기준 날짜' 앵커용 — 예: 2026년 07월 10일(금). 요일까지 박아 LLM이 '오늘/이번 주'를 정확히 잡게 한다. */
     private static final DateTimeFormatter MACRO_DATE_FMT =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd(E)", java.util.Locale.KOREAN);
+            DateTimeFormatter.ofPattern("yyyy년 MM월 dd일(E)", java.util.Locale.KOREAN);
     /** 업종 미상 종목의 섹터 라벨. */
     private static final String UNCLASSIFIED = "미분류";
     /** 거래대금 섹터 랭킹에서 보여줄 상위 섹터 수. */
@@ -524,8 +524,12 @@ public class KisPollerService {
         List<MarketInvestorFlow> mf = lastMarketFlows.isEmpty() ? fetchMarketFlows() : lastMarketFlows;
         String marketFlowLine = marketFlowLine(mf);                      // 시장 전체 외국인·기관(null 가능)
         // 기준 날짜·시각을 맨 앞에 박는다 — 이게 없으면 LLM/그라운딩이 '오늘/이번 주'를 몰라 지난(엉뚱한 날짜) 일정을 끌어온다.
+        // 모델이 옳은 오늘 날짜를 받고도 학습기억으로 일정 날짜를 지어내는 문제가 있어, 검색 확인·추측금지를 강하게 못박는다.
         String dateAnchor = String.format(
-                "[기준 시각] %s %s KST — '오늘/이번 주'는 이 시각 기준이다. 이 날짜보다 과거인 지난 일정은 절대 넣지 마라.",
+                "[오늘] %s %s KST 기준이다. 아래 모든 '오늘/이번 주/다음 주'는 반드시 이 날짜로 계산하라.\n"
+                + "[날짜 규칙] 네 학습기억의 날짜는 틀릴 수 있으니 신뢰하지 마라. 일정의 날짜·발표 여부는 오직 google_search 검색으로 "
+                + "확인한 것만 사용하고, 검색으로 정확한 날짜가 확인되지 않는 일정은 아예 넣지 마라(추측·어림 금지). "
+                + "특히 실적은 '이미 발표됐는지'를 검색으로 확인해, 오늘보다 과거에 발표된 건 미래 일정으로 넣지 마라.",
                 MACRO_DATE_FMT.format(now), SUMMARY_TIME_FMT.format(time));
         String facts = dateAnchor + "\n\n"
                 + buildFlowFacts(indexLine, marketFlowLine, fxLine, usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
@@ -540,18 +544,20 @@ public class KisPollerService {
         // 그라운딩 ON이면 실시간 검색으로 "왜?"를 끌어온다. 단 무료 티어/권한 문제로 그라운딩이 실패할 수 있어
         // 실패하면 평문(chat)으로 폴백한다 — 분석이 통째로 빠지지 않게(평문은 국내 실측만, "왜?"는 약함).
         String narrative = null;
+        boolean grounded = false;
         if (reportGrounding) {
             narrative = llm.chatGrounded(MACRO_SYSTEM_PROMPT, MACRO_USER_PROMPT + "\n\n" + facts);
-            if (narrative == null) log.warn("그라운딩 실패 — 평문 분석으로 폴백(무료 티어/권한·한도 확인)");
+            if (narrative != null) grounded = true;
+            else log.warn("그라운딩 실패 — 평문 분석으로 폴백(무료 티어/권한·한도 확인)");
         }
         if (narrative == null) {
             narrative = llm.chat(MACRO_SYSTEM_PROMPT, MACRO_USER_PROMPT + "\n\n" + facts);
         }
         if (narrative == null) return;  // LLM 실패 — 이미 로깅됨, 분석만 거른다
-        String msg = composeMacroMessage(narrative, time);
+        String msg = composeMacroMessage(narrative, time, grounded);
         try {
             reportNotifier.send(msg);   // 뉴스 채널로
-            log.info("🌐 시황 매크로 분석 발송 (그라운딩 {})", reportGrounding ? "ON" : "OFF");
+            log.info("🌐 시황 매크로 분석 발송 (그라운딩 {})", grounded ? "ON" : "OFF(평문 폴백)");
         } catch (Exception e) {
             log.warn("시황 매크로 분석 전송 실패", e);
         }
@@ -561,16 +567,24 @@ public class KisPollerService {
      * LLM 응답을 '현재 시황·시장상황'과 '캘린더' 두 타이틀 섹션으로 조립한다(순수 함수 — 전송 없음, 테스트용).
      * 프롬프트가 두 블록을 {@link #CALENDAR_MARKER}로 가르므로 그 토큰으로 쪼갠다. 마커가 없으면(형식 이탈)
      * 전체를 시황 섹션 하나로만 내보내 최소한 분석은 빠지지 않게 한다.
+     *
+     * 캘린더는 grounded=true(실시간 검색 성공)일 때만 내보낸다 — 평문 폴백은 검색이 없어 날짜를 지어내므로(환각)
+     * 통째로 생략하고 사유만 남긴다. 틀린 미래 일정이 나가는 것보다 캘린더가 없는 편이 안전하다.
      */
-    static String composeMacroMessage(String narrative, LocalTime time) {
+    static String composeMacroMessage(String narrative, LocalTime time, boolean grounded) {
         String ts = SUMMARY_TIME_FMT.format(time);
         String[] parts = narrative.split(CALENDAR_MARKER, 2);
         String marketBody = parts[0].strip();
-        String calendarBody = parts.length > 1 ? parts[1].strip() : "";
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("🌐 **현재 시황·시장상황** | %s%n%n%s", ts, marketBody));
-        if (!calendarBody.isEmpty()) {
-            sb.append(String.format("%n%n📅 **캘린더** | %s%n%n%s", ts, calendarBody));
+        if (grounded) {
+            String calendarBody = parts.length > 1 ? parts[1].strip() : "";
+            if (!calendarBody.isEmpty()) {
+                sb.append(String.format("%n%n📅 **캘린더** | %s%n%n%s", ts, calendarBody));
+            }
+        } else {
+            // 검색 없이 만든 날짜는 신뢰 불가 → 캘린더 생략. 사유를 남겨 "왜 캘린더가 없지?"를 방지.
+            sb.append(String.format("%n%n📅 **캘린더** | 실시간 검색 미가용(API 한도)으로 생략"));
         }
         return sb.toString();
     }
@@ -668,9 +682,11 @@ public class KisPollerService {
             + "시장 전체 외국인·기관 순매수(가집계), 원달러 환율, 미국 선물 등락률, 외국인·기관 수급 상위·업종, "
             + "외국인+기관 양매수, 거래대금 섹터 랭킹)와 '지난 1시간 주요 뉴스 헤드라인'(있으면)은 사실이다. "
             + "여기에 더해 Google 검색으로 ① 오늘 개별 종목·섹터가 오르거나 내린 실제 촉매(ADR 편입·상장, "
-            + "수주·실적·신약·규제·M&A, 해외 증시·미국 선물이 움직인 이유) ② 입력의 '[기준 시각]' 이후(오늘 포함) "
-            + "아직 지나지 않은 주요 경제 일정(FOMC·CPI·고용지표·주요 기업 실적·MSCI 리밸런싱 등의 날짜)을 확인하라. "
-            + "기준 시각보다 과거인 일정은 넣지 마라. "
+            + "수주·실적·신약·규제·M&A, 해외 증시·미국 선물이 움직인 이유) ② 입력의 '[오늘]' 이후(오늘 포함) "
+            + "다음 주말까지 아직 지나지 않은 주요 일정을 검색으로 날짜까지 확인해 찾아라 — 뻔한 매크로만이 아니라 "
+            + "개별 기업 실적 발표(미국 빅테크·반도체, 한국 주요 종목은 종목명과 날짜까지), 경제지표(CPI·PCE·고용·PMI·소매판매), "
+            + "중앙은행(FOMC·한은 금통위·ECB·BOJ), 옵션·선물 만기(쿼드러플위칭), 지수 리밸런싱(MSCI·FTSE·코스피200), "
+            + "배당락, IPO·보호예수 해제, 국내외 증시 공휴일·휴장. 오늘보다 과거인 일정은 넣지 마라. "
             + "그런 다음 아래 두 블록으로만, 군더더기 없이 콤팩트하게 한국어로 답한다. 다른 제목·머리말·인사말은 절대 쓰지 마라.\n"
             + "[블록1] 정확히 3개 번호 항목(각 1~2문장):\n"
             + "1. 지수: 코스피·코스닥 방향과 오늘 주도 섹터를 한 줄로. 둘이 엇갈리면(디버전스) 그 점을 짚는다.\n"
@@ -678,9 +694,14 @@ public class KisPollerService {
             + "정치·단순 지수 급락처럼 종목 선택에 도움 안 되는 뻔한 내용은 빼고, 특정 종목 주가에 실제 영향을 준 이벤트만.\n"
             + "3. 수급: 외국인·기관이 각각 사고/파는 대표 종목과 방향을 1줄로 요약한다(길게 나열하지 마라).\n"
             + "[구분] 블록1이 끝나면 한 줄에 정확히 @@CAL@@ 만 출력한다.\n"
-            + "[블록2] 캘린더: '•'로 시작하는 1~3개 불릿으로, 입력 '[기준 시각]' 이후(오늘 포함) 아직 지나지 않은 "
-            + "꼭 봐야 할 일정만 'M/D(요일)' 날짜와 함께 짚고, 그로 인한 관망·주의 포인트를 덧붙인다. "
-            + "기준 시각보다 과거인 일정(이미 발표된 지난 실적·지표)은 절대 넣지 마라. 확실한 일정이 없으면 '예정된 주요 일정 없음'이라고만 쓴다.\n"
+            + "[블록2] 캘린더: '[오늘]' 이후(오늘 포함) 다음 주말까지의 일정을 '•' 불릿으로 날짜순 최대 6~8개 짚는다. "
+            + "각 불릿 형식: 'YYYY-MM-DD(요일) 이벤트 — 한 줄 의미 (근거: 매체/페이지에서 본 날짜 문구)'. "
+            + "날짜 검증 절차를 반드시 지켜라 — (가) 후보 일정마다 google_search로 그 이벤트의 정확한 날짜를 찾는다 "
+            + "(나) 검색 결과 텍스트에 그 날짜가 실제로 적혀 있는지 확인한다 (다) 확인된 날짜만 쓰고, 근거 문구를 괄호로 단다 "
+            + "(라) 검색에서 정확한 날짜를 문자 그대로 확인하지 못했으면 그 항목은 반드시 삭제한다(패턴·관례로 어림잡기 절대 금지). "
+            + "실적은 '이미 발표됐는지'를 검색으로 확인해 오늘 이전에 발표된 건 넣지 마라. "
+            + "이미 다 아는 뻔한 매크로보다 개별 기업 실적일·리밸런싱·만기 같은 덜 알려진 구체 일정을 우선한다. "
+            + "억지로 개수를 채우지 말고 검증을 통과한 것만 있는 만큼 쓰며, 하나도 없으면 '검색으로 확인된 예정 일정 없음'이라고만 쓴다.\n"
             + "검색으로 확인되지 않은 추측·소문·헤드라인에 없는 사실은 쓰지 마라. 과장·투자권유 금지.";
 
     /** 시황 분석 응답에서 '시황·시장상황' 블록과 '캘린더' 블록을 가르는 구분자(프롬프트가 이 토큰만 한 줄 출력). */

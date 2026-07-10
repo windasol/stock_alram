@@ -138,6 +138,30 @@ class DocumentParserTest {
     }
 
     @Test
+    void salesRatioValue_공시명시값_우선() {
+        // 자동매매 트리거용 숫자값 — 명시값(30%)이 있으면 계약÷매출을 무시하고 그대로 쓴다.
+        java.util.OptionalDouble v =
+                DocumentParser.salesRatioValue(45_000_000_000L, java.util.OptionalLong.of(50_000_000_000L), 30.0);
+        assertTrue(v.isPresent());
+        assertEquals(30.0, v.getAsDouble(), 0.001);
+    }
+
+    @Test
+    void salesRatioValue_명시없으면_계약나누기매출() {
+        java.util.OptionalDouble v =
+                DocumentParser.salesRatioValue(50_000_000_000L, java.util.OptionalLong.of(100_000_000_000L), null);
+        assertTrue(v.isPresent());
+        assertEquals(50.0, v.getAsDouble(), 0.001);
+    }
+
+    @Test
+    void salesRatioValue_명시도_매출도_없으면_empty() {
+        assertTrue(DocumentParser.salesRatioValue(50_000_000_000L, java.util.OptionalLong.empty(), null).isEmpty());
+        // 매출 0도 나눗셈 불가 → empty.
+        assertTrue(DocumentParser.salesRatioValue(50_000_000_000L, java.util.OptionalLong.of(0L), null).isEmpty());
+    }
+
+    @Test
     void 핵심_라벨을_추출한다() {
         byte[] zip = zip(entry("00123.xml",
                 "<DOCUMENT>계약금액 : 2,340억원 최근매출액 : 1조 매출액대비 : 35.2%</DOCUMENT>"));

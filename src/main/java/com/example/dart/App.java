@@ -28,6 +28,7 @@ import com.example.dart.quote.StockQuoteClient;
 import com.example.dart.service.DisclosurePriceTracker;
 import com.example.dart.service.DocumentService;
 import com.example.dart.service.PollerService;
+import com.example.dart.trade.AutoTradeService;
 import com.example.dart.util.MarketCalendar;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
@@ -116,6 +117,18 @@ public class App {
         DisclosurePriceTracker priceTracker = new DisclosurePriceTracker(
                 quoteClient, kisClient, notifier, Path.of("disclosure_price_stats.jsonl"), marketCalendar);
 
+        // 공시 기반 자동매매(드라이런) — 계약 규모(매출 대비 ≥임계%) 신호를 두 공시 소스(DART AlertComposer / KIND)에서
+        // 받아 모의 매매한다. 현재가는 KIS 분봉으로 조회하므로 kisClient가 있어야 동작한다. 비활성/키 없음이면 리스너 null(무동작).
+        KindAlertComposer kindAlertComposer = new KindAlertComposer();
+        AutoTradeService autoTrader = null;
+        if (config.autoTradeEnabled() && kisClient != null) {
+            autoTrader = new AutoTradeService(kisClient, notifier, marketCalendar, config);
+            alertComposer.setTradeSignalListener(autoTrader);   // DART 경로 훅(AlertComposer.buildFollowup)
+            autoTrader.start();
+        } else if (config.autoTradeEnabled()) {
+            log.warn("자동매매 활성이지만 KIS 미설정 — 현재가 조회 불가로 비활성. KIS_APP_KEY/KIS_APP_SECRET 확인");
+        }
+
         PollerService pollerService = new PollerService(
                 dartClient, newsFilter, notifier, alertComposer,
                 seenStore, disclosureKeys, config, priceTracker);
@@ -125,9 +138,10 @@ public class App {
         KindPollerService kindPollerService;
         if (config.kindEnabled()) {
             kindPollerService = new KindPollerService(
-                    kindClient, newsFilter, notifier, new KindAlertComposer(),
+                    kindClient, newsFilter, notifier, kindAlertComposer,
                     kindDocumentClient, documentParser, quoteClient,
                     new SeenStore(Path.of("seen_kind.txt")), disclosureKeys, config, marketCalendar);
+            if (autoTrader != null) kindPollerService.setTradeSignalListener(autoTrader);   // KIND 경로 훅
             kindPollerService.start();
         } else {
             kindPollerService = null;
@@ -196,6 +210,7 @@ public class App {
         // 람다 캡처용 final 참조 (kisNotifier는 위에서 재할당될 수 있어 effectively final이 아님).
         final Notifier kisNotifierRef = kisNotifier;
         final boolean separateKisChannelRef = separateKisChannel;
+        final AutoTradeService autoTraderRef = autoTrader;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("종료 신호 수신, 서비스 중지 중...");
             pollerService.stop();
@@ -203,6 +218,7 @@ public class App {
             if (kindPollerService != null) kindPollerService.stop();
             if (kisPollerService != null) kisPollerService.stop();
             if (newsPollerService != null) newsPollerService.stop();
+            if (autoTraderRef != null) autoTraderRef.stop();
             notifier.stop();
             if (newsNotifier != notifier) newsNotifier.stop();
             if (separateKisChannelRef) kisNotifierRef.stop();

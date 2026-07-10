@@ -9,6 +9,7 @@ import com.example.dart.model.Disclosure;
 import com.example.dart.parse.DocumentParser;
 import com.example.dart.quote.StockQuoteClient;
 import com.example.dart.service.DocumentService;
+import com.example.dart.trade.TradeSignalListener;
 import com.example.dart.util.KoreanMoney;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,8 @@ public class AlertComposer {
     private final KindClient kindClient;
     private final KindDocumentClient kindDocClient;
     private final DocumentParser documentParser;
+    /** 자동매매 트리거 리스너 — 비활성 시 null(무동작). 계약 규모 확정 시점에 호출한다. */
+    private TradeSignalListener tradeListener;
 
     public AlertComposer(DocumentService documentService, NewsFilter newsFilter,
                          StockQuoteClient quoteClient, DartClient dartClient,
@@ -55,6 +58,25 @@ public class AlertComposer {
         this.kindClient = kindClient;
         this.kindDocClient = kindDocClient;
         this.documentParser = documentParser;
+    }
+
+    /** 자동매매 트리거 리스너를 등록한다(선택). null이면 자동매매 미동작. */
+    public void setTradeSignalListener(TradeSignalListener listener) {
+        this.tradeListener = listener;
+    }
+
+    /** 계약 규모 확정 시 자동매매 리스너에 신호 전달 — 리스너 없음·정정·종목코드 없음·비율 미상이면 무시. */
+    private void fireTradeSignal(Disclosure d, long contractWon, OptionalLong revenue, Double statedPct) {
+        if (tradeListener == null) return;
+        String code = d.stockCode();
+        if (code == null || code.isBlank() || NewsFilter.isCorrection(d.reportNm())) return;
+        java.util.OptionalDouble ratio = DocumentParser.salesRatioValue(contractWon, revenue, statedPct);
+        if (ratio.isEmpty()) return;
+        try {
+            tradeListener.onContractSignal(d.rceptNo(), d.corpName(), code, contractWon, revenue, ratio.getAsDouble());
+        } catch (Exception e) {
+            log.warn("자동매매 신호 전달 실패: {} - {}", d.corpName(), d.reportNm(), e);
+        }
     }
 
     /** 1단계 — 감지 즉시 전송할 헤더. 본문 조회 없음(가장 빠름). */
@@ -150,6 +172,9 @@ public class AlertComposer {
                 log.info("규모 분석 {}", salesLabel);
                 sb.append(" · ").append(salesLabel);
             }
+
+            // 자동매매 트리거 — 계약 규모(매출 대비 비율)가 확정된 이 지점에서 신호를 넘긴다. 임계·중복·한도는 리스너가 판단.
+            fireTradeSignal(d, won, revenue, c.salesRatioPct());
 
             // 시총 대비 % — 종목코드로 조회한 시가총액 대비(딜 규모 vs 회사 가치라 총액 기준).
             if (cap.isPresent() && cap.getAsLong() > 0) {

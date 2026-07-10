@@ -154,12 +154,22 @@ public class DocumentParser {
      * @return 비율을 못 구하면 null
      */
     public static String salesRatioLabel(long contractWon, OptionalLong revenue, Double statedPct) {
-        Double totalPct = statedPct;
-        if (totalPct == null && revenue.isPresent() && revenue.getAsLong() > 0) {
-            totalPct = contractWon * 100.0 / revenue.getAsLong();
+        java.util.OptionalDouble pct = salesRatioValue(contractWon, revenue, statedPct);
+        return pct.isPresent() ? String.format("매출 대비 %.1f%%", pct.getAsDouble()) : null;
+    }
+
+    /**
+     * 매출 대비 비율의 숫자값(%). 공시 명시 비율(statedPct)을 우선하고, 없으면 계약금액 ÷ 매출액으로 계산한다.
+     * 자동매매 트리거(≥N%) 판정과 {@link #salesRatioLabel} 표시가 같은 값을 쓰도록 로직을 단일화한다.
+     *
+     * @return 비율을 못 구하면 비어있음(OptionalDouble.empty)
+     */
+    public static java.util.OptionalDouble salesRatioValue(long contractWon, OptionalLong revenue, Double statedPct) {
+        if (statedPct != null) return java.util.OptionalDouble.of(statedPct);
+        if (revenue.isPresent() && revenue.getAsLong() > 0) {
+            return java.util.OptionalDouble.of(contractWon * 100.0 / revenue.getAsLong());
         }
-        if (totalPct == null) return null;
-        return String.format("매출 대비 %.1f%%", totalPct);
+        return java.util.OptionalDouble.empty();
     }
 
     /** 수주공급계약 알림용 핵심값. 없는 항목은 비어있음/ null. */

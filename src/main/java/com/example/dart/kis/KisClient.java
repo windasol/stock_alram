@@ -107,6 +107,11 @@ public class KisClient {
     /** 직전 가집계 호출 시각(ms). 모든 호출이 단일 폴러 스레드에서 순차 실행되므로 동기화 불필요. */
     private long lastFiCallAt = 0L;
 
+    /** 분봉 조회 최대 시도 횟수 — KIS 분봉 API가 순간 타임아웃·유량제한(EGW00201)나면 빈 결과가 오므로 짧게 재시도한다. */
+    private static final int MINUTE_CANDLE_MAX_ATTEMPTS = 3;
+    /** 분봉 재조회 사이 간격(ms). */
+    private static final long MINUTE_CANDLE_RETRY_MS = 1_500L;
+
     private final String appKey;
     private final String appSecret;
     /** 등락률순위 조회 시장구분 — J: KRX, NX: NXT, UN: 통합(KRX+NXT). NXT 거래시간(연장세션)까지 잡으려면 UN. */
@@ -434,6 +439,26 @@ public class KisClient {
      * @return 1분봉 목록(시각 오름차순 정렬). 조회·파싱 실패 시 빈 목록.
      */
     public List<MinuteCandle> minuteCandles(String code, String endHHMMSS, String marketDiv) {
+        // 빈 결과(타임아웃·유량제한·순간 데이터 없음)면 짧게 재시도한다 — 공시 후 가격추적·자동매매가 이 조회에 의존하므로
+        // 한 번 타임아웃났다고 가격 줄이 통째로 빠지지 않게(전용 스케줄 스레드에서만 블로킹).
+        for (int attempt = 1; attempt <= MINUTE_CANDLE_MAX_ATTEMPTS; attempt++) {
+            List<MinuteCandle> candles = fetchMinuteCandles(code, endHHMMSS, marketDiv);
+            if (!candles.isEmpty()) return candles;
+            if (attempt < MINUTE_CANDLE_MAX_ATTEMPTS) {
+                log.info("KIS 분봉 재조회 ({}/{}): {}", attempt + 1, MINUTE_CANDLE_MAX_ATTEMPTS, code);
+                try {
+                    Thread.sleep(MINUTE_CANDLE_RETRY_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        return List.of();
+    }
+
+    /** 분봉 1회 조회(재시도 없음) — {@link #minuteCandles}가 감싼다. 실패·비정상 응답 시 빈 목록. */
+    private List<MinuteCandle> fetchMinuteCandles(String code, String endHHMMSS, String marketDiv) {
         try {
             String query = "FID_ETC_CLS_CODE="
                     + "&FID_COND_MRKT_DIV_CODE=" + marketDiv
@@ -443,7 +468,7 @@ public class KisClient {
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + INQUIRE_TIME_CHART_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
+                    .timeout(Duration.ofSeconds(20))
                     .header("authorization", "Bearer " + token())
                     .header("appkey", appKey)
                     .header("appsecret", appSecret)

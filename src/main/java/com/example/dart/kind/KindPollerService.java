@@ -72,6 +72,8 @@ public class KindPollerService {
     private final int intervalSec;
     private final ScheduledExecutorService scheduler;
     private final ScheduledExecutorService enrichmentPool;
+    /** 자동매매 트리거 리스너 — 비활성 시 null(무동작). 계약 규모 확정 시점에 호출한다. */
+    private com.example.dart.trade.TradeSignalListener tradeListener;
 
     private int consecutiveFailures = 0;
     private int skipPolls = 0;
@@ -100,6 +102,11 @@ public class KindPollerService {
         this.intervalSec = config.kindPollIntervalSec();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kind-poller"));
         this.enrichmentPool = Executors.newScheduledThreadPool(2, r -> new Thread(r, "kind-enrich"));
+    }
+
+    /** 자동매매 트리거 리스너를 등록한다(선택). null이면 자동매매 미동작. */
+    public void setTradeSignalListener(com.example.dart.trade.TradeSignalListener listener) {
+        this.tradeListener = listener;
     }
 
     public void start() {
@@ -202,6 +209,7 @@ public class KindPollerService {
                 log.info("KIND 규모 분석 [{} - {}] 계약금액 {}", d.company(), d.title(),
                         c.contractWon().isPresent() ? KoreanMoney.format(c.contractWon().getAsLong()) : "미추출");
                 notifier.send(alertComposer.composeFollowup(d, c, cap));
+                fireTradeSignal(d, doc.stockCode(), c);
             } catch (Exception e) {
                 if (attempt < ENRICH_MAX_ATTEMPTS) {
                     log.info("KIND 본문 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
@@ -216,6 +224,21 @@ public class KindPollerService {
                 }
             }
         });
+    }
+
+    /** 계약 규모 확정 시 자동매매 리스너에 신호 전달(KIND 경로) — 리스너 없음·종목코드 없음·계약금액/비율 미상이면 무시. */
+    private void fireTradeSignal(KindDisclosure d, String stockCode, DocumentParser.ContractInfo c) {
+        if (tradeListener == null || stockCode == null || stockCode.isBlank() || c.contractWon().isEmpty()) return;
+        long won = c.contractWon().getAsLong();
+        java.util.OptionalDouble ratio =
+                DocumentParser.salesRatioValue(won, c.recentRevenueWon(), c.salesRatioPct());
+        if (ratio.isEmpty()) return;
+        try {
+            tradeListener.onContractSignal(d.acptNo(), d.company(), stockCode, won,
+                    c.recentRevenueWon(), ratio.getAsDouble());
+        } catch (Exception e) {
+            log.warn("자동매매 신호 전달 실패(KIND): {} - {}", d.company(), d.title(), e);
+        }
     }
 
     private static boolean olderThanMaxAge(String hhmm, ZonedDateTime now) {

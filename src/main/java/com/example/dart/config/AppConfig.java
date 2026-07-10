@@ -59,7 +59,16 @@ public record AppConfig(
         String geminiApiKey,
         String geminiModel,
         String ollamaBaseUrl,
-        String ollamaModel
+        String ollamaModel,
+        boolean autoTradeEnabled,
+        String autoTradeMode,
+        long autoTradeBudgetWon,
+        double autoTradeMinSalesRatio,
+        double autoTradeStopLossPct,
+        double autoTradeTakeProfitPct,
+        int autoTradeMaxPositions,
+        int autoTradeMonitorSec,
+        String autoTradeEodClose
 ) {
 
     /**
@@ -271,6 +280,17 @@ public record AppConfig(
         String ollamaBaseUrl         = resolveOrDefault(dotenv, "OLLAMA_BASE_URL", "http://localhost:11434");
         String ollamaModel           = resolveOrDefault(dotenv, "OLLAMA_MODEL", "exaone3.5:7.8b");
 
+        // 공시 기반 자동매매 — 기본 비활성. Stage1은 드라이런(실주문 없음)만 구현. 실제 자금 보호를 위해 명시 설정 필요.
+        boolean autoTradeEnabled     = Boolean.parseBoolean(resolveOrDefault(dotenv, "AUTO_TRADE_ENABLED", "false"));
+        String autoTradeMode         = resolveOrDefault(dotenv, "AUTO_TRADE_MODE", "dryrun").trim().toLowerCase();
+        long autoTradeBudgetWon      = Long.parseLong(resolveOrDefault(dotenv, "AUTO_TRADE_BUDGET_WON", "1000000"));
+        double autoTradeMinSalesRatio= Double.parseDouble(resolveOrDefault(dotenv, "AUTO_TRADE_MIN_SALES_RATIO", "50"));
+        double autoTradeStopLossPct  = Double.parseDouble(resolveOrDefault(dotenv, "AUTO_TRADE_STOP_LOSS_PCT", "2"));
+        double autoTradeTakeProfitPct= Double.parseDouble(resolveOrDefault(dotenv, "AUTO_TRADE_TAKE_PROFIT_PCT", "5"));
+        int autoTradeMaxPositions    = Integer.parseInt(resolveOrDefault(dotenv, "AUTO_TRADE_MAX_POSITIONS", "5"));
+        int autoTradeMonitorSec      = Integer.parseInt(resolveOrDefault(dotenv, "AUTO_TRADE_MONITOR_SEC", "30"));
+        String autoTradeEodClose     = resolveOrDefault(dotenv, "AUTO_TRADE_EOD_CLOSE", "15:20").trim();
+
         // 공통 필수
         if (dartApiKey == null || dartApiKey.isBlank()) {
             throw new IllegalStateException("DART_API_KEY 환경변수가 설정되지 않았습니다.");
@@ -330,7 +350,10 @@ public record AppConfig(
                 kisMarketDivCode, kisSectorSummaryMin, kisInvestorFlowMin, kisMarketFlowMin, kisGainerAlertEnabled,
                 kisPaper, webexKisRoomId, discordKisChannelId,
                 marketReportEnabled, marketReportIntervalMin, marketReportGrounding,
-                llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel);
+                llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel,
+                autoTradeEnabled, autoTradeMode, autoTradeBudgetWon, autoTradeMinSalesRatio,
+                autoTradeStopLossPct, autoTradeTakeProfitPct, autoTradeMaxPositions,
+                autoTradeMonitorSec, autoTradeEodClose);
     }
 
     private static List<String> parseCsv(String csv) {
