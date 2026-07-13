@@ -211,6 +211,32 @@ class DisclosurePriceTrackerTest {
     }
 
     @Test
+    void 저점은_시작가보다_높을_수_없다() {
+        // 비나텍 케이스: 시작가(공시 2분전) -6.0%인데, 공시 후 봉만 보면 저점이 -4.9%로 시작가보다
+        // 높게 찍혀 헤더와 모순됐다. 시작가를 고점/저점 스캔의 출발점으로 포함해 "저점 ≤ 시작가 ≤ 고점" 보장.
+        // 전일종가 100,000 / 시작가(11:51) 94,000(-6.0%). 공시(11:53) 후엔 시작가 밑으로 내려가지 않는다.
+        List<MinuteCandle> candles = List.of(
+                c(11, 51, 94_000, 94_010, 93_990, 94_000),   // 기준가 봉(시작가) = -6.0%
+                c(11, 53, 94_000, 95_100, 95_000, 95_000),   // 공시 시점 — 이미 시작가보다 높음
+                c(11, 54, 95_000, 101_000, 95_000, 100_000), // 고점 101,000
+                c(12, 3, 100_000, 100_010, 97_000, 98_000)); // 종료
+
+        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+                candles, LocalTime.of(11, 53), LocalTime.of(11, 51), LocalTime.of(12, 3), 100_000L);
+
+        assertEquals(94_000, st.discPrice());
+        assertEquals(-6.0, st.discPct(), 0.05);
+        // 저점은 시작가(94,000, -6.0%)여야 한다 — 공시 후 최저(95,000, -5.0%)가 아니라.
+        assertEquals(94_000, st.troughPrice());
+        assertEquals(-6.0, st.maePct(), 0.05);
+        assertEquals(LocalTime.of(11, 51), st.troughAt());
+        // 저점 ≤ 시작가 ≤ 고점 불변식.
+        assertTrue(st.troughPrice() <= st.discPrice());
+        assertTrue(st.discPrice() <= st.peakPrice());
+        assertEquals(101_000, st.peakPrice());
+    }
+
+    @Test
     void 창에_봉이_없으면_null() {
         // 모든 봉이 창 밖(11시대) → null.
         List<MinuteCandle> candles = List.of(c(11, 0, 100, 100, 100, 100));

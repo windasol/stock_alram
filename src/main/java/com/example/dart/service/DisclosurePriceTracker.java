@@ -237,8 +237,11 @@ public class DisclosurePriceTracker {
 
         long discPrice = baseline;   // 시작가 = 공시 2분전 봉 종가(공시 시점 가격이 아니라 추적 출발점)
 
-        long peakPrice = Long.MIN_VALUE, troughPrice = Long.MAX_VALUE;
-        LocalTime peakTime = post.firstKey(), troughTime = post.firstKey();
+        // 고점/저점 스캔의 출발점을 시작가(baseline)로 잡는다 — 이렇게 해야 "저점 ≤ 시작가 ≤ 고점"이
+        // 항상 성립한다. 시작가를 빼고 공시 후 봉만 보면, 시작가보다 높은 지점이 "저점"으로 찍혀
+        // (예: 시작가 -6.0% 인데 저점 -4.9%) 헤더와 모순되는 알림이 나간다.
+        long peakPrice = discPrice, troughPrice = discPrice;
+        LocalTime peakTime = baseEntry.getKey(), troughTime = baseEntry.getKey();
         for (Map.Entry<LocalTime, MinuteCandle> e : post.entrySet()) {
             MinuteCandle c = e.getValue();
             long hi = c.high() > 0 ? c.high() : c.close();   // 고/저가 누락 봉은 종가로 대체
