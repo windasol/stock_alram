@@ -138,6 +138,8 @@ public class PollerService {
         boolean correction = NewsFilter.isCorrection(d.reportNm());
         // 자기주식취득결정은 시총·매출에 더해 취득금액·시총대비%를 붙인다 — 전용 보강 경로(KIND→DART 원문 재시도).
         boolean treasury = NewsFilter.isTreasuryAcquisition(d.reportNm());
+        // 자기주식 신탁계약 체결도 동일 경로로 신탁계약금액·시총대비%를 붙인다(금액 라벨만 계약금액으로 다름).
+        boolean trust = NewsFilter.isTreasuryTrustContract(d.reportNm());
         if (!firstAlert) {
             // KIND가 헤더를 보냈다. 비정정 계약이면 KIND가 규모 분석(뷰어 본문)까지 담당하므로 DART는 빠진다.
             // 비계약·정정이면 KIND엔 매출 출처(corp_code)가 없으므로 시총·매출(자기주식은 취득금액까지)만 DART가 보강한다.
@@ -145,7 +147,10 @@ public class PollerService {
                 log.info("KIND 선행 — KIND가 헤더·규모 분석 담당, DART 생략: {} - {}", d.corpName(), d.reportNm());
             } else if (treasury) {
                 log.info("KIND 선행 — 취득금액·시총·매출 DART가 보강: {} - {}", d.corpName(), d.reportNm());
-                scheduleTreasuryEnrichment(d, 1);
+                scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeTreasury(d));
+            } else if (trust) {
+                log.info("KIND 선행 — 신탁계약금액·시총·매출 DART가 보강: {} - {}", d.corpName(), d.reportNm());
+                scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeTreasuryTrust(d));
             } else {
                 log.info("KIND 선행(비계약·정정) — 시총·매출만 DART가 보강: {} - {}", d.corpName(), d.reportNm());
                 scheduleScaleOnly(d);
@@ -164,7 +169,9 @@ public class PollerService {
         if (contract && !correction) {
             scheduleFastEnrichment(d, 1);
         } else if (treasury) {
-            scheduleTreasuryEnrichment(d, 1);
+            scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeTreasury(d));
+        } else if (trust) {
+            scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeTreasuryTrust(d));
         } else {
             scheduleScaleOnly(d);
         }
@@ -219,7 +226,7 @@ public class PollerService {
      * 우선, 실패 시 DART 원문에서 파싱하는데, 원문이 아직 미공개(014)면 {@link DocumentNotReadyException}이
      * 올라오므로 일정 간격으로 재조회한다(계약 보강과 동일). 끝내 못 구하면 시총·매출만 발송한다.
      */
-    private void scheduleTreasuryEnrichment(Disclosure d, int attempt) {
+    private void scheduleTreasuryEnrichment(Disclosure d, int attempt, java.util.function.Supplier<String> composer) {
         // 같은 키의 보강은 1회만 — scheduleScaleOnly와 같은 네임스페이스(접두어)로 중복 발송을 막는다.
         if (attempt == 1
                 && !disclosureKeys.add(ENRICH_PREFIX + DisclosureKeys.of(d.rceptDt(), d.corpName(), d.reportNm()))) {
@@ -228,12 +235,12 @@ public class PollerService {
         }
         enrichmentPool.submit(() -> {
             try {
-                notifier.send(alertComposer.composeTreasury(d));
+                notifier.send(composer.get());
             } catch (DocumentNotReadyException e) {
                 if (attempt < ENRICH_MAX_ATTEMPTS) {
                     log.info("취득금액 원문 미공개 — {}초 뒤 재조회 ({}/{}): {} - {}",
                             ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.corpName(), d.reportNm());
-                    enrichmentPool.schedule(() -> scheduleTreasuryEnrichment(d, attempt + 1),
+                    enrichmentPool.schedule(() -> scheduleTreasuryEnrichment(d, attempt + 1, composer),
                             ENRICH_RETRY_DELAY_SEC, TimeUnit.SECONDS);
                 } else {
                     log.warn("취득금액 원문 미공개 — 재조회 {}회 실패, 시총·매출만 발송: {} - {}",

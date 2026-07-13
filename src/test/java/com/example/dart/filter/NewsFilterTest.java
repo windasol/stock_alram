@@ -221,4 +221,17 @@ class NewsFilterTest {
         assertFalse(NewsFilter.isTreasuryAcquisition("자기주식처분결정"));
         assertFalse(NewsFilter.isTreasuryAcquisition("자기주식취득 신탁계약 해지 결정"));
     }
+
+    @Test
+    void 자기주식_신탁계약_체결만_금액대상() {
+        // 신탁계약 "체결"만 계약금액 덧붙임 대상.
+        assertTrue(NewsFilter.isTreasuryTrustContract("자기주식취득 신탁계약 체결 결정"));
+        assertTrue(NewsFilter.isTreasuryTrustContract("주요사항보고서(자기주식취득신탁계약체결결정)"));
+        // 해지·취소·결과보고서는 제외.
+        assertFalse(NewsFilter.isTreasuryTrustContract("자기주식취득 신탁계약 해지 결정"));
+        assertFalse(NewsFilter.isTreasuryTrustContract("자기주식취득신탁계약해지결정"));
+        assertFalse(NewsFilter.isTreasuryTrustContract("자기주식취득 신탁계약 해지 결과보고서"));
+        // 직접취득결정(신탁 아님)은 대상 아님 — composeTreasury 경로가 담당.
+        assertFalse(NewsFilter.isTreasuryTrustContract("주요사항보고서(자기주식취득결정)"));
+    }
 }

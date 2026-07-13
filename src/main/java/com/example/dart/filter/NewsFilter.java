@@ -242,6 +242,19 @@ public class NewsFilter {
                 && !n.contains("신탁") && !n.contains("처분") && !n.contains("해지") && !n.contains("취소");
     }
 
+    /**
+     * 자기주식 신탁계약 "체결" 공시 여부 — 신규 체결만 금액(계약금액)을 붙일 대상.
+     * 해지·처분·취소·결과보고서는 제외한다(주가 영향 작거나 반대 방향). 직접취득결정과 서식이 달라
+     * 금액 라벨이 "취득예정금액"이 아니라 "계약금액(원)"이므로 별도 경로({@code composeTreasuryTrust})로 처리한다.
+     */
+    public static boolean isTreasuryTrustContract(String reportNm) {
+        if (reportNm == null) return false;
+        String n = normalize(reportNm);
+        return n.contains("자기주식") && n.contains("신탁") && n.contains("체결")
+                && !n.contains("해지") && !n.contains("취소") && !n.contains("처분")
+                && !n.contains("결과보고서");
+    }
+
     private static List<String> normalizeAll(List<String> keywords) {
         return keywords.stream().map(NewsFilter::normalize).filter(s -> !s.isEmpty()).toList();
     }

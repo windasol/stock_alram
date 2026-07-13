@@ -95,6 +95,18 @@ class DocumentParserTest {
     }
 
     @Test
+    void 신탁계약체결_본문의_계약금액을_추출한다() {
+        // 자기주식취득 신탁계약 체결 결정 서식 — 금액 라벨이 "계약금액(원)"(신탁계약금액).
+        // 직접취득결정과 서식이 달라 composeTreasuryTrust가 이 계약금액 파서를 재사용한다.
+        String html = "<html><body><table>"
+                + "<tr><td>계약금액(원)</td><td>10,000,000,000</td></tr>"
+                + "<tr><td>계약기간</td><td>시작일 2026-07-14 종료일 2027-01-13</td></tr>"
+                + "</table></body></html>";
+        String text = parser.htmlToPlainText(html.getBytes(StandardCharsets.UTF_8));
+        assertEquals(10_000_000_000L, parser.extractContractFromText(text).contractWon().getAsLong());
+    }
+
+    @Test
     void htmlToPlainText는_EUC_KR도_디코딩한다() {
         // KIND 본문은 보통 EUC-KR — UTF-8 디코딩 시 치환문자가 나오면 EUC-KR로 폴백한다.
         byte[] eucKr = "<p>계약상대방 한국전력공사</p>".getBytes(java.nio.charset.Charset.forName("EUC-KR"));

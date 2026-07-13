@@ -205,7 +205,7 @@ public class AlertComposer {
     public String composeScaleOnly(Disclosure d) {
         OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
         OptionalLong revenue = dartClient.recentRevenueWon(d.corpCode());
-        return buildScale(d, cap, revenue, OptionalLong.empty());
+        return buildScale(d, cap, revenue, OptionalLong.empty(), "취득금액");
     }
 
     /**
@@ -217,26 +217,46 @@ public class AlertComposer {
     public String composeTreasury(Disclosure d) {
         OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
         OptionalLong revenue = dartClient.recentRevenueWon(d.corpCode());
-        OptionalLong amount = treasuryAmountFromKind(d);
+        OptionalLong amount = amountFromKind(d, documentParser::acquisitionAmountWon);
         if (amount.isEmpty()) {
-            amount = treasuryAmountFromDart(d);   // 원문 014면 DocumentNotReadyException 전파(재시도 트리거)
+            // 원문 014면 DocumentNotReadyException 전파(재시도 트리거)
+            amount = amountFromDart(d, documentParser::acquisitionAmountWon);
         }
-        return buildScale(d, cap, revenue, amount);
+        return buildScale(d, cap, revenue, amount, "취득금액");
     }
 
     /**
-     * 시총·매출 메시지 본문 조립 — composeScaleOnly·composeTreasury가 공유한다.
-     * amount가 있으면(자기주식 취득금액) 금액과 시총 대비 매입 강도(%)를 함께 표시한다.
+     * 자기주식 신탁계약 "체결" 결정용 — 시총·매출에 더해 신탁계약금액과 시총 대비 매입 강도(%)를 붙인다.
+     * 신탁 서식의 금액 라벨은 "취득예정금액"이 아니라 "계약금액(원)"이라, 계약(수주공급)과 같은 파서
+     * ({@link DocumentParser#extractContractFromText})로 금액을 뽑는다. 매출 대비는 신탁계약엔 의미가 없어
+     * 넣지 않는다. 조회·폴백·재시도(014 전파)는 {@link #composeTreasury}와 동일 구조로 공유한다.
      */
-    private String buildScale(Disclosure d, OptionalLong cap, OptionalLong revenue, OptionalLong amount) {
+    public String composeTreasuryTrust(Disclosure d) {
+        OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
+        OptionalLong revenue = dartClient.recentRevenueWon(d.corpCode());
+        java.util.function.Function<String, OptionalLong> parse =
+                t -> documentParser.extractContractFromText(t).contractWon();
+        OptionalLong amount = amountFromKind(d, parse);
+        if (amount.isEmpty()) {
+            amount = amountFromDart(d, parse);   // 원문 014면 DocumentNotReadyException 전파(재시도 트리거)
+        }
+        return buildScale(d, cap, revenue, amount, "신탁계약금액");
+    }
+
+    /**
+     * 시총·매출 메시지 본문 조립 — composeScaleOnly·composeTreasury·composeTreasuryTrust가 공유한다.
+     * amount가 있으면(자기주식 취득금액/신탁계약금액) amountLabel과 금액, 시총 대비 매입 강도(%)를 함께 표시한다.
+     */
+    private String buildScale(Disclosure d, OptionalLong cap, OptionalLong revenue,
+                              OptionalLong amount, String amountLabel) {
         StringBuilder sb = new StringBuilder(
                 String.format("📊 **%s시총·매출** | %s — %s",
                         NewsFilter.isCorrection(d.reportNm()) ? "[정정] " : "", d.corpName(), d.reportNm()));
         if (amount.isPresent()) {
             long won = amount.getAsLong();
-            log.info("자기주식 취득금액 [{} - {}] {}원 ({})",
-                    d.corpName(), d.reportNm(), won, KoreanMoney.format(won));
-            sb.append("\n💰 취득금액 ").append(KoreanMoney.format(won));
+            log.info("자기주식 {} [{} - {}] {}원 ({})",
+                    amountLabel, d.corpName(), d.reportNm(), won, KoreanMoney.format(won));
+            sb.append("\n💰 ").append(amountLabel).append(" ").append(KoreanMoney.format(won));
             if (cap.isPresent() && cap.getAsLong() > 0) {
                 double r = won * 100.0 / cap.getAsLong();
                 log.info("자기주식 시총 대비 {}% (시총 {}원)", String.format("%.1f", r), cap.getAsLong());
@@ -251,36 +271,37 @@ public class AlertComposer {
     }
 
     /**
-     * 자기주식취득결정 본문에서 취득금액을 KIND 뷰어 본문으로 즉시 조회한다(DART 원문 014 지연 회피).
+     * 자기주식 공시 본문에서 금액을 KIND 뷰어 본문으로 즉시 조회한다(DART 원문 014 지연 회피).
+     * 금액 파서는 인자로 받는다 — 직접취득결정은 취득예정금액, 신탁계약 체결은 계약금액.
      * KIND 미설정·미게시·파싱 실패면 empty — 호출자가 DART 원문으로 폴백한다.
      */
-    private OptionalLong treasuryAmountFromKind(Disclosure d) {
+    private OptionalLong amountFromKind(Disclosure d, java.util.function.Function<String, OptionalLong> parse) {
         if (kindClient == null || kindDocClient == null) return OptionalLong.empty();
         try {
             String acptNo = kindClient.findAcptNo(d.rceptDt(), d.corpName(), d.reportNm()).orElse(null);
             if (acptNo == null) return OptionalLong.empty();
             KindDocumentClient.KindDocument doc = kindDocClient.fetch(acptNo);
-            return documentParser.acquisitionAmountWon(documentParser.htmlToPlainText(doc.bodyHtml()));
+            return parse.apply(documentParser.htmlToPlainText(doc.bodyHtml()));
         } catch (Exception e) {
-            log.info("KIND 취득금액 조회 실패 — DART 원문으로 폴백: {} - {} ({})",
+            log.info("KIND 금액 조회 실패 — DART 원문으로 폴백: {} - {} ({})",
                     d.corpName(), d.reportNm(), e.toString());
             return OptionalLong.empty();
         }
     }
 
     /**
-     * 자기주식취득결정 취득금액을 DART 원문(document.xml)에서 파싱한다 — KIND 폴백용.
+     * 자기주식 공시 금액을 DART 원문(document.xml)에서 파싱한다 — KIND 폴백용. 금액 파서는 인자로 받는다.
      * 원문 미공개(014)면 {@link DocumentNotReadyException}을 그대로 전파해 호출자가 재조회하게 한다.
      * 그 외 조회·파싱 실패는 삼키고 empty — 금액 줄만 빠지고 시총·매출 알림은 정상 발송된다.
      */
-    private OptionalLong treasuryAmountFromDart(Disclosure d) {
+    private OptionalLong amountFromDart(Disclosure d, java.util.function.Function<String, OptionalLong> parse) {
         try {
             String text = documentService.toPlainText(d.rceptNo());
-            return documentParser.acquisitionAmountWon(text);
+            return parse.apply(text);
         } catch (DocumentNotReadyException e) {
             throw e;
         } catch (Exception e) {
-            log.info("DART 원문 취득금액 조회 실패(금액 줄 생략): {} - {} ({})",
+            log.info("DART 원문 금액 조회 실패(금액 줄 생략): {} - {} ({})",
                     d.corpName(), d.reportNm(), e.toString());
             return OptionalLong.empty();
         }
