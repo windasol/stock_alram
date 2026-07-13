@@ -94,6 +94,25 @@ public class DocumentParser {
         return OptionalLong.empty();
     }
 
+    /**
+     * 주식소각결정 본문에서 소각(예정)금액(원)을 뽑는다 — 소각 알림에 금액 한 줄을 덧붙이는 용도.
+     * 서식 표기는 "소각예정금액(원)" 우선, 일부는 "소각금액(원)". 라벨과 숫자 사이에 "보통주식" 같은
+     * 표 칸 텍스트가 끼어들 수 있으므로 숫자 직전까지 비숫자 약간을 허용한다. 6자리 이상(콤마 포함) 금액만.
+     * {@link #acquisitionAmountWon}과 동일한 방식(라벨만 다름).
+     */
+    public OptionalLong cancellationAmountWon(String t) {
+        for (String label : new String[]{"소각\\s*예정\\s*금액", "소각\\s*금액"}) {
+            Matcher m = Pattern.compile(label + "\\s*\\(\\s*원\\s*\\)[^0-9]{0,12}([0-9][0-9,]{5,})").matcher(t);
+            if (m.find()) {
+                try {
+                    return OptionalLong.of(Long.parseLong(m.group(1).replace(",", "")));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        return OptionalLong.empty();
+    }
+
     /** 라벨 정규식 바로 뒤에 오는 정수 금액(콤마 포함)을 원(long)으로. 없으면 empty. */
     private static java.util.OptionalLong wonAfter(String text, String labelRegex) {
         Matcher m = Pattern.compile(labelRegex + "\\s*([0-9][0-9,]+)").matcher(text);

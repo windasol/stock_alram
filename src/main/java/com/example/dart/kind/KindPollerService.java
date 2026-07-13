@@ -190,6 +190,10 @@ public class KindPollerService {
         if (NewsFilter.CATEGORY_CONTRACT.equals(match.get().category())
                 && !NewsFilter.isCorrection(d.title())) {
             scheduleEnrichment(d, 1);
+        } else if (NewsFilter.isStockCancellation(d.title())) {
+            // 주식소각결정 — KIND 뷰어 본문에서 소각예정금액을 뽑아 시총 대비%와 함께 보강한다.
+            // DART 폴러는 KIND 선행 시 소각 보강을 생략(PollerService)하므로 이 경로가 유일한 보강이다.
+            scheduleCancellationEnrichment(d, 1);
         }
     }
 
@@ -220,6 +224,39 @@ public class KindPollerService {
                     log.warn("KIND 본문 보강 {}회 실패 — 규모 분석 생략: {} - {}",
                             ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
                     notifier.send(String.format("📊 **시총·매출 대비** | %s — %s\n상세 조회 실패",
+                            d.company(), d.title()));
+                }
+            }
+        });
+    }
+
+    /**
+     * 주식소각결정 — KIND 뷰어 본문에서 소각예정금액을 파싱해 시총 대비%와 함께 후송한다.
+     * 본문 조회 실패만 재시도하고, 조회는 됐으나 금액을 못 뽑으면 금액 줄 없이 시총만 보낸다
+     * (계약 규모 분석과 동일한 관용). 본문은 DART 원문 지연과 무관하게 즉시 받을 수 있다.
+     */
+    private void scheduleCancellationEnrichment(KindDisclosure d, int attempt) {
+        enrichmentPool.submit(() -> {
+            try {
+                KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
+                OptionalLong amount = documentParser.cancellationAmountWon(
+                        documentParser.htmlToPlainText(doc.bodyHtml()));
+                OptionalLong cap = doc.stockCode() != null
+                        ? quoteClient.marketCapWon(doc.stockCode())
+                        : OptionalLong.empty();
+                log.info("KIND 소각금액 분석 [{} - {}] {}", d.company(), d.title(),
+                        amount.isPresent() ? KoreanMoney.format(amount.getAsLong()) : "미추출");
+                notifier.send(alertComposer.composeCancellation(d, amount, cap));
+            } catch (Exception e) {
+                if (attempt < ENRICH_MAX_ATTEMPTS) {
+                    log.info("KIND 소각 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
+                            ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString());
+                    enrichmentPool.schedule(() -> scheduleCancellationEnrichment(d, attempt + 1),
+                            ENRICH_RETRY_DELAY_SEC, TimeUnit.SECONDS);
+                } else {
+                    log.warn("KIND 소각 보강 {}회 실패 — 소각금액 생략: {} - {}",
+                            ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
+                    notifier.send(String.format("📊 **시총·소각금액** | %s — %s\n상세 조회 실패",
                             d.company(), d.title()));
                 }
             }

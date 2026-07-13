@@ -95,6 +95,21 @@ class DocumentParserTest {
     }
 
     @Test
+    void 주식소각결정_본문에서_소각예정금액을_추출한다() {
+        // 소각 결정 서식 — "소각예정금액(원)" 라벨과 숫자 사이에 표 칸("보통주식")이 끼어든다.
+        String html = "<html><body><table>"
+                + "<tr><td>소각예정금액(원)</td><td>보통주식</td><td>50,000,000,000</td></tr>"
+                + "</table></body></html>";
+        String text = parser.htmlToPlainText(html.getBytes(StandardCharsets.UTF_8));
+        assertEquals(50_000_000_000L, parser.cancellationAmountWon(text).getAsLong());
+        // "소각금액(원)" 표기 변형도 인식.
+        assertEquals(3_000_000_000L,
+                parser.cancellationAmountWon("소각금액(원) 3,000,000,000").getAsLong());
+        // 값이 "-"(미기재)면 추출 없음.
+        assertTrue(parser.cancellationAmountWon("소각예정금액(원) 보통주식 - 기타주식 -").isEmpty());
+    }
+
+    @Test
     void 신탁계약체결_본문의_계약금액을_추출한다() {
         // 자기주식취득 신탁계약 체결 결정 서식 — 금액 라벨이 "계약금액(원)"(신탁계약금액).
         // 직접취득결정과 서식이 달라 composeTreasuryTrust가 이 계약금액 파서를 재사용한다.

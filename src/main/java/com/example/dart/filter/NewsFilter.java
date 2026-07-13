@@ -255,6 +255,17 @@ public class NewsFilter {
                 && !n.contains("결과보고서");
     }
 
+    /**
+     * 주식소각 "결정" 공시 여부 — 소각예정금액을 붙일 대상(주식소각결정·이익소각결정 등).
+     * 결과보고서(사후)·취소·철회는 제외한다(새 정보인 소각 결정만).
+     */
+    public static boolean isStockCancellation(String reportNm) {
+        if (reportNm == null) return false;
+        String n = normalize(reportNm);
+        return n.contains("소각") && n.contains("결정")
+                && !n.contains("결과보고서") && !n.contains("취소") && !n.contains("철회");
+    }
+
     private static List<String> normalizeAll(List<String> keywords) {
         return keywords.stream().map(NewsFilter::normalize).filter(s -> !s.isEmpty()).toList();
     }

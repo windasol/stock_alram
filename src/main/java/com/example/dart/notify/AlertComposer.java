@@ -244,7 +244,22 @@ public class AlertComposer {
     }
 
     /**
-     * 시총·매출 메시지 본문 조립 — composeScaleOnly·composeTreasury·composeTreasuryTrust가 공유한다.
+     * 주식소각결정용 — 시총·매출에 더해 소각예정금액과 시총 대비 매입 강도(%)를 붙인다.
+     * 금액 라벨은 "소각예정금액(원)"이라 전용 파서({@link DocumentParser#cancellationAmountWon})를 쓴다.
+     * 조회·폴백·재시도(014 전파)는 {@link #composeTreasury}와 동일 구조로 공유한다.
+     */
+    public String composeCancellation(Disclosure d) {
+        OptionalLong cap = quoteClient.marketCapWon(d.stockCode());
+        OptionalLong revenue = dartClient.recentRevenueWon(d.corpCode());
+        OptionalLong amount = amountFromKind(d, documentParser::cancellationAmountWon);
+        if (amount.isEmpty()) {
+            amount = amountFromDart(d, documentParser::cancellationAmountWon);   // 원문 014면 재시도 트리거
+        }
+        return buildScale(d, cap, revenue, amount, "소각예정금액");
+    }
+
+    /**
+     * 시총·매출 메시지 본문 조립 — composeScaleOnly·composeTreasury·composeTreasuryTrust·composeCancellation이 공유한다.
      * amount가 있으면(자기주식 취득금액/신탁계약금액) amountLabel과 금액, 시총 대비 매입 강도(%)를 함께 표시한다.
      */
     private String buildScale(Disclosure d, OptionalLong cap, OptionalLong revenue,

@@ -234,4 +234,17 @@ class NewsFilterTest {
         // 직접취득결정(신탁 아님)은 대상 아님 — composeTreasury 경로가 담당.
         assertFalse(NewsFilter.isTreasuryTrustContract("주요사항보고서(자기주식취득결정)"));
     }
+
+    @Test
+    void 주식소각결정만_소각금액_대상() {
+        // 소각 "결정"만 소각예정금액 덧붙임 대상.
+        assertTrue(NewsFilter.isStockCancellation("주식소각결정"));
+        assertTrue(NewsFilter.isStockCancellation("주요사항보고서(주식소각결정)"));
+        assertTrue(NewsFilter.isStockCancellation("이익소각 결정"));
+        assertTrue(NewsFilter.isStockCancellation("자기주식 소각 결정"));
+        // 결과보고서(사후)·취소·철회는 제외.
+        assertFalse(NewsFilter.isStockCancellation("주식소각결과보고서"));
+        assertFalse(NewsFilter.isStockCancellation("주식소각결정 취소"));
+        assertFalse(NewsFilter.isStockCancellation("주식소각결정 철회"));
+    }
 }

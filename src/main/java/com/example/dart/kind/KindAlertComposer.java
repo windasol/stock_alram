@@ -73,4 +73,32 @@ public class KindAlertComposer {
 
         return sb.toString();
     }
+
+    /**
+     * 2단계(주식소각결정) — KIND 뷰어 본문에서 뽑은 소각예정금액과 시총 대비 매입 강도(%)를 담은 후속.
+     * 매출 대비는 소각엔 의미가 없어 넣지 않고, 매출 출처(corp_code)도 KIND엔 없어 시총만 표시한다.
+     * DART {@code AlertComposer.composeCancellation}의 KIND 선행판(각 폴러가 자기 본문으로 보강).
+     *
+     * @param amount    소각예정금액(원) — 본문에서 못 뽑으면 empty(금액 줄 생략, 시총만)
+     * @param marketCap 종목 시가총액(원) — 종목코드 없거나 조회 실패면 empty
+     */
+    public String composeCancellation(KindDisclosure d, OptionalLong amount, OptionalLong marketCap) {
+        StringBuilder sb = new StringBuilder(
+                String.format("📊 **%s시총·소각금액** | %s — %s",
+                        NewsFilter.isCorrection(d.title()) ? "[정정] " : "", d.company(), d.title()));
+
+        if (amount.isPresent()) {
+            long won = amount.getAsLong();
+            sb.append("\n💰 소각예정금액 ").append(KoreanMoney.format(won));
+            if (marketCap.isPresent() && marketCap.getAsLong() > 0) {
+                sb.append(String.format(" · 시총 대비 %.1f%%", won * 100.0 / marketCap.getAsLong()));
+            }
+        }
+
+        if (marketCap.isPresent()) {
+            sb.append("\n📈 시총 ").append(KoreanMoney.format(marketCap.getAsLong()));
+        }
+
+        return sb.toString();
+    }
 }

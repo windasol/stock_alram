@@ -140,6 +140,9 @@ public class PollerService {
         boolean treasury = NewsFilter.isTreasuryAcquisition(d.reportNm());
         // 자기주식 신탁계약 체결도 동일 경로로 신탁계약금액·시총대비%를 붙인다(금액 라벨만 계약금액으로 다름).
         boolean trust = NewsFilter.isTreasuryTrustContract(d.reportNm());
+        // 주식소각결정은 소각예정금액·시총대비%를 붙인다. 계약처럼 각 폴러가 자기 본문으로 보강 —
+        // KIND 선행이면 KIND 폴러가 담당하므로 DART는 생략하고, DART 선행이면 DART가 보강한다.
+        boolean cancellation = NewsFilter.isStockCancellation(d.reportNm());
         if (!firstAlert) {
             // KIND가 헤더를 보냈다. 비정정 계약이면 KIND가 규모 분석(뷰어 본문)까지 담당하므로 DART는 빠진다.
             // 비계약·정정이면 KIND엔 매출 출처(corp_code)가 없으므로 시총·매출(자기주식은 취득금액까지)만 DART가 보강한다.
@@ -151,6 +154,9 @@ public class PollerService {
             } else if (trust) {
                 log.info("KIND 선행 — 신탁계약금액·시총·매출 DART가 보강: {} - {}", d.corpName(), d.reportNm());
                 scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeTreasuryTrust(d));
+            } else if (cancellation) {
+                // 소각은 계약처럼 KIND 폴러가 자기 본문으로 소각금액을 보강하므로 DART는 손을 뗀다.
+                log.info("KIND 선행 — 소각금액은 KIND가 담당, DART 생략: {} - {}", d.corpName(), d.reportNm());
             } else {
                 log.info("KIND 선행(비계약·정정) — 시총·매출만 DART가 보강: {} - {}", d.corpName(), d.reportNm());
                 scheduleScaleOnly(d);
@@ -172,6 +178,9 @@ public class PollerService {
             scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeTreasury(d));
         } else if (trust) {
             scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeTreasuryTrust(d));
+        } else if (cancellation) {
+            // DART 선행 — DART가 소각금액 보강(KIND 본문 우선→DART 원문 폴백). 재시도·폴백 로직 공유.
+            scheduleTreasuryEnrichment(d, 1, () -> alertComposer.composeCancellation(d));
         } else {
             scheduleScaleOnly(d);
         }
