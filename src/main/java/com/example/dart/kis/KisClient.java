@@ -277,6 +277,7 @@ public class KisClient {
         } catch (Exception e) {
             log.warn("KIS 외국인·기관 수급 조회 실패 ({} {}): {}",
                     inv, buySide ? "순매수" : "순매도", e.toString());
+
             return List.of();
         }
     }
