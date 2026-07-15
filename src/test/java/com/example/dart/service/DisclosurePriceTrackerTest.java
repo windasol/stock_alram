@@ -51,6 +51,35 @@ class DisclosurePriceTrackerTest {
         assertEquals("올랐다 내림", DisclosurePriceTracker.classify(5.4, 0.0, 0.6, 0, 60));
     }
 
+    // startDirection(discPrice, endPrice) — 시작가 대비 10분 뒤 종가의 순방향(±FLAT_EPS_PCT=0.5% 임계).
+
+    @Test
+    void 종가가_시작가보다_높으면_상승() {
+        assertEquals("상승", DisclosurePriceTracker.startDirection(10_000, 10_100));   // +1.0%
+    }
+
+    @Test
+    void 종가가_시작가보다_낮으면_하락() {
+        assertEquals("하락", DisclosurePriceTracker.startDirection(10_000, 9_900));    // -1.0%
+    }
+
+    @Test
+    void 시작가와_같으면_보합() {
+        assertEquals("보합", DisclosurePriceTracker.startDirection(10_000, 10_000));   // 0.0%
+    }
+
+    @Test
+    void 임계_안쪽_미세변동은_보합() {
+        assertEquals("보합", DisclosurePriceTracker.startDirection(10_000, 10_040));   // +0.4% < 0.5%
+        assertEquals("보합", DisclosurePriceTracker.startDirection(10_000, 9_960));    // -0.4% > -0.5%
+    }
+
+    @Test
+    void 임계_경계는_방향을_인정() {
+        assertEquals("상승", DisclosurePriceTracker.startDirection(10_000, 10_050));   // +0.5% 경계
+        assertEquals("하락", DisclosurePriceTracker.startDirection(10_000, 9_950));    // -0.5% 경계
+    }
+
     // nxtSession(t) — 정규장 밖(프리·애프터마켓)이면 통합("UN") 분봉이 필요
 
     @Test

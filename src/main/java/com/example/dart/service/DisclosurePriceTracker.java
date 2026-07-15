@@ -280,13 +280,13 @@ public class DisclosurePriceTracker {
                         + "공시 %s 시작가 %,d원 (%+.1f%%) → %d분 뒤 %,d원 (%+.1f%%)\n"
                         + "🔺 고점 %+.1f%% %,d원 (%s)\n"
                         + "🔽 저점 %+.1f%% %,d원 (%s)\n"
-                        + "패턴: %s",
+                        + "패턴: %s · %s",
                 st.endMin(), d.corpName(), d.reportNm(),
                 CLOCK.format(t0.toLocalTime()), st.discPrice(), st.discPct(),
                 st.endMin(), st.endPrice(), st.endPct(),
                 st.mfePct(), st.peakPrice(), CLOCK.format(st.peakAt()),
                 st.maePct(), st.troughPrice(), CLOCK.format(st.troughAt()),
-                st.pattern());
+                startDirection(st.discPrice(), st.endPrice()), st.pattern());
     }
 
     private void persist(Disclosure d, String category, ZonedDateTime t0, Stats st) {
@@ -365,6 +365,19 @@ public class DisclosurePriceTracker {
     /** 기준가 대비 변동률(%). */
     private static double pct(long price, long base) {
         return base > 0 ? (price - base) * 100.0 / base : 0.0;
+    }
+
+    /**
+     * 시작가(공시 {@value #PRE_MIN}분 전 종가) 대비 10분 뒤 종료가의 순방향 — "상승/하락/보합".
+     * 패턴 임계(±{@value #FLAT_EPS_PCT}%) 안이면 "보합". 모양 패턴("올랐다 내림" 등)만으로는
+     * 순방향이 안 보여, 이 값을 패턴 앞에 붙여 "시작가보다 결국 올랐나 내렸나"를 먼저 알린다.
+     * (순수 함수 — 테스트용 패키지 가시성)
+     */
+    static String startDirection(long discPrice, long endPrice) {
+        double p = pct(endPrice, discPrice);
+        if (p >= FLAT_EPS_PCT) return "상승";
+        if (p <= -FLAT_EPS_PCT) return "하락";
+        return "보합";
     }
 
     private static double round1(double v) {
