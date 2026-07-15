@@ -20,10 +20,7 @@ abstract class HttpNotifier implements Notifier {
 
     protected final Logger log = LoggerFactory.getLogger(getClass());
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .sslContext(TrustStores.systemDefault())
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
+    private final HttpClient httpClient = TrustStores.newHttpClient();
     private final ObjectMapper mapper = new ObjectMapper();
 
     protected void postJson(String url, Map<String, String> headers, Map<String, ?> payload) {

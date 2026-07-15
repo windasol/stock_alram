@@ -112,6 +112,15 @@ public class KisClient {
     /** 분봉 재조회 사이 간격(ms). */
     private static final long MINUTE_CANDLE_RETRY_MS = 1_500L;
 
+    /** 일반 조회 요청 타임아웃(초). */
+    private static final int QUERY_TIMEOUT_SEC = 15;
+    /** 분봉 조회 요청 타임아웃(초) — 응답이 커 조금 더 준다. */
+    private static final int CANDLE_TIMEOUT_SEC = 20;
+    /** 0건 진단용 원본 응답 debug 로깅 시 최대 길이. */
+    private static final int DEBUG_BODY_MAX = 700;
+    /** JSON 파서 공용 인스턴스(스레드 세이프) — 파서마다 재생성하지 않는다. */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final String appKey;
     private final String appSecret;
     /** 등락률순위 조회 시장구분 — J: KRX, NX: NXT, UN: 통합(KRX+NXT). NXT 거래시간(연장세션)까지 잡으려면 UN. */
@@ -119,7 +128,6 @@ public class KisClient {
     /** API 도메인 — 모의투자 앱키면 모의 도메인, 실전 앱키면 실전 도메인. */
     private final String baseUrl;
     private final HttpClient httpClient;
-    private final ObjectMapper mapper = new ObjectMapper();
     private final Path tokenFile;
 
     private String token;
@@ -131,21 +139,8 @@ public class KisClient {
         this.marketDivCode = (marketDivCode == null || marketDivCode.isBlank()) ? "J" : marketDivCode;
         this.baseUrl = paper ? PAPER_BASE_URL : REAL_BASE_URL;
         this.tokenFile = tokenFile;
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = TrustStores.newHttpClient();
         loadTokenFromFile();
-    }
-
-    /** 현재 조회 시장구분(J/NX/UN) — 폴러가 운영시간·로그를 맞추는 데 쓴다. */
-    public String marketDivCode() {
-        return marketDivCode;
-    }
-
-    /** 기본 시장구분(생성자 주입값)으로 등락률순위를 조회한다. */
-    public List<VolumeRankItem> topGainers() {
-        return topGainers(marketDivCode);
     }
 
     /**
@@ -173,20 +168,7 @@ public class KisClient {
                     + "&FID_RSFL_RATE1="                      // 등락률 하한은 폴러에서 적용
                     + "&FID_RSFL_RATE2=";
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + FLUCTUATION_RANK_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_FLUCTUATION_RANK)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return parseFluctuationRank(response.body());
+            return parseFluctuationRank(getKis(FLUCTUATION_RANK_PATH, TR_FLUCTUATION_RANK, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 등락률순위 조회 실패: {}", e.toString());
             return List.of();
@@ -214,20 +196,7 @@ public class KisClient {
                     + "&FID_VOL_CNT="
                     + "&FID_INPUT_DATE_1=";
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + VOLUME_RANK_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_VOLUME_RANK)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return parseVolumeRank(response.body());
+            return parseVolumeRank(getKis(VOLUME_RANK_PATH, TR_VOLUME_RANK, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 거래대금순위 조회 실패: {}", e.toString());
             return List.of();
@@ -253,25 +222,12 @@ public class KisClient {
                     + "&FID_RANK_SORT_CLS_CODE=" + (buySide ? "0" : "1")  // 0: 순매수상위, 1: 순매도상위
                     + "&FID_ETC_CLS_CODE=" + inv.etcCode;       // 1: 외국인, 2: 기관계
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + FOREIGN_INSTITUTION_TOTAL_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_FOREIGN_INSTITUTION_TOTAL)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            List<InvestorFlowItem> items = parseInvestorFlow(response.body(), inv);
+            String body = getKis(FOREIGN_INSTITUTION_TOTAL_PATH, TR_FOREIGN_INSTITUTION_TOTAL, query, QUERY_TIMEOUT_SEC);
+            List<InvestorFlowItem> items = parseInvestorFlow(body, inv);
             if (items.isEmpty() && log.isDebugEnabled()) {
                 // 0건이면 원인(빈 output·rt_cd·권한) 파악용으로 원본 응답을 debug로만 남긴다.
-                String body = response.body();
                 log.debug("KIS 수급 0건 ({} {}) — 원본응답: {}", inv, buySide ? "순매수상위" : "순매도상위",
-                        body.length() > 700 ? body.substring(0, 700) : body);
+                        body.length() > DEBUG_BODY_MAX ? body.substring(0, DEBUG_BODY_MAX) : body);
             }
             return items;
         } catch (Exception e) {
@@ -299,20 +255,7 @@ public class KisClient {
                     + "&FID_RANK_SORT_CLS_CODE=" + (buySide ? "0" : "1")
                     + "&FID_ETC_CLS_CODE=0";                 // 0: 전체(외국인·기관 합산 기준 정렬)
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + FOREIGN_INSTITUTION_TOTAL_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_FOREIGN_INSTITUTION_TOTAL)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return parseInvestorPair(response.body());
+            return parseInvestorPair(getKis(FOREIGN_INSTITUTION_TOTAL_PATH, TR_FOREIGN_INSTITUTION_TOTAL, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 동시매매 수급 조회 실패 ({}): {}", buySide ? "순매수" : "순매도", e.toString());
             return List.of();
@@ -339,25 +282,12 @@ public class KisClient {
                     + "&FID_RANK_SORT_CLS_CODE=0"              // 0: 금액순
                     + "&FID_RANK_SORT_CLS_CODE_2=" + (buySide ? "0" : "1");  // 0: 매수순, 1: 매도순
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + FRGNMEM_TRADE_ESTIMATE_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_FRGNMEM_TRADE_ESTIMATE)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            List<InvestorFlowItem> items = parseForeignMemberEstimate(response.body());
+            String body = getKis(FRGNMEM_TRADE_ESTIMATE_PATH, TR_FRGNMEM_TRADE_ESTIMATE, query, QUERY_TIMEOUT_SEC);
+            List<InvestorFlowItem> items = parseForeignMemberEstimate(body);
             if (items.isEmpty() && log.isDebugEnabled()) {
                 // 0건이면 원인(NX 미지원·권한·시간대) 파악용으로 원본 응답을 debug로만 남긴다.
-                String body = response.body();
                 log.debug("KIS 외국계 가집계 0건 ({} {}) — 원본응답: {}", marketDiv, buySide ? "매수순" : "매도순",
-                        body.length() > 700 ? body.substring(0, 700) : body);
+                        body.length() > DEBUG_BODY_MAX ? body.substring(0, DEBUG_BODY_MAX) : body);
             }
             return items;
         } catch (Exception e) {
@@ -375,20 +305,7 @@ public class KisClient {
     public String sectorOf(String code) {
         try {
             String query = "FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=" + code;
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + INQUIRE_PRICE_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_INQUIRE_PRICE)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return parseSector(response.body());
+            return parseSector(getKis(INQUIRE_PRICE_PATH, TR_INQUIRE_PRICE, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 업종 조회 실패 ({}): {}", code, e.toString());
             return "";
@@ -406,20 +323,7 @@ public class KisClient {
     public OptionalLong nxtAskingMidWon(String code) {
         try {
             String query = "FID_COND_MRKT_DIV_CODE=NX&FID_INPUT_ISCD=" + code;
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + INQUIRE_ASKING_PRICE_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_INQUIRE_ASKING_PRICE)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return parseAskingMid(response.body());
+            return parseAskingMid(getKis(INQUIRE_ASKING_PRICE_PATH, TR_INQUIRE_ASKING_PRICE, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS NXT 호가 조회 실패 ({}): {}", code, e.toString());
             return OptionalLong.empty();
@@ -467,20 +371,7 @@ public class KisClient {
                     + "&FID_INPUT_HOUR_1=" + endHHMMSS
                     + "&FID_PW_DATA_INCU_YN=N";
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + INQUIRE_TIME_CHART_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_TIME_CHART)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return parseMinuteCandles(response.body());
+            return parseMinuteCandles(getKis(INQUIRE_TIME_CHART_PATH, TR_TIME_CHART, query, CANDLE_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 분봉 조회 실패 ({}): {}", code, e.toString());
             return List.of();
@@ -490,7 +381,7 @@ public class KisClient {
     /** 현재가 조회 응답에서 업종명(bstp_kor_isnm)만 추출한다. (네트워크 분리 — 테스트용 패키지 가시성) */
     static String parseSector(String json) {
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
+            JsonNode root = MAPPER.readTree(json);
             if (!"0".equals(root.path("rt_cd").asText())) {
                 // 비정상 응답을 조용히 삼키면 전 종목이 '미분류'로 떨어지는 원인을 못 찾는다 — rt_cd/msg를 드러낸다.
                 // (예: EGW00201 초당 거래건수 초과 = 유량제한, 권한 미보유 등)
@@ -512,7 +403,7 @@ public class KisClient {
      */
     static OptionalLong parseAskingMid(String json) {
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
+            JsonNode root = MAPPER.readTree(json);
             if (!"0".equals(root.path("rt_cd").asText())) {
                 log.warn("KIS 호가 조회 비정상 응답: rt_cd={} msg={}",
                         root.path("rt_cd").asText(), root.path("msg1").asText());
@@ -536,7 +427,7 @@ public class KisClient {
     static List<MinuteCandle> parseMinuteCandles(String json) {
         List<MinuteCandle> result = new ArrayList<>();
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
+            JsonNode root = MAPPER.readTree(json);
             if (!"0".equals(root.path("rt_cd").asText())) {
                 log.warn("KIS 분봉 비정상 응답: rt_cd={} msg={}",
                         root.path("rt_cd").asText(), root.path("msg1").asText());
@@ -569,20 +460,8 @@ public class KisClient {
     static List<VolumeRankItem> parseFluctuationRank(String json) {
         List<VolumeRankItem> result = new ArrayList<>();
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                String rtCd = root.path("rt_cd").asText();
-                String msg = root.path("msg1").asText();
-                // 시장구분 거부(rt_cd=2, INVALID FID_COND_MRKT_DIV_CODE)는 설정 오류라 영원히 빈 결과만 내므로
-                // error로 격상해 로그에서 눈에 띄게 한다(예: KIS_MARKET_DIV_CODE=UN 미허용 계정).
-                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
-                    log.error("KIS 등락률순위 시장구분 거부: rt_cd={} msg={} — KIS_MARKET_DIV_CODE 설정 확인(J/NX/UN)",
-                            rtCd, msg);
-                } else {
-                    log.warn("KIS 등락률순위 비정상 응답: rt_cd={} msg={}", rtCd, msg);
-                }
-                return result;
-            }
+            JsonNode root = MAPPER.readTree(json);
+            if (isRejected(root, "등락률순위")) return result;
             for (JsonNode n : root.path("output")) {
                 String code = n.path("stck_shrn_iscd").asText("").trim();
                 if (code.isEmpty()) continue;
@@ -606,17 +485,8 @@ public class KisClient {
     static List<TradingValueItem> parseVolumeRank(String json) {
         List<TradingValueItem> result = new ArrayList<>();
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                String rtCd = root.path("rt_cd").asText();
-                String msg = root.path("msg1").asText();
-                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
-                    log.error("KIS 거래대금순위 시장구분 거부: rt_cd={} msg={} — 시장구분(J/NX/UN) 확인", rtCd, msg);
-                } else {
-                    log.warn("KIS 거래대금순위 비정상 응답: rt_cd={} msg={}", rtCd, msg);
-                }
-                return result;
-            }
+            JsonNode root = MAPPER.readTree(json);
+            if (isRejected(root, "거래대금순위")) return result;
             for (JsonNode n : root.path("output")) {
                 String code = n.path("mksc_shrn_iscd").asText("").trim();
                 if (code.isEmpty()) continue;
@@ -639,17 +509,8 @@ public class KisClient {
     static List<InvestorFlowItem> parseInvestorFlow(String json, Investor inv) {
         List<InvestorFlowItem> result = new ArrayList<>();
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                String rtCd = root.path("rt_cd").asText();
-                String msg = root.path("msg1").asText();
-                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
-                    log.error("KIS 외국인·기관 수급 거부: rt_cd={} msg={} — 권한/도메인(실전) 확인", rtCd, msg);
-                } else {
-                    log.warn("KIS 외국인·기관 수급 비정상 응답: rt_cd={} msg={}", rtCd, msg);
-                }
-                return result;
-            }
+            JsonNode root = MAPPER.readTree(json);
+            if (isRejected(root, "외국인·기관 수급")) return result;
             for (JsonNode n : root.path("output")) {
                 String code = n.path("mksc_shrn_iscd").asText("").trim();
                 if (code.isEmpty()) continue;
@@ -672,17 +533,8 @@ public class KisClient {
     static List<InvestorPairItem> parseInvestorPair(String json) {
         List<InvestorPairItem> result = new ArrayList<>();
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                String rtCd = root.path("rt_cd").asText();
-                String msg = root.path("msg1").asText();
-                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
-                    log.error("KIS 동시매매 수급 거부: rt_cd={} msg={} — 권한/도메인(실전) 확인", rtCd, msg);
-                } else {
-                    log.warn("KIS 동시매매 수급 비정상 응답: rt_cd={} msg={}", rtCd, msg);
-                }
-                return result;
-            }
+            JsonNode root = MAPPER.readTree(json);
+            if (isRejected(root, "동시매매 수급")) return result;
             for (JsonNode n : root.path("output")) {
                 String code = n.path("mksc_shrn_iscd").asText("").trim();
                 if (code.isEmpty()) continue;
@@ -707,17 +559,8 @@ public class KisClient {
     static List<InvestorFlowItem> parseForeignMemberEstimate(String json) {
         List<InvestorFlowItem> result = new ArrayList<>();
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                String rtCd = root.path("rt_cd").asText();
-                String msg = root.path("msg1").asText();
-                if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
-                    log.error("KIS 외국계 매매종목 가집계 거부: rt_cd={} msg={} — 권한/도메인(실전)·시장구분(NX) 확인", rtCd, msg);
-                } else {
-                    log.warn("KIS 외국계 매매종목 가집계 비정상 응답: rt_cd={} msg={}", rtCd, msg);
-                }
-                return result;
-            }
+            JsonNode root = MAPPER.readTree(json);
+            if (isRejected(root, "외국계 매매종목 가집계")) return result;
             for (JsonNode n : root.path("output")) {
                 String code = n.path("stck_shrn_iscd").asText("").trim();
                 if (code.isEmpty()) continue;
@@ -749,19 +592,7 @@ public class KisClient {
         try {
             throttleFiCall();   // 유량제한 회피 — 가집계와 같은 간격으로 분산(단일 폴러 스레드)
             String query = "FID_COND_MRKT_DIV_CODE=" + marketDiv + "&FID_INPUT_ISCD=" + code;
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + INQUIRE_INVESTOR_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_INQUIRE_INVESTOR)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            return parseInvestorConfirmed(response.body());
+            return parseInvestorConfirmed(getKis(INQUIRE_INVESTOR_PATH, TR_INQUIRE_INVESTOR, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 종목별 투자자 확정 수급 조회 실패 ({}): {}", code, e.toString());
             return null;
@@ -775,7 +606,7 @@ public class KisClient {
      */
     static InvestorConfirmed parseInvestorConfirmed(String json) {
         try {
-            JsonNode root = new ObjectMapper().readTree(json);
+            JsonNode root = MAPPER.readTree(json);
             if (!"0".equals(root.path("rt_cd").asText())) {
                 log.warn("KIS 종목별 투자자 확정 수급 비정상 응답: rt_cd={} msg={}",
                         root.path("rt_cd").asText(), root.path("msg1").asText());
@@ -811,6 +642,42 @@ public class KisClient {
     }
 
     /**
+     * KIS GET 공통 호출 — 모든 조회가 쓰는 표준 헤더(Bearer 토큰·appkey/secret·tr_id·custtype=P·JSON)로
+     * {@code baseUrl+path?query}를 요청해 응답 본문(String)을 돌려준다. 엔드포인트별로 다른 것은
+     * path·tr_id·query·타임아웃뿐이라 그 넷만 인자로 받는다.
+     */
+    private String getKis(String path, String tr, String query, int timeoutSec) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + path + "?" + query))
+                .timeout(Duration.ofSeconds(timeoutSec))
+                .header("authorization", "Bearer " + token())
+                .header("appkey", appKey)
+                .header("appsecret", appSecret)
+                .header("tr_id", tr)
+                .header("custtype", "P")
+                .header("Content-Type", "application/json")
+                .GET()
+                .build();
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    /**
+     * 랭킹 조회 응답의 성공 여부 판정 + 실패 로깅. rt_cd!="0"이면 라벨과 함께 비정상 응답을 남기고 true.
+     * 시장구분/권한 거부(rt_cd=2 또는 FID_COND_MRKT_DIV_CODE)는 설정 오류라 error로 격상, 그 외는 warn.
+     */
+    private static boolean isRejected(JsonNode root, String label) {
+        if ("0".equals(root.path("rt_cd").asText())) return false;
+        String rtCd = root.path("rt_cd").asText();
+        String msg = root.path("msg1").asText();
+        if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
+            log.error("KIS {} 시장구분/권한 거부: rt_cd={} msg={} — 시장구분(J/NX/UN)·권한/도메인 확인", label, rtCd, msg);
+        } else {
+            log.warn("KIS {} 비정상 응답: rt_cd={} msg={}", label, rtCd, msg);
+        }
+        return true;
+    }
+
+    /**
      * 국내 휴장일 조회(CTCA0903R) — 기준일부터 약 한 달간의 개장 여부(opnd_yn)를 받아 '휴장'인 날짜를 돌려준다.
      * 공휴일·임시공휴일·연말 폐장일 등 KRX가 실제로 쉬는 날을 실측으로 얻는 용도다(주말은 캘린더가 따로 거른다).
      * 단일 페이지(~1개월)면 당일 게이트에 충분하다. 실패·거부 시 빈 목록(주말만 거르는 기존 동작으로 폴백).
@@ -821,20 +688,8 @@ public class KisClient {
     public List<LocalDate> marketClosedDays(LocalDate from) {
         try {
             String query = "BASS_DT=" + from.format(YYYYMMDD) + "&CTX_AREA_NK=&CTX_AREA_FK=";
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + HOLIDAY_PATH + "?" + query))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("authorization", "Bearer " + token())
-                    .header("appkey", appKey)
-                    .header("appsecret", appSecret)
-                    .header("tr_id", TR_HOLIDAY)
-                    .header("custtype", "P")
-                    .header("Content-Type", "application/json")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            JsonNode root = mapper.readTree(response.body());
+            String body = getKis(HOLIDAY_PATH, TR_HOLIDAY, query, QUERY_TIMEOUT_SEC);
+            JsonNode root = MAPPER.readTree(body);
             if (!"0".equals(root.path("rt_cd").asText())) {
                 log.warn("KIS 휴장일 조회 거부 — 주말만 거른다: {}", root.path("msg1").asText());
                 return List.of();
@@ -869,7 +724,7 @@ public class KisClient {
     }
 
     private void issueToken() throws Exception {
-        String body = mapper.createObjectNode()
+        String body = MAPPER.createObjectNode()
                 .put("grant_type", "client_credentials")
                 .put("appkey", appKey)
                 .put("appsecret", appSecret)
@@ -883,7 +738,7 @@ public class KisClient {
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        JsonNode root = mapper.readTree(response.body());
+        JsonNode root = MAPPER.readTree(response.body());
         String accessToken = root.path("access_token").asText("");
         if (accessToken.isEmpty()) {
             throw new IllegalStateException("KIS 토큰 발급 실패: " + response.body());

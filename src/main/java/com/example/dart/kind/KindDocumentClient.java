@@ -6,7 +6,6 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.regex.Matcher;
@@ -45,9 +44,7 @@ public class KindDocumentClient {
     private final HttpClient httpClient;
 
     public KindDocumentClient() {
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
+        this.httpClient = TrustStores.newHttpClientBuilder()
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
     }
@@ -105,11 +102,6 @@ public class KindDocumentClient {
             throw new IllegalStateException("KIND 응답 코드 " + res.statusCode() + " (" + url + ")");
         }
         return res.body();
-    }
-
-    /** 뷰어/콘텐츠 응답은 EUC-KR 선언이지만, 우리가 뽑는 값(숫자·경로)은 ASCII라 어느 쪽이든 무방. */
-    private static Charset pickCharset(String url) {
-        return StandardCharsets.UTF_8;
     }
 
     /** KIND 본문 HTML 바이트 + 뷰어에서 읽은 종목코드(없으면 null). */

@@ -43,10 +43,7 @@ public class GeminiClient implements LlmClient {
         this.apiKey = apiKey;
         this.model = model;
         this.requestTimeout = requestTimeout;
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = TrustStores.newHttpClient();
     }
 
     @Override

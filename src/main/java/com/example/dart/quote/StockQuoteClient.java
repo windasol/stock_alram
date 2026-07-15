@@ -24,50 +24,48 @@ public class StockQuoteClient {
 
     private static final Logger log = LoggerFactory.getLogger(StockQuoteClient.class);
     private static final String API = "https://m.stock.naver.com/api/stock/%s/integration";
-    /** 실시간 현재가 — 공시 후 주가 추적용 경량 폴링 엔드포인트(키 불필요). */
-    private static final String REALTIME_API =
-            "https://polling.finance.naver.com/api/realtime/domestic/stock/%s";
+    private static final String USER_AGENT = "Mozilla/5.0";
+    /** 단건 조회 요청 타임아웃(초). */
+    private static final int REQUEST_TIMEOUT_SEC = 10;
 
     private final HttpClient httpClient;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public StockQuoteClient() {
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = TrustStores.newHttpClient();
     }
 
     /**
      * 종목 시가총액(원). 코드 없음·조회 실패·파싱 실패 시 empty — 보강을 멈추지 않는다.
      */
     public OptionalLong marketCapWon(String stockCode) {
-        if (stockCode == null || stockCode.isBlank()) return OptionalLong.empty();
+        Optional<String> body = getBody(stockCode, "시총 조회");
+        return body.isPresent() ? parseMarketCap(body.get()) : OptionalLong.empty();
+    }
+
+    /**
+     * integration API GET 공통 — 종목코드로 조회해 200이면 응답 본문(String)을, 코드 없음·비200·오류면 empty.
+     * @param label 실패 로그 구분용 라벨(예: "시총 조회").
+     */
+    private Optional<String> getBody(String stockCode, String label) {
+        if (stockCode == null || stockCode.isBlank()) return Optional.empty();
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(String.format(API, stockCode)))
-                    .timeout(Duration.ofSeconds(10))
-                    .header("User-Agent", "Mozilla/5.0")
+                    .timeout(Duration.ofSeconds(REQUEST_TIMEOUT_SEC))
+                    .header("User-Agent", USER_AGENT)
                     .GET()
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                log.warn("시총 조회 실패 (code={}): status={}", stockCode, response.statusCode());
-                return OptionalLong.empty();
+                log.warn("{} 실패 (code={}): status={}", label, stockCode, response.statusCode());
+                return Optional.empty();
             }
-            return parseMarketCap(response.body());
+            return Optional.of(response.body());
         } catch (Exception e) {
-            log.warn("시총 조회 중 오류 (code={})", stockCode, e);
-            return OptionalLong.empty();
+            log.warn("{} 중 오류 (code={})", label, stockCode, e);
+            return Optional.empty();
         }
-    }
-
-    /**
-     * 종목 현재가(원). 코드 없음·조회 실패·파싱 실패 시 empty — 추적을 멈추지 않는다.
-     * 공시 후 주가 추적이 10초 간격으로 반복 호출하므로, 시총 조회와 달리 가벼운 실시간 엔드포인트를 쓴다.
-     */
-    public OptionalLong currentPriceWon(String stockCode) {
-        return currentQuote(stockCode).price();
     }
 
     /**
@@ -76,53 +74,12 @@ public class StockQuoteClient {
      * 코드 없음·조회 실패·파싱 실패 시 empty — 그 경우 등락률 병기를 생략할 뿐 추적은 계속한다.
      */
     public OptionalLong previousCloseWon(String stockCode) {
-        if (stockCode == null || stockCode.isBlank()) return OptionalLong.empty();
-        try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(String.format(API, stockCode)))
-                    .timeout(Duration.ofSeconds(10))
-                    .header("User-Agent", "Mozilla/5.0")
-                    .GET()
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                log.warn("전일 종가 조회 실패 (code={}): status={}", stockCode, response.statusCode());
-                return OptionalLong.empty();
-            }
-            return parsePreviousClose(response.body());
-        } catch (Exception e) {
-            log.warn("전일 종가 조회 중 오류 (code={})", stockCode, e);
-            return OptionalLong.empty();
-        }
+        Optional<String> body = getBody(stockCode, "전일 종가 조회");
+        return body.isPresent() ? parsePreviousClose(body.get()) : OptionalLong.empty();
     }
 
     /**
-     * 현재가 + 세션 컨텍스트(스냅샷). 추적기가 "NXT 세션 중 체결가가 멈췄는지" 판단해 호가로 보완할지
-     * 정하는 데 쓴다. 코드 없음·조회 실패·파싱 실패 시 빈 스냅샷(price empty, nxtOpen/execPresent false).
-     */
-    public PriceSnapshot currentQuote(String stockCode) {
-        if (stockCode == null || stockCode.isBlank()) return PriceSnapshot.empty();
-        try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(String.format(REALTIME_API, stockCode)))
-                    .timeout(Duration.ofSeconds(10))
-                    .header("User-Agent", "Mozilla/5.0")
-                    .GET()
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                log.warn("현재가 조회 실패 (code={}): status={}", stockCode, response.statusCode());
-                return PriceSnapshot.empty();
-            }
-            return parseSnapshot(response.body());
-        } catch (Exception e) {
-            log.warn("현재가 조회 중 오류 (code={})", stockCode, e);
-            return PriceSnapshot.empty();
-        }
-    }
-
-    /**
-     * realtime 응답에서 현재가(원)만 파싱한다. (기존 호출부·테스트 호환용 — 내부는 parseSnapshot에 위임)
+     * realtime 응답에서 현재가(원)만 파싱한다. (테스트 호환용 — 내부는 parseSnapshot에 위임)
      */
     OptionalLong parseCurrentPrice(String json) {
         return parseSnapshot(json).price();

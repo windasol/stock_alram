@@ -44,10 +44,6 @@ public class MarketCalendar {
         return holidays.contains(date);
     }
 
-    public int holidayCount() {
-        return holidays.size();
-    }
-
     /** 캐시 파일(yyyyMMdd 한 줄씩)에서 휴장일 집합을 읽는다. 없거나 손상되면 빈 집합. */
     public static Set<LocalDate> loadFile(Path file) {
         Set<LocalDate> set = new TreeSet<>();

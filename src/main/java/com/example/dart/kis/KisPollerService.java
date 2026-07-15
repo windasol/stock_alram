@@ -503,10 +503,7 @@ public class KisPollerService {
         List<InvestorFlowItem> fs = client.foreignMemberEstimate("J", false).stream().limit(FACTS_TOP).toList();
         List<InvestorFlowItem> ib = client.investorFlowRank(KisClient.Investor.INSTITUTION, true).stream().limit(FACTS_TOP).toList();
         List<InvestorFlowItem> is = client.investorFlowRank(KisClient.Investor.INSTITUTION, false).stream().limit(FACTS_TOP).toList();
-        List<InvestorPairItem> db = client.investorFlowDual(true).stream()
-                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
-                .limit(FACTS_TOP).toList();
+        List<InvestorPairItem> db = dualBuyTop(client.investorFlowDual(true), FACTS_TOP);
 
         List<String> codes = new ArrayList<>();
         for (InvestorFlowItem it : fb) codes.add(it.code());
@@ -900,14 +897,8 @@ public class KisPollerService {
         // 기관 — 외국계 창구 구분이 안 돼 실시간 소스가 없으므로 거래소 가집계 유지.
         List<InvestorFlowItem> instBuys = client.investorFlowRank(KisClient.Investor.INSTITUTION, true);
         List<InvestorFlowItem> instSells = client.investorFlowRank(KisClient.Investor.INSTITUTION, false);
-        List<InvestorPairItem> dualBuy = client.investorFlowDual(true).stream()
-                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)   // 외국인·기관 둘 다 순매수
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
-                .limit(INVESTOR_PAIR_TOP).toList();
-        List<InvestorPairItem> dualSell = client.investorFlowDual(false).stream()
-                .filter(it -> it.frgnWon() < 0 && it.orgnWon() < 0)   // 외국인·기관 둘 다 순매도
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon))
-                .limit(INVESTOR_PAIR_TOP).toList();
+        List<InvestorPairItem> dualBuy = dualBuyTop(client.investorFlowDual(true), INVESTOR_PAIR_TOP);
+        List<InvestorPairItem> dualSell = dualSellTop(client.investorFlowDual(false), INVESTOR_PAIR_TOP);
 
         String indexLine = domesticMarket.indexHeadlineLine();   // 현재 코스피·코스닥(전일 대비, null 가능) — 표에 같이 표시
         sendFlowTable(KisClient.Investor.FOREIGN, frgnBuys, frgnSells, sess.label, time, "외국계 실시간", indexLine);
@@ -1041,20 +1032,30 @@ public class KisPollerService {
     }
 
     /** 외국인·기관 둘 다 순매수(양매수)·둘 다 순매도(양매도)인 종목을 확정값으로 추려 1건 발송한다. 둘 다 비면 미발송. */
+    /** 외국인·기관 둘 다 순매수(양매수)인 종목을 합산액(sumWon) 큰 순으로 상위 n개. */
+    private static List<InvestorPairItem> dualBuyTop(List<InvestorPairItem> items, int n) {
+        return items.stream()
+                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)
+                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
+                .limit(n).toList();
+    }
+
+    /** 외국인·기관 둘 다 순매도(양매도)인 종목을 합산액 작은(순매도 큰) 순으로 상위 n개. */
+    private static List<InvestorPairItem> dualSellTop(List<InvestorPairItem> items, int n) {
+        return items.stream()
+                .filter(it -> it.frgnWon() < 0 && it.orgnWon() < 0)
+                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon))
+                .limit(n).toList();
+    }
+
     private boolean sendConfirmedPair(Map<String, String> names, Map<String, InvestorConfirmed> confirmed,
                                       String label, LocalTime time, String tag) {
         List<InvestorPairItem> items = confirmed.entrySet().stream()
                 .map(e -> new InvestorPairItem(e.getKey(), names.getOrDefault(e.getKey(), e.getKey()),
                         e.getValue().foreignWon(), e.getValue().institutionWon(), 0.0))
                 .toList();
-        List<InvestorPairItem> dualBuy = items.stream()
-                .filter(it -> it.frgnWon() > 0 && it.orgnWon() > 0)
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon).reversed())
-                .limit(INVESTOR_PAIR_TOP).toList();
-        List<InvestorPairItem> dualSell = items.stream()
-                .filter(it -> it.frgnWon() < 0 && it.orgnWon() < 0)
-                .sorted(Comparator.comparingLong(InvestorPairItem::sumWon))
-                .limit(INVESTOR_PAIR_TOP).toList();
+        List<InvestorPairItem> dualBuy = dualBuyTop(items, INVESTOR_PAIR_TOP);
+        List<InvestorPairItem> dualSell = dualSellTop(items, INVESTOR_PAIR_TOP);
         if (dualBuy.isEmpty() && dualSell.isEmpty()) return false;
         try {
             notifier.send(composeInvestorPair(dualBuy, dualSell, label, time, tag));

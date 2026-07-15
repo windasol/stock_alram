@@ -82,16 +82,7 @@ public class DocumentParser {
      * 표 칸 텍스트가 끼어들 수 있으므로 숫자 직전까지 비숫자 약간을 허용한다. 6자리 이상(콤마 포함) 금액만.
      */
     public OptionalLong acquisitionAmountWon(String t) {
-        for (String label : new String[]{"취득\\s*예정\\s*금액", "취득\\s*금액"}) {
-            Matcher m = Pattern.compile(label + "\\s*\\(\\s*원\\s*\\)[^0-9]{0,12}([0-9][0-9,]{5,})").matcher(t);
-            if (m.find()) {
-                try {
-                    return OptionalLong.of(Long.parseLong(m.group(1).replace(",", "")));
-                } catch (NumberFormatException ignored) {
-                }
-            }
-        }
-        return OptionalLong.empty();
+        return amountByLabels(t, "취득\\s*예정\\s*금액", "취득\\s*금액");
     }
 
     /**
@@ -101,7 +92,15 @@ public class DocumentParser {
      * {@link #acquisitionAmountWon}과 동일한 방식(라벨만 다름).
      */
     public OptionalLong cancellationAmountWon(String t) {
-        for (String label : new String[]{"소각\\s*예정\\s*금액", "소각\\s*금액"}) {
+        return amountByLabels(t, "소각\\s*예정\\s*금액", "소각\\s*금액");
+    }
+
+    /**
+     * 라벨(정규식) 후보들을 순서대로 시도해 "라벨(원) … 숫자" 패턴의 금액(원)을 뽑는다. 라벨과 숫자 사이에
+     * 표 칸 텍스트("보통주식" 등)가 낄 수 있어 숫자 직전까지 비숫자를 약간 허용한다. 6자리 이상(콤마 포함)만.
+     */
+    private static OptionalLong amountByLabels(String t, String... labels) {
+        for (String label : labels) {
             Matcher m = Pattern.compile(label + "\\s*\\(\\s*원\\s*\\)[^0-9]{0,12}([0-9][0-9,]{5,})").matcher(t);
             if (m.find()) {
                 try {

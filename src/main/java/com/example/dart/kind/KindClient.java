@@ -38,9 +38,7 @@ public class KindClient {
     private final HttpClient httpClient;
 
     public KindClient() {
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
+        this.httpClient = TrustStores.newHttpClientBuilder()
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
     }

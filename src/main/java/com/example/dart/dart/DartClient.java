@@ -48,10 +48,7 @@ public class DartClient {
 
     public DartClient(String apiKey) {
         this.apiKey = apiKey;
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = TrustStores.newHttpClient();
         this.mapper = new ObjectMapper();
     }
 

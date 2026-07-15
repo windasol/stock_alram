@@ -42,10 +42,7 @@ public class NaverNewsClient {
     public NaverNewsClient(String clientId, String clientSecret) {
         this.clientId = clientId;
         this.clientSecret = clientSecret;
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = TrustStores.newHttpClient();
         this.mapper = new ObjectMapper();
     }
 
@@ -71,7 +68,9 @@ public class NaverNewsClient {
                 return Collections.emptyList();
             }
             if (response.statusCode() != 200) {
-                log.error("네이버 뉴스 검색 실패: status={}, body={}", response.statusCode(), response.body());
+                String body = response.body();
+                log.warn("네이버 뉴스 검색 실패: status={}, body={}", response.statusCode(),
+                        body.length() > 300 ? body.substring(0, 300) : body);
                 return Collections.emptyList();
             }
 
@@ -82,7 +81,7 @@ public class NaverNewsClient {
             log.debug("뉴스 조회 완료 (query={}, {}건)", query, result.size());
             return result;
         } catch (Exception e) {
-            log.error("네이버 뉴스 검색 중 오류 (query={})", query, e);
+            log.warn("네이버 뉴스 검색 중 오류 (query={}): {}", query, e.toString());
             return Collections.emptyList();
         }
     }

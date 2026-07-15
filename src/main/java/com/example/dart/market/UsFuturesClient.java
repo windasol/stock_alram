@@ -40,10 +40,7 @@ public class UsFuturesClient {
     private final ObjectMapper mapper = new ObjectMapper();
 
     public UsFuturesClient() {
-        this.httpClient = HttpClient.newBuilder()
-                .sslContext(TrustStores.systemDefault())
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = TrustStores.newHttpClient();
     }
 
     /**
