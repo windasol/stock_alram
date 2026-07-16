@@ -229,49 +229,87 @@ public record AppConfig(
     private static final String DEFAULT_NEWS_GOOGLE_KEYWORDS =
             "수주,공급계약,기술수출,품목허가,FDA 승인,무상증자,자사주 소각,흑자전환,우선협상대상자,임상 3상";
 
+    /**
+     * .env + 시스템 환경변수(env 우선)에서 설정을 읽어 컨텍스트별 서브 record로 조립한다.
+     * 각 {@code loadXxx}가 자기 record만 책임지고, 조립 후 {@link #validate}가 필수·상호 제약을 검증한다.
+     */
     public static AppConfig load() {
         Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
 
-        String dartApiKey      = resolve(dotenv, "DART_API_KEY");
-        String notifier        = resolveOrDefault(dotenv, "NOTIFIER", "webex").toLowerCase();
-        String webexBotToken   = resolve(dotenv, "WEBEX_BOT_TOKEN");
-        String webexRoomId     = resolve(dotenv, "WEBEX_ROOM_ID");
-        String webexNewsRoomId = resolve(dotenv, "WEBEX_NEWS_ROOM_ID");
-        String discordBotToken = resolve(dotenv, "DISCORD_BOT_TOKEN");
-        String discordChannelId = resolve(dotenv, "DISCORD_CHANNEL_ID");
-        String discordNewsChannelId = resolve(dotenv, "DISCORD_NEWS_CHANNEL_ID");
+        DartConfig dart = loadDart(dotenv);
+        NotifyConfig notify = loadNotify(dotenv);
+        NewsConfig news = loadNews(dotenv);
+        // KIND는 DART와 같은 CORP_CLS를 공유한다 — 같은 공시가 교차 중복 제거로 매칭되려면 시장 코드가 일치해야 한다.
+        KindConfig kind = loadKind(dotenv, dart.corpCls());
+        KisConfig kis = loadKis(dotenv);
+        LlmConfig llm = loadLlm(dotenv);
+        TradeConfig trade = loadTrade(dotenv);
+
+        validate(dart, notify, news, kis);
+
+        return new AppConfig(dart, notify, news, kind, kis, llm, trade);
+    }
+
+    private static DartConfig loadDart(Dotenv dotenv) {
         int pollInterval = Integer.parseInt(resolveOrDefault(dotenv, "POLL_INTERVAL_SEC", "7"));
         String corpCls  = resolveOrDefault(dotenv, "CORP_CLS",   "Y,K");
         // B=주요사항보고(공급계약·자사주취득 등), I=거래소공시(수주 등)
         String pblntfTy = resolveOrDefault(dotenv, "PBLNTF_TY",  "B,I");
-        List<String> filterExtraKeywords   = parseCsv(resolve(dotenv, "FILTER_EXTRA_KEYWORDS"));
-        List<String> filterExcludeKeywords = parseCsv(resolve(dotenv, "FILTER_EXCLUDE_KEYWORDS"));
+        return new DartConfig(
+                resolve(dotenv, "DART_API_KEY"), pollInterval, corpCls, pblntfTy,
+                parseCsv(resolve(dotenv, "FILTER_EXTRA_KEYWORDS")),
+                parseCsv(resolve(dotenv, "FILTER_EXCLUDE_KEYWORDS")));
+    }
 
+    private static NotifyConfig loadNotify(Dotenv dotenv) {
+        String notifier = resolveOrDefault(dotenv, "NOTIFIER", "webex").toLowerCase();
+        return new NotifyConfig(notifier,
+                resolve(dotenv, "WEBEX_BOT_TOKEN"),
+                resolve(dotenv, "WEBEX_ROOM_ID"),
+                resolve(dotenv, "WEBEX_NEWS_ROOM_ID"),
+                // KIS 변동성 전용 채널(선택) — 미설정이면 공시 채널 공유. 뉴스 채널 분리와 동일 패턴.
+                resolve(dotenv, "WEBEX_KIS_ROOM_ID"),
+                resolve(dotenv, "DISCORD_BOT_TOKEN"),
+                resolve(dotenv, "DISCORD_CHANNEL_ID"),
+                resolve(dotenv, "DISCORD_NEWS_CHANNEL_ID"),
+                resolve(dotenv, "DISCORD_KIS_CHANNEL_ID"));
+    }
+
+    private static NewsConfig loadNews(Dotenv dotenv) {
         boolean newsEnabled = Boolean.parseBoolean(resolveOrDefault(dotenv, "NEWS_ENABLED", "true"));
-        String naverClientId     = resolve(dotenv, "NAVER_CLIENT_ID");
-        String naverClientSecret = resolve(dotenv, "NAVER_CLIENT_SECRET");
         // 기본 240초 — 키워드 ~60개 × 360회 = 일 21,600회로 네이버 한도(25,000회) 안
         int newsPollInterval    = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_POLL_INTERVAL_SEC", "240"));
         int newsRssPollInterval = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_RSS_POLL_INTERVAL_SEC", "30"));
-        List<String> newsKeywords      = parseCsv(resolveOrDefault(dotenv, "NEWS_KEYWORDS", DEFAULT_NEWS_KEYWORDS));
-        List<String> newsBadKeywords   = parseCsv(resolveOrDefault(dotenv, "NEWS_BAD_KEYWORDS", DEFAULT_NEWS_BAD_KEYWORDS));
-        List<String> newsMacroKeywords = parseCsv(resolveOrDefault(dotenv, "NEWS_MACRO_KEYWORDS", DEFAULT_NEWS_MACRO_KEYWORDS));
-        List<String> newsMacroTopics   = parseCsv(resolveOrDefault(dotenv, "NEWS_MACRO_TOPICS", DEFAULT_NEWS_MACRO_TOPICS));
-        List<String> newsMacroTriggers = parseCsv(resolveOrDefault(dotenv, "NEWS_MACRO_TRIGGERS", DEFAULT_NEWS_MACRO_TRIGGERS));
-        List<String> newsFlipKeywords  = parseCsv(resolveOrDefault(dotenv, "NEWS_FLIP_KEYWORDS", DEFAULT_NEWS_FLIP_KEYWORDS));
-        List<String> newsExcludeKeywords = parseCsv(resolve(dotenv, "NEWS_EXCLUDE_KEYWORDS"));
-        List<String> newsBreakingKeywords = parseCsv(
-                resolveOrDefault(dotenv, "NEWS_BREAKING_KEYWORDS", DEFAULT_NEWS_BREAKING_KEYWORDS));
-        List<String> newsRssFeeds = parseCsv(resolveOrDefault(dotenv, "NEWS_RSS_FEEDS", DEFAULT_NEWS_RSS_FEEDS));
         int newsMaxAgeMin = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_MAX_AGE_MIN", "30"));
         int newsMacroCooldownMin = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_MACRO_COOLDOWN_MIN", "10"));
         // 기본 120초 — 키워드 10개 × 720회 = 일 7,200회. 구글 비공식 한도라 429 발생 시 주기를 늘린다.
-        List<String> newsGoogleKeywords = parseCsv(resolveOrDefault(dotenv, "NEWS_GOOGLE_KEYWORDS", DEFAULT_NEWS_GOOGLE_KEYWORDS));
         int newsGooglePollInterval = Integer.parseInt(resolveOrDefault(dotenv, "NEWS_GOOGLE_POLL_INTERVAL_SEC", "120"));
-        // KIND(거래소 공시)는 DART보다 선게시가 빈번 — 같은 공시는 교차 중복 제거로 한쪽만 알린다.
+        return new NewsConfig(newsEnabled,
+                resolve(dotenv, "NAVER_CLIENT_ID"),
+                resolve(dotenv, "NAVER_CLIENT_SECRET"),
+                newsPollInterval, newsRssPollInterval,
+                parseCsv(resolveOrDefault(dotenv, "NEWS_KEYWORDS", DEFAULT_NEWS_KEYWORDS)),
+                parseCsv(resolveOrDefault(dotenv, "NEWS_BAD_KEYWORDS", DEFAULT_NEWS_BAD_KEYWORDS)),
+                parseCsv(resolveOrDefault(dotenv, "NEWS_MACRO_KEYWORDS", DEFAULT_NEWS_MACRO_KEYWORDS)),
+                parseCsv(resolveOrDefault(dotenv, "NEWS_MACRO_TOPICS", DEFAULT_NEWS_MACRO_TOPICS)),
+                parseCsv(resolveOrDefault(dotenv, "NEWS_MACRO_TRIGGERS", DEFAULT_NEWS_MACRO_TRIGGERS)),
+                parseCsv(resolveOrDefault(dotenv, "NEWS_FLIP_KEYWORDS", DEFAULT_NEWS_FLIP_KEYWORDS)),
+                parseCsv(resolve(dotenv, "NEWS_EXCLUDE_KEYWORDS")),
+                parseCsv(resolveOrDefault(dotenv, "NEWS_BREAKING_KEYWORDS", DEFAULT_NEWS_BREAKING_KEYWORDS)),
+                parseCsv(resolveOrDefault(dotenv, "NEWS_RSS_FEEDS", DEFAULT_NEWS_RSS_FEEDS)),
+                newsMaxAgeMin, newsMacroCooldownMin,
+                parseCsv(resolveOrDefault(dotenv, "NEWS_GOOGLE_KEYWORDS", DEFAULT_NEWS_GOOGLE_KEYWORDS)),
+                newsGooglePollInterval);
+    }
+
+    /** KIND(거래소 공시)는 DART보다 선게시가 빈번 — 같은 공시는 교차 중복 제거로 한쪽만 알린다. corpCls는 DART와 공유. */
+    private static KindConfig loadKind(Dotenv dotenv, String corpCls) {
         boolean kindEnabled = Boolean.parseBoolean(resolveOrDefault(dotenv, "KIND_ENABLED", "true"));
         int kindPollIntervalSec = Integer.parseInt(resolveOrDefault(dotenv, "KIND_POLL_INTERVAL_SEC", "15"));
+        return new KindConfig(kindEnabled, kindPollIntervalSec, corpCls);
+    }
 
+    private static KisConfig loadKis(Dotenv dotenv) {
         // KIS(한국투자증권) 변동성 급등 정찰 — 키는 .env가 아닌 시스템 환경변수로 주입(resolve가 env 우선).
         // 앱키·시크릿이 있으면 자동 활성(네이버와 동일 패턴) — 별도 ENABLED 플래그 불필요.
         String kisAppKey    = resolve(dotenv, "KIS_APP_KEY");
@@ -296,10 +334,6 @@ public record AppConfig(
         // 모의투자(paper) 앱키 여부. true면 모의 도메인(openapivts:29443)을 쓴다 — 모의 앱키는 실전 도메인에서
         // 시세조회(inquire-price)가 EGW02004로 거부돼 업종 분류가 전부 '미분류'가 되므로 키 종류에 맞춰야 한다.
         boolean kisPaper          = Boolean.parseBoolean(resolveOrDefault(dotenv, "KIS_PAPER", "false"));
-        // KIS 변동성 전용 채널(선택) — 미설정이면 공시 채널 공유. 뉴스 채널 분리와 동일 패턴.
-        String webexKisRoomId      = resolve(dotenv, "WEBEX_KIS_ROOM_ID");
-        String discordKisChannelId = resolve(dotenv, "DISCORD_KIS_CHANNEL_ID");
-
         // 장 흐름 분석 리포트 — KIS 거래대금·급등 데이터를 모아 LLM(Gemini/Ollama)으로 한국어 요약을 만들어
         // N분마다 보낸다. KIS가 활성이고 LLM 키가 있을 때만 의미가 있다. 기본 활성(true) — 끄려면
         // 환경변수/.env에 MARKET_REPORT_ENABLED=false 를 명시한다. (키 없으면 호출이 실패해도 안전하게 건너뜀)
@@ -308,15 +342,24 @@ public record AppConfig(
         // 시황 분석에 실시간 검색 그라운딩(Gemini google_search) 사용 여부. 기본 true.
         // 그라운딩은 Gemini 2.5에서 검색 호출당 과금 — 끄면(false) 평문 분석(검색 없이 국내 실측만).
         boolean marketReportGrounding = Boolean.parseBoolean(resolveOrDefault(dotenv, "MARKET_REPORT_GROUNDING", "true"));
-        // 요약 생성 공급자 — gemini(클라우드, 무료한도·렉없음) 또는 ollama(로컬, 무료·PC부하).
-        String llmProvider           = resolveOrDefault(dotenv, "LLM_PROVIDER", "gemini").trim().toLowerCase();
-        // Gemini(Google AI Studio) — 키는 시스템 환경변수/.env로 주입(env 우선). 모델은 무료 flash 계열 기본.
-        String geminiApiKey          = resolve(dotenv, "GEMINI_API_KEY");
-        String geminiModel           = resolveOrDefault(dotenv, "GEMINI_MODEL", "gemini-2.5-flash");
-        // 로컬 Ollama 주소·모델. 키 아님(로컬 무인증). LLM_PROVIDER=ollama일 때만 사용.
-        String ollamaBaseUrl         = resolveOrDefault(dotenv, "OLLAMA_BASE_URL", "http://localhost:11434");
-        String ollamaModel           = resolveOrDefault(dotenv, "OLLAMA_MODEL", "exaone3.5:7.8b");
+        return new KisConfig(kisAppKey, kisAppSecret, kisPollIntervalSec, kisMinChangePct, kisCooldownMin,
+                kisMarketDivCode, kisSectorSummaryMin, kisInvestorFlowMin, kisMarketFlowMin,
+                kisGainerAlertEnabled, kisPaper,
+                marketReportEnabled, marketReportIntervalMin, marketReportGrounding);
+    }
 
+    private static LlmConfig loadLlm(Dotenv dotenv) {
+        // 요약 생성 공급자 — gemini(클라우드, 무료한도·렉없음) 또는 ollama(로컬, 무료·PC부하).
+        String llmProvider   = resolveOrDefault(dotenv, "LLM_PROVIDER", "gemini").trim().toLowerCase();
+        // Gemini(Google AI Studio) — 키는 시스템 환경변수/.env로 주입(env 우선). 모델은 무료 flash 계열 기본.
+        String geminiModel   = resolveOrDefault(dotenv, "GEMINI_MODEL", "gemini-2.5-flash");
+        // 로컬 Ollama 주소·모델. 키 아님(로컬 무인증). LLM_PROVIDER=ollama일 때만 사용.
+        String ollamaBaseUrl = resolveOrDefault(dotenv, "OLLAMA_BASE_URL", "http://localhost:11434");
+        String ollamaModel   = resolveOrDefault(dotenv, "OLLAMA_MODEL", "exaone3.5:7.8b");
+        return new LlmConfig(llmProvider, resolve(dotenv, "GEMINI_API_KEY"), geminiModel, ollamaBaseUrl, ollamaModel);
+    }
+
+    private static TradeConfig loadTrade(Dotenv dotenv) {
         // 공시 기반 자동매매 — 기본 비활성. Stage1은 드라이런(실주문 없음)만 구현. 실제 자금 보호를 위해 명시 설정 필요.
         boolean autoTradeEnabled     = Boolean.parseBoolean(resolveOrDefault(dotenv, "AUTO_TRADE_ENABLED", "false"));
         String autoTradeMode         = resolveOrDefault(dotenv, "AUTO_TRADE_MODE", "dryrun").trim().toLowerCase();
@@ -327,70 +370,55 @@ public record AppConfig(
         int autoTradeMaxPositions    = Integer.parseInt(resolveOrDefault(dotenv, "AUTO_TRADE_MAX_POSITIONS", "5"));
         int autoTradeMonitorSec      = Integer.parseInt(resolveOrDefault(dotenv, "AUTO_TRADE_MONITOR_SEC", "30"));
         String autoTradeEodClose     = resolveOrDefault(dotenv, "AUTO_TRADE_EOD_CLOSE", "15:20").trim();
+        return new TradeConfig(autoTradeEnabled, autoTradeMode, autoTradeBudgetWon, autoTradeMinSalesRatio,
+                autoTradeStopLossPct, autoTradeTakeProfitPct, autoTradeMaxPositions,
+                autoTradeMonitorSec, autoTradeEodClose);
+    }
 
+    /** 필수값·선택자별 조건부 필수·키 쌍 짝맞춤을 검증한다. 문제가 있으면 즉시 {@link IllegalStateException}. */
+    private static void validate(DartConfig dart, NotifyConfig notify, NewsConfig news, KisConfig kis) {
         // 공통 필수
-        if (dartApiKey == null || dartApiKey.isBlank()) {
+        if (dart.apiKey() == null || dart.apiKey().isBlank()) {
             throw new IllegalStateException("DART_API_KEY 환경변수가 설정되지 않았습니다.");
         }
 
         // 알림 선택자별 조건부 필수 검증
-        switch (notifier) {
+        switch (notify.notifier()) {
             case "webex" -> {
-                if (webexBotToken == null || webexBotToken.isBlank())
+                if (notify.webexBotToken() == null || notify.webexBotToken().isBlank())
                     throw new IllegalStateException("WEBEX_BOT_TOKEN 환경변수가 설정되지 않았습니다.");
-                if (webexRoomId == null || webexRoomId.isBlank())
+                if (notify.webexRoomId() == null || notify.webexRoomId().isBlank())
                     throw new IllegalStateException("WEBEX_ROOM_ID 환경변수가 설정되지 않았습니다.");
             }
             case "discord" -> {
-                if (discordBotToken == null || discordBotToken.isBlank())
+                if (notify.discordBotToken() == null || notify.discordBotToken().isBlank())
                     throw new IllegalStateException("DISCORD_BOT_TOKEN 환경변수가 설정되지 않았습니다.");
-                if (discordChannelId == null || discordChannelId.isBlank())
+                if (notify.discordChannelId() == null || notify.discordChannelId().isBlank())
                     throw new IllegalStateException("DISCORD_CHANNEL_ID 환경변수가 설정되지 않았습니다.");
             }
             default -> throw new IllegalStateException(
-                    "알 수 없는 NOTIFIER 값: \"" + notifier + "\". webex 또는 discord 중 하나를 지정하세요.");
+                    "알 수 없는 NOTIFIER 값: \"" + notify.notifier() + "\". webex 또는 discord 중 하나를 지정하세요.");
         }
 
         // 네이버 키: 하나만 있으면 설정 실수이므로 즉시 실패. (RSS는 키 없이 동작)
-        boolean hasId     = naverClientId != null && !naverClientId.isBlank();
-        boolean hasSecret = naverClientSecret != null && !naverClientSecret.isBlank();
+        boolean hasId     = news.naverClientId() != null && !news.naverClientId().isBlank();
+        boolean hasSecret = news.naverClientSecret() != null && !news.naverClientSecret().isBlank();
         if (hasId != hasSecret) {
             throw new IllegalStateException(
                     "NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET은 둘 다 설정하거나 둘 다 비워야 합니다.");
         }
-        if (newsEnabled
-                && newsKeywords.isEmpty() && newsBadKeywords.isEmpty() && newsMacroKeywords.isEmpty()) {
+        if (news.enabled()
+                && news.keywords().isEmpty() && news.badKeywords().isEmpty() && news.macroKeywords().isEmpty()) {
             throw new IllegalStateException("뉴스 폴링이 활성화됐지만 키워드가 모두 비어 있습니다.");
         }
 
         // KIS 키: 하나만 있으면 설정 실수이므로 즉시 실패. 둘 다 있으면 자동 활성, 둘 다 없으면 비활성.
-        boolean hasKisKey    = kisAppKey != null && !kisAppKey.isBlank();
-        boolean hasKisSecret = kisAppSecret != null && !kisAppSecret.isBlank();
+        boolean hasKisKey    = kis.appKey() != null && !kis.appKey().isBlank();
+        boolean hasKisSecret = kis.appSecret() != null && !kis.appSecret().isBlank();
         if (hasKisKey != hasKisSecret) {
             throw new IllegalStateException(
                     "KIS_APP_KEY와 KIS_APP_SECRET은 둘 다 설정하거나 둘 다 비워야 합니다.");
         }
-
-        return new AppConfig(
-                new DartConfig(dartApiKey, pollInterval, corpCls, pblntfTy,
-                        filterExtraKeywords, filterExcludeKeywords),
-                new NotifyConfig(notifier, webexBotToken, webexRoomId, webexNewsRoomId, webexKisRoomId,
-                        discordBotToken, discordChannelId, discordNewsChannelId, discordKisChannelId),
-                new NewsConfig(newsEnabled, naverClientId, naverClientSecret,
-                        newsPollInterval, newsRssPollInterval,
-                        newsKeywords, newsBadKeywords, newsMacroKeywords,
-                        newsMacroTopics, newsMacroTriggers, newsFlipKeywords, newsExcludeKeywords,
-                        newsBreakingKeywords, newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin,
-                        newsGoogleKeywords, newsGooglePollInterval),
-                new KindConfig(kindEnabled, kindPollIntervalSec, corpCls),
-                new KisConfig(kisAppKey, kisAppSecret, kisPollIntervalSec, kisMinChangePct, kisCooldownMin,
-                        kisMarketDivCode, kisSectorSummaryMin, kisInvestorFlowMin, kisMarketFlowMin,
-                        kisGainerAlertEnabled, kisPaper,
-                        marketReportEnabled, marketReportIntervalMin, marketReportGrounding),
-                new LlmConfig(llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel),
-                new TradeConfig(autoTradeEnabled, autoTradeMode, autoTradeBudgetWon, autoTradeMinSalesRatio,
-                        autoTradeStopLossPct, autoTradeTakeProfitPct, autoTradeMaxPositions,
-                        autoTradeMonitorSec, autoTradeEodClose));
     }
 
     private static List<String> parseCsv(String csv) {

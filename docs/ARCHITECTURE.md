@@ -157,3 +157,4 @@ infra ──▶ application ──▶ domain
 | 6 | `AppConfig` 64필드 God config — 어느 컨텍스트가 어떤 설정을 쓰는지 타입으로 안 드러남 | Phase 5: 컨텍스트별 중첩 record(Dart·Notify·News·Kind·Kis·Llm·Trade) 분해, 각 서비스는 자기 서브 config만 수령 | ✅ 해소 |
 | 7 | HTTP+JSON 보일러플레이트 중복 — 클라이언트 9곳이 각자 `new ObjectMapper()`, GET 요청 조립·전송 블록 다수 반복 | Phase 6a: `common.infra.HttpJson`(공용 `MAPPER` + `get`/`getJson`)로 통합, `OllamaClient`도 공용 빌더(TrustStores) 경유로 일관화 | ✅ 해소 |
 | 8 | 단일 poll 폴러 2곳(`PollerService`·`KindPollerService`)이 start/stop 생명주기 골격 중복 | Phase 6b: `common.infra.AbstractPoller`(시작 로그·고정지연 예약·graceful stop + `onStop` 훅)로 추출. 다중 스케줄 폴러(News·Kis)는 단일 poll 모델과 안 맞아 §9 따라 의도적 미상속 | ✅ 해소 |
+| 9 | `AppConfig.load()` 단일 메서드 ~160줄(전 컨텍스트 env 파싱+검증 혼재), `App`이 조립과 무관한 단일 인스턴스 락 로직 보유 | Phase 6c: `load()`를 컨텍스트별 `loadXxx`+`validate`로 분해, 락 3메서드를 `common.infra.SingleInstanceLock`으로 이동. (main 조립은 상호의존이 커 §9 따라 분해 보류) | ✅ 해소 |
