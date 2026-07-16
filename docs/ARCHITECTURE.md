@@ -158,3 +158,4 @@ infra ──▶ application ──▶ domain
 | 7 | HTTP+JSON 보일러플레이트 중복 — 클라이언트 9곳이 각자 `new ObjectMapper()`, GET 요청 조립·전송 블록 다수 반복 | Phase 6a: `common.infra.HttpJson`(공용 `MAPPER` + `get`/`getJson`)로 통합, `OllamaClient`도 공용 빌더(TrustStores) 경유로 일관화 | ✅ 해소 |
 | 8 | 단일 poll 폴러 2곳(`PollerService`·`KindPollerService`)이 start/stop 생명주기 골격 중복 | Phase 6b: `common.infra.AbstractPoller`(시작 로그·고정지연 예약·graceful stop + `onStop` 훅)로 추출. 다중 스케줄 폴러(News·Kis)는 단일 poll 모델과 안 맞아 §9 따라 의도적 미상속 | ✅ 해소 |
 | 9 | `AppConfig.load()` 단일 메서드 ~160줄(전 컨텍스트 env 파싱+검증 혼재), `App`이 조립과 무관한 단일 인스턴스 락 로직 보유 | Phase 6c: `load()`를 컨텍스트별 `loadXxx`+`validate`로 분해, 락 3메서드를 `common.infra.SingleInstanceLock`으로 이동. (main 조립은 상호의존이 커 §9 따라 분해 보류) | ✅ 해소 |
+| 10 | `KisClient` 799줄 — HTTP 조회 + 토큰 수명 + 11개 응답 파싱이 한 클래스에 혼재 | Phase 6d: 순수 파싱을 `kis.infra.KisResponseParser`(정적, 도메인 매핑), 토큰 발급·영속화·재사용을 `kis.infra.KisTokenStore`로 분리. `KisClient`는 요청 조립·전송·유량제한만(~380줄). 파싱 테스트 19개는 `KisResponseParserTest`로 이관 | ✅ 해소 |

@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class KisClientTest {
+class KisResponseParserTest {
 
     @Test
     void 등락률순위_응답을_파싱한다() {
@@ -35,7 +35,7 @@ class KisClientTest {
                 }
                 """;
 
-        List<VolumeRankItem> items = KisClient.parseFluctuationRank(json);
+        List<VolumeRankItem> items = KisResponseParser.parseFluctuationRank(json);
         assertEquals(1, items.size());
         VolumeRankItem it = items.get(0);
         assertEquals("123456", it.code());
@@ -48,7 +48,7 @@ class KisClientTest {
     @Test
     void 비정상_응답이면_빈_목록() {
         String json = "{\"rt_cd\":\"1\",\"msg1\":\"오류\",\"output\":[]}";
-        assertTrue(KisClient.parseFluctuationRank(json).isEmpty());
+        assertTrue(KisResponseParser.parseFluctuationRank(json).isEmpty());
     }
 
     @Test
@@ -59,12 +59,12 @@ class KisClientTest {
                   "output": { "stck_prpr": "12,500", "bstp_kor_isnm": "반도체와반도체장비" }
                 }
                 """;
-        assertEquals("반도체와반도체장비", KisClient.parseSector(json));
+        assertEquals("반도체와반도체장비", KisResponseParser.parseSector(json));
     }
 
     @Test
     void 업종_조회_비정상이면_빈_문자열() {
-        assertEquals("", KisClient.parseSector("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}"));
+        assertEquals("", KisResponseParser.parseSector("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}"));
     }
 
     @Test
@@ -75,22 +75,22 @@ class KisClientTest {
                   "output1": { "askp1": "10,200", "bidp1": "10,000" }
                 }
                 """;
-        assertEquals(10_100L, KisClient.parseAskingMid(json).getAsLong());
+        assertEquals(10_100L, KisResponseParser.parseAskingMid(json).getAsLong());
     }
 
     @Test
     void 한쪽_호가가_0이면_empty() {
         // 호가창이 비어있거나(장 닫힘) 미상장 — 중간값 의미 없음.
-        assertTrue(KisClient.parseAskingMid(
+        assertTrue(KisResponseParser.parseAskingMid(
                 "{\"rt_cd\":\"0\",\"output1\":{\"askp1\":\"10,200\",\"bidp1\":\"0\"}}").isEmpty());
-        assertTrue(KisClient.parseAskingMid(
+        assertTrue(KisResponseParser.parseAskingMid(
                 "{\"rt_cd\":\"0\",\"output1\":{\"askp1\":\"\",\"bidp1\":\"\"}}").isEmpty());
     }
 
     @Test
     void 호가_비정상_응답이면_empty() {
-        assertTrue(KisClient.parseAskingMid("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
-        assertTrue(KisClient.parseAskingMid("not json").isEmpty());
+        assertTrue(KisResponseParser.parseAskingMid("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
+        assertTrue(KisResponseParser.parseAskingMid("not json").isEmpty());
     }
 
     @Test
@@ -104,7 +104,7 @@ class KisClientTest {
                   ]
                 }
                 """;
-        List<TradingValueItem> items = KisClient.parseVolumeRank(json);
+        List<TradingValueItem> items = KisResponseParser.parseVolumeRank(json);
         assertEquals(1, items.size());
         TradingValueItem it = items.get(0);
         assertEquals("005930", it.code());
@@ -115,8 +115,8 @@ class KisClientTest {
 
     @Test
     void 거래대금순위_비정상이면_빈목록() {
-        assertTrue(KisClient.parseVolumeRank("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
-        assertTrue(KisClient.parseVolumeRank("not json").isEmpty());
+        assertTrue(KisResponseParser.parseVolumeRank("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
+        assertTrue(KisResponseParser.parseVolumeRank("not json").isEmpty());
     }
 
     @Test
@@ -133,7 +133,7 @@ class KisClientTest {
                   ]
                 }
                 """;
-        List<InvestorFlowItem> items = KisClient.parseInvestorFlow(json, Investor.FOREIGN);
+        List<InvestorFlowItem> items = KisResponseParser.parseInvestorFlow(json, Investor.FOREIGN);
         assertEquals(1, items.size());
         InvestorFlowItem it = items.get(0);
         assertEquals("005930", it.code());
@@ -155,7 +155,7 @@ class KisClientTest {
                   ]
                 }
                 """;
-        List<InvestorFlowItem> items = KisClient.parseInvestorFlow(json, Investor.INSTITUTION);
+        List<InvestorFlowItem> items = KisResponseParser.parseInvestorFlow(json, Investor.INSTITUTION);
         assertEquals(1, items.size());
         assertEquals(-98_700L * 1_000_000L, items.get(0).netValueWon());   // -987억
         assertEquals(-1.5, items.get(0).changePct());
@@ -163,9 +163,9 @@ class KisClientTest {
 
     @Test
     void 외국인_기관_수급_비정상이면_빈목록() {
-        assertTrue(KisClient.parseInvestorFlow(
+        assertTrue(KisResponseParser.parseInvestorFlow(
                 "{\"rt_cd\":\"1\",\"msg1\":\"오류\"}", Investor.FOREIGN).isEmpty());
-        assertTrue(KisClient.parseInvestorFlow("not json", Investor.FOREIGN).isEmpty());
+        assertTrue(KisResponseParser.parseInvestorFlow("not json", Investor.FOREIGN).isEmpty());
     }
 
     @Test
@@ -182,7 +182,7 @@ class KisClientTest {
                   ]
                 }
                 """;
-        List<InvestorPairItem> items = KisClient.parseInvestorPair(json);
+        List<InvestorPairItem> items = KisResponseParser.parseInvestorPair(json);
         assertEquals(1, items.size());
         InvestorPairItem it = items.get(0);
         assertEquals("삼성전자", it.name());
@@ -193,8 +193,8 @@ class KisClientTest {
 
     @Test
     void 동시매매_비정상이면_빈목록() {
-        assertTrue(KisClient.parseInvestorPair("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
-        assertTrue(KisClient.parseInvestorPair("not json").isEmpty());
+        assertTrue(KisResponseParser.parseInvestorPair("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
+        assertTrue(KisResponseParser.parseInvestorPair("not json").isEmpty());
     }
 
     @Test
@@ -212,7 +212,7 @@ class KisClientTest {
                   ]
                 }
                 """;
-        InvestorConfirmed c = KisClient.parseInvestorConfirmed(json);
+        InvestorConfirmed c = KisResponseParser.parseInvestorConfirmed(json);
         assertEquals("20260625", c.date());
         assertEquals(38_931L * 1_000_000L, c.foreignWon());      // +389억
         assertEquals(-2_304L * 1_000_000L, c.institutionWon());  // -23억
@@ -233,7 +233,7 @@ class KisClientTest {
                   ]
                 }
                 """;
-        List<InvestorFlowItem> items = KisClient.parseForeignMemberEstimate(json);
+        List<InvestorFlowItem> items = KisResponseParser.parseForeignMemberEstimate(json);
         assertEquals(1, items.size());
         InvestorFlowItem it = items.get(0);
         assertEquals("005930", it.code());
@@ -255,21 +255,21 @@ class KisClientTest {
                   ]
                 }
                 """;
-        List<InvestorFlowItem> items = KisClient.parseForeignMemberEstimate(json);
+        List<InvestorFlowItem> items = KisResponseParser.parseForeignMemberEstimate(json);
         assertEquals(-15_000L * 180_000L, items.get(0).netValueWon());   // 순매도 우위 → 음수
     }
 
     @Test
     void 외국계_실시간_비정상이면_빈목록() {
-        assertTrue(KisClient.parseForeignMemberEstimate("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
-        assertTrue(KisClient.parseForeignMemberEstimate("not json").isEmpty());
+        assertTrue(KisResponseParser.parseForeignMemberEstimate("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}").isEmpty());
+        assertTrue(KisResponseParser.parseForeignMemberEstimate("not json").isEmpty());
     }
 
     @Test
     void 종목별_확정수급_비정상이거나_빈output이면_null() {
-        assertNull(KisClient.parseInvestorConfirmed("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}"));
-        assertNull(KisClient.parseInvestorConfirmed("not json"));
-        assertNull(KisClient.parseInvestorConfirmed("{\"rt_cd\":\"0\",\"output\":[]}"));
+        assertNull(KisResponseParser.parseInvestorConfirmed("{\"rt_cd\":\"1\",\"msg1\":\"오류\"}"));
+        assertNull(KisResponseParser.parseInvestorConfirmed("not json"));
+        assertNull(KisResponseParser.parseInvestorConfirmed("{\"rt_cd\":\"0\",\"output\":[]}"));
     }
 
 }

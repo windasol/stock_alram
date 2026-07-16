@@ -10,7 +10,6 @@ import com.example.dart.kis.domain.MinuteCandle;
 import com.example.dart.kis.domain.TradingValueItem;
 import com.example.dart.kis.domain.VolumeRankItem;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,24 +17,19 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.Instant;
 import java.time.LocalDate;
-import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
 
 /**
- * 한국투자증권(KIS) Open API 클라이언트 — 급등 정찰에 쓰는 "등락률순위" 조회만 담당한다.
+ * 한국투자증권(KIS) Open API 클라이언트 — 급등 정찰·수급·분봉·휴장일 등 도메인 조회(HTTP)를 담당한다.
  *
- * 인증: appkey/appsecret(시스템 환경변수에서 주입)로 OAuth 토큰을 발급받아 Bearer로 호출한다.
- * 토큰은 유효기간 1일이고 잦은 재발급은 한도(분당 1회)·알림톡 발송을 유발하므로, 파일에 영속화해
- * 재시작 후에도 살아있는 토큰을 재사용한다.
+ * 인증(토큰 발급·영속화·재사용)은 {@link KisTokenStore}에, 응답 JSON→도메인 매핑은 {@link KisResponseParser}에
+ * 위임한다 — 이 클래스는 요청 조립·전송·유량제한만 책임진다.
  *
  * 도메인: 실전(openapi:9443) / 모의(openapivts:29443). 모의투자 앱키는 실전 도메인에서 시세조회(inquire-price)가
  * EGW02004("실전 도메인은 모의 앱키로 호출 불가")로 거부되므로, 키 종류에 맞는 도메인을 써야 한다(paper 플래그).
@@ -47,7 +41,6 @@ public class KisClient {
 
     private static final String REAL_BASE_URL  = "https://openapi.koreainvestment.com:9443";
     private static final String PAPER_BASE_URL = "https://openapivts.koreainvestment.com:29443";
-    private static final String TOKEN_PATH = "/oauth2/tokenP";
     private static final String FLUCTUATION_RANK_PATH = "/uapi/domestic-stock/v1/ranking/fluctuation";
     private static final String TR_FLUCTUATION_RANK = "FHPST01700000";
     private static final String VOLUME_RANK_PATH = "/uapi/domestic-stock/v1/quotations/volume-rank";
@@ -72,20 +65,6 @@ public class KisClient {
     private static final String HOLIDAY_PATH = "/uapi/domestic-stock/v1/quotations/chk-holiday";
     private static final String TR_HOLIDAY = "CTCA0903R";   // 국내휴장일조회 — 기준일 이후 개장 여부(opnd_yn)
     private static final DateTimeFormatter YYYYMMDD = DateTimeFormatter.ofPattern("yyyyMMdd");
-    /**
-     * 가집계 순매수 거래대금(frgn/orgn_ntby_tr_pbmn) 단위 — 원이 아니라 백만원이라 원으로 환산해 저장한다.
-     * (실측: 응답값 6자리 ≈ 360,000 → 백만원 환산 시 3,600억으로 현실적. 원이면 36만원으로 비현실적.)
-     * 단위가 다르게 확인되면 이 상수만 바꾸면 된다(예: 천원이면 1_000L).
-     */
-    static final long NTBY_PBMN_UNIT_WON = 1_000_000L;
-
-    /**
-     * 외국인·기관 수급 랭킹 조회 대상 투자자 구분 — 외국인/기관계.
-     * etcCode는 FID_ETC_CLS_CODE(1: 외국인, 2: 기관계), amountField는 응답에서 읽을 순매수 거래대금 필드명,
-     * label은 알림 표시용 라벨.
-     */
-    /** 토큰 만료 이만큼 전에 미리 재발급한다. */
-    private static final Duration TOKEN_REFRESH_MARGIN = Duration.ofMinutes(10);
 
     /**
      * 외국인·기관 가집계 호출 사이 최소 간격(ms) — 유량제한(EGW00201 초당 거래건수 초과) 회피.
@@ -107,8 +86,6 @@ public class KisClient {
     private static final int CANDLE_TIMEOUT_SEC = 20;
     /** 0건 진단용 원본 응답 debug 로깅 시 최대 길이. */
     private static final int DEBUG_BODY_MAX = 700;
-    /** JSON 파서 공용 인스턴스(스레드 세이프) — 프로젝트 공용 {@link HttpJson#MAPPER}를 재사용한다. */
-    private static final ObjectMapper MAPPER = HttpJson.MAPPER;
 
     private final String appKey;
     private final String appSecret;
@@ -117,19 +94,16 @@ public class KisClient {
     /** API 도메인 — 모의투자 앱키면 모의 도메인, 실전 앱키면 실전 도메인. */
     private final String baseUrl;
     private final HttpClient httpClient;
-    private final Path tokenFile;
-
-    private String token;
-    private Instant tokenExpiry = Instant.EPOCH;
+    /** OAuth 토큰 수명 관리(발급·파일 영속화·재사용) 위임. */
+    private final KisTokenStore tokenStore;
 
     public KisClient(String appKey, String appSecret, String marketDivCode, boolean paper, Path tokenFile) {
         this.appKey = appKey;
         this.appSecret = appSecret;
         this.marketDivCode = (marketDivCode == null || marketDivCode.isBlank()) ? "J" : marketDivCode;
         this.baseUrl = paper ? PAPER_BASE_URL : REAL_BASE_URL;
-        this.tokenFile = tokenFile;
         this.httpClient = TrustStores.newHttpClient();
-        loadTokenFromFile();
+        this.tokenStore = new KisTokenStore(appKey, appSecret, baseUrl, httpClient, tokenFile);
     }
 
     /**
@@ -157,7 +131,7 @@ public class KisClient {
                     + "&FID_RSFL_RATE1="                      // 등락률 하한은 폴러에서 적용
                     + "&FID_RSFL_RATE2=";
 
-            return parseFluctuationRank(getKis(FLUCTUATION_RANK_PATH, TR_FLUCTUATION_RANK, query, QUERY_TIMEOUT_SEC));
+            return KisResponseParser.parseFluctuationRank(getKis(FLUCTUATION_RANK_PATH, TR_FLUCTUATION_RANK, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 등락률순위 조회 실패: {}", e.toString());
             return List.of();
@@ -166,7 +140,7 @@ public class KisClient {
 
     /**
      * 거래대금순위 — 당일 누적 거래대금(acml_tr_pbmn) 상위 종목을 내림차순으로 받아온다(최대 30건).
-     * "지금 어느 섹터가 활발한가"를 거래대금으로 보려는 용도라 등락률 조건 없이 거래대금이d사항  큰 종목만 본다.
+     * "지금 어느 섹터가 활발한가"를 거래대금으로 보려는 용도라 등락률 조건 없이 거래대금이 큰 종목만 본다.
      * 시장구분(J: KRX, NX: NXT, UN: 통합)에 따라 조회 — 시간대별로 폴러가 맞춰 호출한다.
      *
      * @return 거래대금 상위 종목 목록. 실패 시 빈 목록.
@@ -185,7 +159,7 @@ public class KisClient {
                     + "&FID_VOL_CNT="
                     + "&FID_INPUT_DATE_1=";
 
-            return parseVolumeRank(getKis(VOLUME_RANK_PATH, TR_VOLUME_RANK, query, QUERY_TIMEOUT_SEC));
+            return KisResponseParser.parseVolumeRank(getKis(VOLUME_RANK_PATH, TR_VOLUME_RANK, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 거래대금순위 조회 실패: {}", e.toString());
             return List.of();
@@ -212,7 +186,7 @@ public class KisClient {
                     + "&FID_ETC_CLS_CODE=" + inv.etcCode();     // 1: 외국인, 2: 기관계
 
             String body = getKis(FOREIGN_INSTITUTION_TOTAL_PATH, TR_FOREIGN_INSTITUTION_TOTAL, query, QUERY_TIMEOUT_SEC);
-            List<InvestorFlowItem> items = parseInvestorFlow(body, inv);
+            List<InvestorFlowItem> items = KisResponseParser.parseInvestorFlow(body, inv);
             if (items.isEmpty() && log.isDebugEnabled()) {
                 // 0건이면 원인(빈 output·rt_cd·권한) 파악용으로 원본 응답을 debug로만 남긴다.
                 log.debug("KIS 수급 0건 ({} {}) — 원본응답: {}", inv, buySide ? "순매수상위" : "순매도상위",
@@ -222,7 +196,6 @@ public class KisClient {
         } catch (Exception e) {
             log.warn("KIS 외국인·기관 수급 조회 실패 ({} {}): {}",
                     inv, buySide ? "순매수" : "순매도", e.toString());
-
             return List.of();
         }
     }
@@ -244,13 +217,12 @@ public class KisClient {
                     + "&FID_RANK_SORT_CLS_CODE=" + (buySide ? "0" : "1")
                     + "&FID_ETC_CLS_CODE=0";                 // 0: 전체(외국인·기관 합산 기준 정렬)
 
-            return parseInvestorPair(getKis(FOREIGN_INSTITUTION_TOTAL_PATH, TR_FOREIGN_INSTITUTION_TOTAL, query, QUERY_TIMEOUT_SEC));
+            return KisResponseParser.parseInvestorPair(getKis(FOREIGN_INSTITUTION_TOTAL_PATH, TR_FOREIGN_INSTITUTION_TOTAL, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 동시매매 수급 조회 실패 ({}): {}", buySide ? "순매수" : "순매도", e.toString());
             return List.of();
         }
     }
-
 
     /**
      * 외국계 매매종목 가집계(HTS [0430], TR FHKST644100C0) — 외국계 증권사 창구 기준 종목별 외국인 순매수/순매도 상위.
@@ -272,7 +244,7 @@ public class KisClient {
                     + "&FID_RANK_SORT_CLS_CODE_2=" + (buySide ? "0" : "1");  // 0: 매수순, 1: 매도순
 
             String body = getKis(FRGNMEM_TRADE_ESTIMATE_PATH, TR_FRGNMEM_TRADE_ESTIMATE, query, QUERY_TIMEOUT_SEC);
-            List<InvestorFlowItem> items = parseForeignMemberEstimate(body);
+            List<InvestorFlowItem> items = KisResponseParser.parseForeignMemberEstimate(body);
             if (items.isEmpty() && log.isDebugEnabled()) {
                 // 0건이면 원인(NX 미지원·권한·시간대) 파악용으로 원본 응답을 debug로만 남긴다.
                 log.debug("KIS 외국계 가집계 0건 ({} {}) — 원본응답: {}", marketDiv, buySide ? "매수순" : "매도순",
@@ -294,7 +266,7 @@ public class KisClient {
     public String sectorOf(String code) {
         try {
             String query = "FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=" + code;
-            return parseSector(getKis(INQUIRE_PRICE_PATH, TR_INQUIRE_PRICE, query, QUERY_TIMEOUT_SEC));
+            return KisResponseParser.parseSector(getKis(INQUIRE_PRICE_PATH, TR_INQUIRE_PRICE, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 업종 조회 실패 ({}): {}", code, e.toString());
             return "";
@@ -312,7 +284,7 @@ public class KisClient {
     public OptionalLong nxtAskingMidWon(String code) {
         try {
             String query = "FID_COND_MRKT_DIV_CODE=NX&FID_INPUT_ISCD=" + code;
-            return parseAskingMid(getKis(INQUIRE_ASKING_PRICE_PATH, TR_INQUIRE_ASKING_PRICE, query, QUERY_TIMEOUT_SEC));
+            return KisResponseParser.parseAskingMid(getKis(INQUIRE_ASKING_PRICE_PATH, TR_INQUIRE_ASKING_PRICE, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS NXT 호가 조회 실패 ({}): {}", code, e.toString());
             return OptionalLong.empty();
@@ -371,212 +343,11 @@ public class KisClient {
                     + "&FID_INPUT_HOUR_1=" + endHHMMSS
                     + "&FID_PW_DATA_INCU_YN=N";
 
-            return parseMinuteCandles(getKis(INQUIRE_TIME_CHART_PATH, TR_TIME_CHART, query, CANDLE_TIMEOUT_SEC));
+            return KisResponseParser.parseMinuteCandles(getKis(INQUIRE_TIME_CHART_PATH, TR_TIME_CHART, query, CANDLE_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 분봉 조회 실패 ({}): {}", code, e.toString());
             return List.of();
         }
-    }
-
-    /** 현재가 조회 응답에서 업종명(bstp_kor_isnm)만 추출한다. (네트워크 분리 — 테스트용 패키지 가시성) */
-    static String parseSector(String json) {
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                // 비정상 응답을 조용히 삼키면 전 종목이 '미분류'로 떨어지는 원인을 못 찾는다 — rt_cd/msg를 드러낸다.
-                // (예: EGW00201 초당 거래건수 초과 = 유량제한, 권한 미보유 등)
-                log.warn("KIS 업종 조회 비정상 응답: rt_cd={} msg={}",
-                        root.path("rt_cd").asText(), root.path("msg1").asText());
-                return "";
-            }
-            return root.path("output").path("bstp_kor_isnm").asText("").trim();
-        } catch (Exception e) {
-            log.warn("KIS 업종 파싱 실패: {}", e.toString());
-            return "";
-        }
-    }
-
-    /**
-     * 호가 조회 응답에서 매도1호가(askp1)·매수1호가(bidp1)를 뽑아 중간값(원)을 계산한다.
-     * 둘 다 양수일 때만 의미가 있다 — 한쪽이라도 0(호가 비어있음·장 닫힘·미상장)이면 empty.
-     * (네트워크 분리 — 테스트용 패키지 가시성)
-     */
-    static OptionalLong parseAskingMid(String json) {
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                log.warn("KIS 호가 조회 비정상 응답: rt_cd={} msg={}",
-                        root.path("rt_cd").asText(), root.path("msg1").asText());
-                return OptionalLong.empty();
-            }
-            JsonNode out = root.path("output1");
-            long ask = parseLong(out.path("askp1").asText());
-            long bid = parseLong(out.path("bidp1").asText());
-            if (ask <= 0 || bid <= 0) return OptionalLong.empty();
-            return OptionalLong.of((ask + bid) / 2);
-        } catch (Exception e) {
-            log.warn("KIS 호가 파싱 실패: {}", e.toString());
-            return OptionalLong.empty();
-        }
-    }
-
-    /**
-     * 분봉 응답(output2)을 시각 오름차순 MinuteCandle 목록으로 파싱한다. KIS는 최신→과거 순으로 주므로
-     * 마지막에 뒤집어 오름차순으로 돌려준다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성)
-     */
-    static List<MinuteCandle> parseMinuteCandles(String json) {
-        List<MinuteCandle> result = new ArrayList<>();
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                log.warn("KIS 분봉 비정상 응답: rt_cd={} msg={}",
-                        root.path("rt_cd").asText(), root.path("msg1").asText());
-                return result;
-            }
-            for (JsonNode n : root.path("output2")) {
-                String hms = n.path("stck_cntg_hour").asText("");
-                if (hms.length() < 6) continue;
-                long close = parseLong(n.path("stck_prpr").asText());
-                if (close <= 0) continue;   // 거래 없는 빈 봉(0)은 버린다
-                LocalTime time = LocalTime.of(
-                        Integer.parseInt(hms.substring(0, 2)),
-                        Integer.parseInt(hms.substring(2, 4)),
-                        Integer.parseInt(hms.substring(4, 6)));
-                result.add(new MinuteCandle(time,
-                        parseLong(n.path("stck_oprc").asText()),
-                        parseLong(n.path("stck_hgpr").asText()),
-                        parseLong(n.path("stck_lwpr").asText()),
-                        close));
-            }
-            // KIS는 최신→과거 순. 분석은 시간순이 편하므로 오름차순으로 뒤집는다.
-            java.util.Collections.reverse(result);
-        } catch (Exception e) {
-            log.warn("KIS 분봉 파싱 실패: {}", e.toString());
-        }
-        return result;
-    }
-
-    /** 등락률순위 응답 JSON을 파싱한다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성) */
-    static List<VolumeRankItem> parseFluctuationRank(String json) {
-        List<VolumeRankItem> result = new ArrayList<>();
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (isRejected(root, "등락률순위")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("stck_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new VolumeRankItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path("stck_prpr").asText()),
-                        parseDouble(n.path("prdy_ctrt").asText()),
-                        parseLong(n.path("acml_vol").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 등락률순위 파싱 실패: {}", e.toString());
-        }
-        return result;
-    }
-
-    /**
-     * 거래대금순위 응답 JSON을 파싱한다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성)
-     * volume-rank의 종목코드 필드는 mksc_shrn_iscd, 거래대금은 acml_tr_pbmn(원).
-     */
-    static List<TradingValueItem> parseVolumeRank(String json) {
-        List<TradingValueItem> result = new ArrayList<>();
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (isRejected(root, "거래대금순위")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("mksc_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new TradingValueItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path("acml_tr_pbmn").asText()),
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 거래대금순위 파싱 실패: {}", e.toString());
-        }
-        return result;
-    }
-
-    /**
-     * 외국인·기관 매매종목가집계 응답 JSON을 파싱한다. rt_cd!="0"이면 빈 목록. (네트워크 분리 — 테스트용 패키지 가시성)
-     * 종목코드는 mksc_shrn_iscd, 순매수 거래대금은 투자자별 필드(외국인 frgn_ntby_tr_pbmn / 기관 orgn_ntby_tr_pbmn).
-     */
-    static List<InvestorFlowItem> parseInvestorFlow(String json, Investor inv) {
-        List<InvestorFlowItem> result = new ArrayList<>();
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (isRejected(root, "외국인·기관 수급")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("mksc_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new InvestorFlowItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path(inv.amountField()).asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 외국인·기관 수급 파싱 실패: {}", e.toString());
-        }
-        return result;
-    }
-
-    /**
-     * 동시매매 판정용 — 한 행에서 외국인·기관 순매수 거래대금을 함께 파싱한다. rt_cd!="0"이면 빈 목록.
-     * 거래대금은 백만원→원으로 환산해 담는다. (네트워크 분리 — 테스트용 패키지 가시성)
-     */
-    static List<InvestorPairItem> parseInvestorPair(String json) {
-        List<InvestorPairItem> result = new ArrayList<>();
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (isRejected(root, "동시매매 수급")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("mksc_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new InvestorPairItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
-                        parseLong(n.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 동시매매 수급 파싱 실패: {}", e.toString());
-        }
-        return result;
-    }
-
-    /**
-     * 외국계 매매종목 가집계(FHKST644100C0) 응답 파싱. rt_cd!="0"이면 빈 목록.
-     * 종목코드 stck_shrn_iscd, 종목명 hts_kor_isnm. 순매수수량 = 외국계총매수(glob_total_shnu_qty) − 외국계총매도(glob_total_seln_qty),
-     * 금액(원) ≈ 순매수수량 × 현재가(stck_prpr). (네트워크 분리 — 테스트용 패키지 가시성)
-     */
-    static List<InvestorFlowItem> parseForeignMemberEstimate(String json) {
-        List<InvestorFlowItem> result = new ArrayList<>();
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (isRejected(root, "외국계 매매종목 가집계")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("stck_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                long netQty = parseLong(n.path("glob_total_shnu_qty").asText())
-                        - parseLong(n.path("glob_total_seln_qty").asText());   // 외국계 순매수수량
-                long price = parseLong(n.path("stck_prpr").asText());
-                result.add(new InvestorFlowItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        netQty * price,                                        // 순매수수량 × 현재가 ≈ 순매수금액(원)
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 외국계 매매종목 가집계 파싱 실패: {}", e.toString());
-        }
-        return result;
     }
 
     /**
@@ -592,35 +363,9 @@ public class KisClient {
         try {
             throttleFiCall();   // 유량제한 회피 — 가집계와 같은 간격으로 분산(단일 폴러 스레드)
             String query = "FID_COND_MRKT_DIV_CODE=" + marketDiv + "&FID_INPUT_ISCD=" + code;
-            return parseInvestorConfirmed(getKis(INQUIRE_INVESTOR_PATH, TR_INQUIRE_INVESTOR, query, QUERY_TIMEOUT_SEC));
+            return KisResponseParser.parseInvestorConfirmed(getKis(INQUIRE_INVESTOR_PATH, TR_INQUIRE_INVESTOR, query, QUERY_TIMEOUT_SEC));
         } catch (Exception e) {
             log.warn("KIS 종목별 투자자 확정 수급 조회 실패 ({}): {}", code, e.toString());
-            return null;
-        }
-    }
-
-    /**
-     * inquire-investor 응답에서 당일(output[0]) 외국인·기관 순매수 거래대금을 읽는다.
-     * 거래대금 단위는 가집계와 동일하게 백만원으로 보고 원으로 환산한다({@link #NTBY_PBMN_UNIT_WON}).
-     * rt_cd!="0"이거나 output이 비면 null. (네트워크 분리 — 테스트용 패키지 가시성)
-     */
-    static InvestorConfirmed parseInvestorConfirmed(String json) {
-        try {
-            JsonNode root = MAPPER.readTree(json);
-            if (!"0".equals(root.path("rt_cd").asText())) {
-                log.warn("KIS 종목별 투자자 확정 수급 비정상 응답: rt_cd={} msg={}",
-                        root.path("rt_cd").asText(), root.path("msg1").asText());
-                return null;
-            }
-            JsonNode out = root.path("output");
-            if (!out.isArray() || out.isEmpty()) return null;
-            JsonNode row = out.get(0);   // 최신 영업일(마감 후=당일 확정)
-            return new InvestorConfirmed(
-                    row.path("stck_bsop_date").asText("").trim(),
-                    parseLong(row.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,
-                    parseLong(row.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON);
-        } catch (Exception e) {
-            log.warn("KIS 종목별 투자자 확정 수급 파싱 실패: {}", e.toString());
             return null;
         }
     }
@@ -650,7 +395,7 @@ public class KisClient {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + path + "?" + query))
                 .timeout(Duration.ofSeconds(timeoutSec))
-                .header("authorization", "Bearer " + token())
+                .header("authorization", "Bearer " + tokenStore.token())
                 .header("appkey", appKey)
                 .header("appsecret", appSecret)
                 .header("tr_id", tr)
@@ -659,22 +404,6 @@ public class KisClient {
                 .GET()
                 .build();
         return httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
-    }
-
-    /**
-     * 랭킹 조회 응답의 성공 여부 판정 + 실패 로깅. rt_cd!="0"이면 라벨과 함께 비정상 응답을 남기고 true.
-     * 시장구분/권한 거부(rt_cd=2 또는 FID_COND_MRKT_DIV_CODE)는 설정 오류라 error로 격상, 그 외는 warn.
-     */
-    private static boolean isRejected(JsonNode root, String label) {
-        if ("0".equals(root.path("rt_cd").asText())) return false;
-        String rtCd = root.path("rt_cd").asText();
-        String msg = root.path("msg1").asText();
-        if ("2".equals(rtCd) || msg.contains("FID_COND_MRKT_DIV_CODE")) {
-            log.error("KIS {} 시장구분/권한 거부: rt_cd={} msg={} — 시장구분(J/NX/UN)·권한/도메인 확인", label, rtCd, msg);
-        } else {
-            log.warn("KIS {} 비정상 응답: rt_cd={} msg={}", label, rtCd, msg);
-        }
-        return true;
     }
 
     /**
@@ -689,7 +418,7 @@ public class KisClient {
         try {
             String query = "BASS_DT=" + from.format(YYYYMMDD) + "&CTX_AREA_NK=&CTX_AREA_FK=";
             String body = getKis(HOLIDAY_PATH, TR_HOLIDAY, query, QUERY_TIMEOUT_SEC);
-            JsonNode root = MAPPER.readTree(body);
+            JsonNode root = HttpJson.MAPPER.readTree(body);
             if (!"0".equals(root.path("rt_cd").asText())) {
                 log.warn("KIS 휴장일 조회 거부 — 주말만 거른다: {}", root.path("msg1").asText());
                 return List.of();
@@ -710,91 +439,6 @@ public class KisClient {
         } catch (Exception e) {
             log.warn("KIS 휴장일 조회 실패 — 주말만 거른다: {}", e.toString());
             return List.of();
-        }
-    }
-
-    // ---- 토큰 관리 ----
-
-    private synchronized String token() throws Exception {
-        if (token != null && Instant.now().isBefore(tokenExpiry.minus(TOKEN_REFRESH_MARGIN))) {
-            return token;
-        }
-        issueToken();
-        return token;
-    }
-
-    private void issueToken() throws Exception {
-        String body = MAPPER.createObjectNode()
-                .put("grant_type", "client_credentials")
-                .put("appkey", appKey)
-                .put("appsecret", appSecret)
-                .toString();
-
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + TOKEN_PATH))
-                .timeout(Duration.ofSeconds(15))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        JsonNode root = MAPPER.readTree(response.body());
-        String accessToken = root.path("access_token").asText("");
-        if (accessToken.isEmpty()) {
-            throw new IllegalStateException("KIS 토큰 발급 실패: " + response.body());
-        }
-        long expiresInSec = root.path("expires_in").asLong(86400);
-        this.token = accessToken;
-        this.tokenExpiry = Instant.now().plusSeconds(expiresInSec);
-        saveTokenToFile();
-        log.info("KIS 토큰 발급 완료 (만료 {})", tokenExpiry);
-    }
-
-    private void loadTokenFromFile() {
-        try {
-            if (!Files.exists(tokenFile)) return;
-            List<String> lines = Files.readAllLines(tokenFile, StandardCharsets.UTF_8);
-            if (lines.size() < 2) return;
-            Instant expiry = Instant.ofEpochSecond(Long.parseLong(lines.get(1).trim()));
-            if (Instant.now().isBefore(expiry.minus(TOKEN_REFRESH_MARGIN))) {
-                this.token = lines.get(0).trim();
-                this.tokenExpiry = expiry;
-                log.info("KIS 토큰 파일에서 재사용 (만료 {})", expiry);
-            }
-        } catch (Exception e) {
-            log.warn("KIS 토큰 파일 읽기 실패 — 새로 발급한다: {}", e.toString());
-        }
-    }
-
-    private void saveTokenToFile() {
-        try {
-            Files.write(tokenFile,
-                    List.of(token, Long.toString(tokenExpiry.getEpochSecond())),
-                    StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            log.warn("KIS 토큰 파일 저장 실패 (재시작 시 재발급됨): {}", e.toString());
-        }
-    }
-
-    private static long parseLong(String s) {
-        if (s == null) return 0;
-        s = s.replaceAll("[,\\s]", "");
-        if (s.isEmpty() || "-".equals(s)) return 0;
-        try {
-            return Long.parseLong(s);
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    private static double parseDouble(String s) {
-        if (s == null) return 0;
-        s = s.replaceAll("[,\\s]", "");
-        if (s.isEmpty() || "-".equals(s)) return 0;
-        try {
-            return Double.parseDouble(s);
-        } catch (NumberFormatException e) {
-            return 0;
         }
     }
 }
