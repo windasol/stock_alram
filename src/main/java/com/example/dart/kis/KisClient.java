@@ -362,6 +362,17 @@ public class KisClient {
         return List.of();
     }
 
+    /**
+     * 분봉 조회 + 연장세션 폴백 — 정규장 밖(NXT만 거래, extended=true)이면 통합("UN")으로 받고,
+     * UN이 비면(미지원·무권한·데이터 없음) KRX("J")로 한 번 더 시도한다 — 정규장 데이터는 절대 안 깨지게.
+     * 정규장(extended=false)이면 바로 "J". 주가추적·자동매매가 공유하는 유일한 폴백 경로다.
+     */
+    public List<MinuteCandle> minuteCandlesWithFallback(String code, String endHHMMSS, boolean extended) {
+        List<MinuteCandle> candles = minuteCandles(code, endHHMMSS, extended ? "UN" : "J");
+        if (candles.isEmpty() && extended) candles = minuteCandles(code, endHHMMSS, "J");
+        return candles;
+    }
+
     /** 분봉 1회 조회(재시도 없음) — {@link #minuteCandles}가 감싼다. 실패·비정상 응답 시 빈 목록. */
     private List<MinuteCandle> fetchMinuteCandles(String code, String endHHMMSS, String marketDiv) {
         try {

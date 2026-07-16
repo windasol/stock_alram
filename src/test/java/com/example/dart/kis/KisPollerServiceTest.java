@@ -70,11 +70,11 @@ class KisPollerServiceTest {
 
     @Test
     void 섹터_요약은_종목수_비율_내림차순_종목등락률_포함() {
-        List<KisPollerService.Gainer> gainers = List.of(
-                new KisPollerService.Gainer("에이종목", "전기전자", 12.0),
-                new KisPollerService.Gainer("비종목", "전기전자", 25.0),
-                new KisPollerService.Gainer("씨종목", "제약", 11.0),
-                new KisPollerService.Gainer("디종목", "미분류", 30.0));
+        List<Gainer> gainers = List.of(
+                new Gainer("에이종목", "전기전자", 12.0),
+                new Gainer("비종목", "전기전자", 25.0),
+                new Gainer("씨종목", "제약", 11.0),
+                new Gainer("디종목", "미분류", 30.0));
 
         String msg = KisPollerService.composeSectorSummary(gainers, "정규장", LocalTime.of(14, 30));
 
@@ -93,10 +93,10 @@ class KisPollerServiceTest {
 
     @Test
     void 거래대금_랭킹은_섹터별_거래대금합_내림차순_종목거래대금_포함() {
-        List<KisPollerService.Turnover> items = List.of(
-                new KisPollerService.Turnover("삼성전자", "반도체", 1_800_000_000_000L),     // 1.8조
-                new KisPollerService.Turnover("SK하이닉스", "반도체", 1_200_000_000_000L),   // 1.2조 → 반도체 합 3.0조
-                new KisPollerService.Turnover("현대차", "자동차", 700_000_000_000L));        // 0.7조
+        List<Turnover> items = List.of(
+                new Turnover("삼성전자", "반도체", 1_800_000_000_000L),     // 1.8조
+                new Turnover("SK하이닉스", "반도체", 1_200_000_000_000L),   // 1.2조 → 반도체 합 3.0조
+                new Turnover("현대차", "자동차", 700_000_000_000L));        // 0.7조
 
         String msg = KisPollerService.composeTurnoverRanking(items, "정규장", LocalTime.of(14, 30));
 

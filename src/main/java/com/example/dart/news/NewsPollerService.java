@@ -1,5 +1,6 @@
 package com.example.dart.news;
 
+import com.example.dart.common.infra.PollWorker;
 import com.example.dart.config.AppConfig;
 import com.example.dart.util.SeenStore;
 import org.slf4j.Logger;
@@ -7,9 +8,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 뉴스 폴러 — 공시 폴러(PollerService)와 독립된 스레드에서 병렬로 동작한다.
@@ -38,7 +36,7 @@ public class NewsPollerService {
     /** 잡음 제거용 제외 키워드(소문자). 제목에 포함되면 버퍼에 넣지 않는다(스포츠·연예 등). */
     private final List<String> excludeKeywords;
     private final AppConfig config;
-    private final ScheduledExecutorService scheduler;
+    private final PollWorker scheduler;
 
     public NewsPollerService(RssClient rssClient, List<RssFeed> rssFeeds, List<RssFeed> googleFeeds,
                              NaverNewsClient newsClient, NewsHeadlineBuffer headlineBuffer,
@@ -52,7 +50,7 @@ public class NewsPollerService {
         this.excludeKeywords = config.newsExcludeKeywords().stream()
                 .map(s -> s.toLowerCase(Locale.ROOT)).toList();
         this.config = config;
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "news-poller"));
+        this.scheduler = new PollWorker("news-poller");
     }
 
     public void start() {
@@ -66,25 +64,17 @@ public class NewsPollerService {
             log.warn("네이버 예상 일 호출 수가 한도({}회)를 초과합니다 — NEWS_POLL_INTERVAL_SEC를 늘리거나 키워드를 줄이세요.",
                     NAVER_DAILY_LIMIT);
         }
-        scheduler.scheduleWithFixedDelay(this::pollRss, 0, config.newsRssPollIntervalSec(), TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::pollRss, 0, config.newsRssPollIntervalSec());
         if (!googleFeeds.isEmpty()) {
-            scheduler.scheduleWithFixedDelay(this::pollGoogle, 10, config.newsGooglePollIntervalSec(), TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(this::pollGoogle, 10, config.newsGooglePollIntervalSec());
         }
         if (newsClient != null) {
-            scheduler.scheduleWithFixedDelay(this::pollNaver, 5, config.newsPollIntervalSec(), TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(this::pollNaver, 5, config.newsPollIntervalSec());
         }
     }
 
     public void stop() {
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        scheduler.stop();
         log.info("뉴스 수집 중지 완료");
     }
 

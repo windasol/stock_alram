@@ -1,5 +1,7 @@
 package com.example.dart.kis;
 
+import com.example.dart.common.infra.PollBackoff;
+import com.example.dart.common.infra.PollWorker;
 import com.example.dart.config.AppConfig;
 import com.example.dart.llm.LlmClient;
 import com.example.dart.market.DomesticMarketClient;
@@ -30,9 +32,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 /**
  * KIS 등락률순위를 주기적으로 스캔해 "오늘 많이 오른" 종목을 알린다 — 공시·뉴스 파이프라인의 보조 정찰망.
@@ -166,10 +165,9 @@ public class KisPollerService {
     private final Path sectorsFile;
     /** 모의 도메인 inquire-price 유량제한 회피용 — 캐시 미스(실호출) 사이 최소 간격(ms). */
     private static final long SECTOR_LOOKUP_INTERVAL_MS = 1000L;
-    private final ScheduledExecutorService scheduler;
+    private final PollWorker scheduler;
 
-    private int consecutiveFailures = 0;
-    private int skipPolls = 0;
+    private final PollBackoff backoff = new PollBackoff();
 
     public KisPollerService(KisClient client, Notifier notifier, Notifier reportNotifier,
                             KisAlertComposer alertComposer, AppConfig config, Path sectorsFile,
@@ -192,34 +190,34 @@ public class KisPollerService {
         this.llm = config.marketReportEnabled() ? llm : null;
         this.reportIntervalMin = config.marketReportIntervalMin();   // 시황 매크로 분석 주기(시간당)
         this.reportGrounding = config.marketReportGrounding();       // 실시간 검색 그라운딩 on/off
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kis-poller"));
+        this.scheduler = new PollWorker("kis-poller");
         loadSectors();
     }
 
     public void start() {
         log.info("KIS 급등 폴링 시작 (정규장 J 09:00~15:40 → NXT 애프터마켓 NX 15:40~20:00 KST, 주기 {}초, 임계 등락률≥{}%)",
                 intervalSec, minChangePct);
-        scheduler.scheduleWithFixedDelay(this::poll, 0, intervalSec, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::poll, 0, intervalSec);
 
         if (sectorSummaryMin > 0) {
             long periodSec = sectorSummaryMin * 60L;
             // 벽시계 경계(예: 30분이면 매시 :00·:30)에 맞춰 첫 발송 시각을 정렬한다.
             long initialDelaySec = periodSec - (Instant.now().getEpochSecond() % periodSec);
-            scheduler.scheduleWithFixedDelay(this::summarize, initialDelaySec, periodSec, TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(this::summarize, initialDelaySec, periodSec);
             log.info("KIS 섹터 요약 활성 ({}분 주기, 첫 발송 {}초 후)", sectorSummaryMin, initialDelaySec);
         }
 
         if (investorFlowMin > 0) {
             long periodSec = investorFlowMin * 60L;
             // 재시작 즉시 1회 발송(initialDelay=0)한 뒤 주기 반복 — 벽시계 정렬을 두지 않는다. (수급 표만, 분석은 별도 스케줄)
-            scheduler.scheduleWithFixedDelay(this::investorFlowTick, 0, periodSec, TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(this::investorFlowTick, 0, periodSec);
             log.info("KIS 외국인·기관 수급 랭킹 활성 ({}분 주기, 재시작 즉시 발송)", investorFlowMin);
         }
 
         // 시장 전체 외국인·기관 순매수 헤드라인 — N분 주기로 KIS 채널에 한 줄 발송.
         if (marketFlowMin > 0) {
             long periodSec = marketFlowMin * 60L;
-            scheduler.scheduleWithFixedDelay(this::marketFlowTick, 0, periodSec, TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(this::marketFlowTick, 0, periodSec);
             log.info("KIS 시장 전체 수급 헤드라인 활성 ({}분 주기, 재시작 즉시 발송)", marketFlowMin);
         }
 
@@ -230,7 +228,7 @@ public class KisPollerService {
             // 첫 발송은 뉴스 폴러가 버퍼를 채울 시간을 준 뒤 1회(장중이면 발송, 장외면 게이트로 스킵) 후 주기 반복.
             // 버퍼가 없으면(뉴스 비활성) 지연 없이 즉시. 이후 발송은 정상 주기.
             long firstDelaySec = headlineBuffer != null ? MACRO_FIRST_RUN_DELAY_SEC : 0;
-            scheduler.scheduleWithFixedDelay(this::generateMacroReport, firstDelaySec, periodSec, TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(this::generateMacroReport, firstDelaySec, periodSec);
             log.info("🌐 시황 매크로 분석 활성 ({}분 주기, 모델 {}, 그라운딩 {}, 첫 발송 {}초 후)",
                     reportIntervalMin, llm.model(), reportGrounding ? "ON(검색)" : "OFF(평문)", firstDelaySec);
         }
@@ -238,7 +236,7 @@ public class KisPollerService {
         // 시작 시 LLM(Gemini/Ollama) 연결 1회 자가진단 — 장외에도 키·연결 정상 여부를 즉시 로그로 확인한다.
         // (실제 장 흐름 분석 발송은 장중에만. 이 진단은 발송과 무관하게 연결만 확인.)
         if (llm != null) {
-            scheduler.schedule(this::llmSelfTest, 0, TimeUnit.SECONDS);
+            scheduler.schedule(this::llmSelfTest, 0);
         }
     }
 
@@ -257,23 +255,12 @@ public class KisPollerService {
     }
 
     public void stop() {
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        scheduler.stop();
         log.info("KIS 급등 폴링 중지 완료");
     }
 
     private void poll() {
-        if (skipPolls > 0) {
-            skipPolls--;
-            return;
-        }
+        if (backoff.shouldSkip()) return;
         ZonedDateTime now = ZonedDateTime.now(KST);
         Session sess = currentSession(now);
         maybeFinalSummary(now, sess);  // 개장→마감 전이면 마감 요약 1건
@@ -285,12 +272,11 @@ public class KisPollerService {
         List<VolumeRankItem> items;
         try {
             items = client.topGainers(sess.marketDiv);  // 정규장 J / NXT 애프터마켓 NX — 시각에 맞춰 자동 전환
-            consecutiveFailures = 0;
+            backoff.success();
         } catch (Exception e) {
-            consecutiveFailures++;
-            skipPolls = Math.min(1 << consecutiveFailures, 40);
+            int skips = backoff.failure();
             log.warn("KIS 조회 실패 ({}연속) — {}회 폴링 건너뜀: {}",
-                    consecutiveFailures, skipPolls, e.toString());
+                    backoff.consecutiveFailures(), skips, e.toString());
             return;
         }
 
@@ -743,9 +729,6 @@ public class KisPollerService {
         return sb.toString();
     }
 
-    /** 섹터 요약 표시 단위 — 종목명·KRX 업종·등락률(%). 업종은 요약 시점에 조회해 채운다. */
-    record Gainer(String name, String sector, double changePct) {}
-
     /**
      * 거래대금 상위 종목들을 업종별 거래대금 합계 내림차순으로 정렬해 섹터 랭킹 메시지로 만든다.
      * 상위 {@value #TURNOVER_TOP_SECTORS}개 섹터까지, 각 섹터 안 대표 종목 {@value #TURNOVER_STOCKS_PER_SECTOR}개를
@@ -791,9 +774,6 @@ public class KisPollerService {
         if (eok >= 1) return String.format("%,.0f억", eok);
         return String.format("%,d만", won / 10_000L);
     }
-
-    /** 거래대금 랭킹 표시 단위 — 종목명·KRX 업종·당일 거래대금(원). */
-    record Turnover(String name, String sector, long valueWon) {}
 
     /**
      * 주기 틱(기본 10분) — 운영시간(정규장 09:00~15:40 + NXT 애프터마켓 15:40~20:00) 내내

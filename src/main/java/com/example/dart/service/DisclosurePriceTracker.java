@@ -1,5 +1,7 @@
 package com.example.dart.service;
 
+import com.example.dart.common.domain.TradingSession;
+import com.example.dart.common.infra.PollWorker;
 import com.example.dart.kis.KisClient;
 import com.example.dart.kis.MinuteCandle;
 import com.example.dart.model.Disclosure;
@@ -22,12 +24,6 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
-import java.util.Map;
-import java.util.NavigableMap;
-import java.util.TreeMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 호재 공시 감지 시각(t0)을 기준으로 "공시 후 10분간 어떻게 움직였나"를 통계로 남긴다.
@@ -52,13 +48,6 @@ public class DisclosurePriceTracker {
     /** 고점/저점 발생 시각 표기용 — "10:07". */
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 
-    /** 추적 운영시간 — NXT 프리마켓 08:00 ~ 애프터마켓 20:00. 이 창 밖이면 추적하지 않는다. */
-    private static final LocalTime TRACK_OPEN = LocalTime.of(8, 0);
-    private static final LocalTime TRACK_CLOSE = LocalTime.of(20, 0);
-    /** KRX 정규장 — 이 밖(프리·애프터마켓)은 NXT만 거래하므로 분봉을 통합("UN")으로 받아야 한다. */
-    private static final LocalTime REG_OPEN = LocalTime.of(9, 0);
-    private static final LocalTime REG_CLOSE = LocalTime.of(15, 30);
-
     private static final int PRE_MIN = 2;       // 기준가를 잡는 공시 전 시점(분)
     private static final int WINDOW_MIN = 10;   // 공시 후 분석 창(분)
     /**
@@ -70,8 +59,6 @@ public class DisclosurePriceTracker {
     private static final long BUDGET_WON = 1_000_000L;
     /** 분석 예약 지연 — 공시+10분 봉이 완성되도록 30초 버퍼를 더한다. */
     private static final long ANALYZE_DELAY_SEC = WINDOW_MIN * 60L + 30;
-    /** 횡보/유의미 변동을 가르는 임계(%). 이보다 작은 변동은 "안 움직였다"로 본다. */
-    private static final double FLAT_EPS_PCT = 0.5;
 
     /** 표기 %의 기준이 되는 전일종가 조회용(previousCloseWon). 시총 등 다른 조회 일관성도 겸한다. */
     private final StockQuoteClient quoteClient;
@@ -81,8 +68,7 @@ public class DisclosurePriceTracker {
     /** 거래일 판정(주말·공휴일). 휴장일에 뜬 공시는 분봉이 없어 추적을 건너뛴다. */
     private final MarketCalendar calendar;
     private final ObjectMapper mapper = new ObjectMapper();
-    private final ScheduledExecutorService pool =
-            Executors.newScheduledThreadPool(2, r -> new Thread(r, "price-tracker"));
+    private final PollWorker pool = new PollWorker("price-tracker", 2);
 
     public DisclosurePriceTracker(StockQuoteClient quoteClient, KisClient kisClient,
                                   Notifier notifier, Path storeFile, MarketCalendar calendar) {
@@ -109,7 +95,7 @@ public class DisclosurePriceTracker {
             log.info("주가 추적 생략(장외): {} - {}", d.corpName(), d.reportNm());
             return;
         }
-        pool.schedule(() -> analyze(d, category, t0), ANALYZE_DELAY_SEC, TimeUnit.SECONDS);
+        pool.schedule(() -> analyze(d, category, t0), ANALYZE_DELAY_SEC);
         log.info("주가 추적 예약 [{}] {} - {} — {}분 뒤 [공시-{}분~공시+{}분] 분봉 분석",
                 code, d.corpName(), d.reportNm(), WINDOW_MIN, PRE_MIN, WINDOW_MIN);
     }
@@ -130,12 +116,11 @@ public class DisclosurePriceTracker {
             try {
                 LocalTime nowMin = now.toLocalTime().truncatedTo(ChronoUnit.MINUTES);
                 LocalTime target = nowMin.minusMinutes(PRE_MIN);
-                if (target.isBefore(TRACK_OPEN)) target = TRACK_OPEN;
+                if (target.isBefore(TradingSession.EXTENDED_OPEN)) target = TradingSession.EXTENDED_OPEN;
                 String endHms = nowMin.format(HHMMSS);
                 // 정규장 밖(프리·애프터마켓, NXT만 거래)이면 통합("UN") 분봉이 필요. UN이 비면 J로 폴백(analyze와 동일).
-                boolean extended = nxtSession(target) || nxtSession(nowMin);
-                List<MinuteCandle> candles = kisClient.minuteCandles(code, endHms, extended ? "UN" : "J");
-                if (candles.isEmpty() && extended) candles = kisClient.minuteCandles(code, endHms, "J");
+                boolean extended = TradingSession.nxtSession(target) || TradingSession.nxtSession(nowMin);
+                List<MinuteCandle> candles = kisClient.minuteCandlesWithFallback(code, endHms, extended);
                 MinuteCandle base = pickAtOrBefore(candles, target);
                 if (base == null) {
                     log.info("공시 직전 가격 생략(분봉 없음): {} - {}", d.corpName(), d.reportNm());
@@ -146,17 +131,11 @@ public class DisclosurePriceTracker {
             } catch (Exception e) {
                 log.warn("공시 직전 가격 스냅샷 실패: {} - {}", d.corpName(), d.reportNm(), e);
             }
-        }, ENTRY_PRICE_DELAY_SEC, TimeUnit.SECONDS);
+        }, ENTRY_PRICE_DELAY_SEC);
     }
 
     public void stop() {
-        pool.shutdown();
-        try {
-            if (!pool.awaitTermination(5, TimeUnit.SECONDS)) pool.shutdownNow();
-        } catch (InterruptedException e) {
-            pool.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        pool.stop();
     }
 
     /** 공시+10분 뒤 한 번 실행 — 분봉을 조회해 통계를 내고 알림·저장한다. */
@@ -164,23 +143,19 @@ public class DisclosurePriceTracker {
         try {
             LocalTime t0Min = t0.toLocalTime().truncatedTo(ChronoUnit.MINUTES);
             LocalTime fromMin = t0Min.minusMinutes(PRE_MIN);
-            if (fromMin.isBefore(TRACK_OPEN)) fromMin = TRACK_OPEN;
+            if (fromMin.isBefore(TradingSession.EXTENDED_OPEN)) fromMin = TradingSession.EXTENDED_OPEN;
             LocalTime toMin = t0Min.plusMinutes(WINDOW_MIN);
-            if (toMin.isAfter(TRACK_CLOSE)) toMin = TRACK_CLOSE;
+            if (toMin.isAfter(TradingSession.EXTENDED_CLOSE)) toMin = TradingSession.EXTENDED_CLOSE;
 
             // 시장구분 자동 선택: 창[fromMin~toMin]이 정규장(09:00~15:30) 안에 다 들어오면 KRX("J"),
             // 한쪽이라도 정규장 밖(프리·애프터마켓, NXT만 거래)이면 통합("UN")으로 받는다(경계 공시도 커버).
             // UN이 비거나(미지원·무권한) 데이터가 없으면 J로 한 번 더 시도 — 정규장은 절대 안 깨지게.
             String endHms = toMin.format(HHMMSS);
-            boolean extended = nxtSession(fromMin) || nxtSession(toMin);
-            String marketDiv = extended ? "UN" : "J";
-            List<MinuteCandle> candles = kisClient.minuteCandles(d.stockCode(), endHms, marketDiv);
-            if (candles.isEmpty() && !"J".equals(marketDiv)) {
-                candles = kisClient.minuteCandles(d.stockCode(), endHms, "J");
-            }
-            // 표기 %의 기준 = 전일종가(당일 등락률). 조회 실패 시 0 → computeStats가 기준가 대비로 폴백.
+            boolean extended = TradingSession.nxtSession(fromMin) || TradingSession.nxtSession(toMin);
+            List<MinuteCandle> candles = kisClient.minuteCandlesWithFallback(d.stockCode(), endHms, extended);
+            // 표기 %의 기준 = 전일종가(당일 등락률). 조회 실패 시 0 → Stats.compute가 기준가 대비로 폴백.
             long prdyClose = quoteClient.previousCloseWon(d.stockCode()).orElse(0L);
-            Stats st = computeStats(candles, t0Min, fromMin, toMin, prdyClose);
+            Stats st = Stats.compute(candles, t0Min, fromMin, toMin, prdyClose);
             if (st == null) {
                 log.warn("주가 추적 생략(분봉 부족 — NXT 연장세션·데이터 없음): {} {} - {}",
                         d.stockCode(), d.corpName(), d.reportNm());
@@ -197,76 +172,6 @@ public class DisclosurePriceTracker {
         } catch (Exception e) {
             log.warn("주가 추적 분석 오류: {} - {}", d.corpName(), d.reportNm(), e);
         }
-    }
-
-    /**
-     * 분봉 목록에서 통계를 낸다(순수 함수 — 네트워크 분리, 테스트용 패키지 가시성).
-     *
-     * 표기 %(시작가·종료가·고점·저점)는 <b>전일종가(prdyClose) 대비 당일 등락률</b>이다 — 사용자가 종목 화면에서
-     * 보는 그 %. prdyClose가 0(조회 실패)이면 기준가 대비로 폴백한다.
-     *
-     * 단, 패턴 분류는 전일종가가 아닌 <b>기준가(공시 PRE_MIN분 전 종가) 대비 움직임</b>으로 본다 — classify()의
-     * 임계(±FLAT_EPS_PCT)에 -6%대 당일 등락률을 그대로 넣으면 멀쩡한 횡보가 "계속 하락"으로 오분류되기 때문.
-     * 즉 "지금 얼마인지(표기)"와 "공시 후 어떻게 움직였는지(패턴)"의 기준점을 분리한다.
-     *
-     * 기준가 = 공시 PRE_MIN분 전 봉의 종가(없으면 창 내 가장 이른 봉). 고점/저점/종료가는
-     * 공시 시점 이후 구간 [t0Min, toMin]에서만 본다(공시 전 봉은 기준가용일 뿐).
-     *
-     * @param prdyClose 전일종가(원). 0이면 기준가 대비로 폴백.
-     * @return 통계. 창에 봉이 없거나 공시 후 봉이 없으면 null(분석 생략).
-     */
-    static Stats computeStats(List<MinuteCandle> candles, LocalTime t0Min, LocalTime fromMin, LocalTime toMin,
-                              long prdyClose) {
-        TreeMap<LocalTime, MinuteCandle> byTime = new TreeMap<>();
-        for (MinuteCandle c : candles) {
-            if (!c.time().isBefore(fromMin) && !c.time().isAfter(toMin)) byTime.put(c.time(), c);
-        }
-        if (byTime.isEmpty()) return null;
-
-        Map.Entry<LocalTime, MinuteCandle> baseEntry = byTime.ceilingEntry(fromMin);
-        if (baseEntry == null) return null;
-        long baseline = baseEntry.getValue().close();
-        if (baseline <= 0) return null;
-        long baselineOffsetMin = ChronoUnit.MINUTES.between(baseEntry.getKey(), t0Min);
-
-        NavigableMap<LocalTime, MinuteCandle> post = byTime.subMap(t0Min, true, toMin, true);
-        if (post.isEmpty()) return null;
-
-        long endPrice = post.lastEntry().getValue().close();
-        long endMin = ChronoUnit.MINUTES.between(t0Min, post.lastKey());
-
-        long discPrice = baseline;   // 시작가 = 공시 2분전 봉 종가(공시 시점 가격이 아니라 추적 출발점)
-
-        // 고점/저점 스캔의 출발점을 시작가(baseline)로 잡는다 — 이렇게 해야 "저점 ≤ 시작가 ≤ 고점"이
-        // 항상 성립한다. 시작가를 빼고 공시 후 봉만 보면, 시작가보다 높은 지점이 "저점"으로 찍혀
-        // (예: 시작가 -6.0% 인데 저점 -4.9%) 헤더와 모순되는 알림이 나간다.
-        long peakPrice = discPrice, troughPrice = discPrice;
-        LocalTime peakTime = baseEntry.getKey(), troughTime = baseEntry.getKey();
-        for (Map.Entry<LocalTime, MinuteCandle> e : post.entrySet()) {
-            MinuteCandle c = e.getValue();
-            long hi = c.high() > 0 ? c.high() : c.close();   // 고/저가 누락 봉은 종가로 대체
-            long lo = c.low() > 0 ? c.low() : c.close();
-            if (hi > peakPrice) { peakPrice = hi; peakTime = e.getKey(); }
-            if (lo < troughPrice) { troughPrice = lo; troughTime = e.getKey(); }
-        }
-
-        long peakMin = ChronoUnit.MINUTES.between(t0Min, peakTime);
-        long troughMin = ChronoUnit.MINUTES.between(t0Min, troughTime);
-
-        // 표기 %의 기준 = 전일종가(당일 등락률). 조회 실패(0)면 기준가로 폴백.
-        long dispBase = prdyClose > 0 ? prdyClose : baseline;
-        double discPct = pct(discPrice, dispBase);
-        double endPct = pct(endPrice, dispBase);
-        double mfePct = pct(peakPrice, dispBase);
-        double maePct = pct(troughPrice, dispBase);
-
-        // 패턴 분류는 공시 직전(기준가) 대비 움직임으로 — 당일 등락률을 넣으면 임계가 깨진다.
-        String pattern = classify(pct(peakPrice, baseline), pct(troughPrice, baseline),
-                pct(endPrice, baseline), peakMin * 60, troughMin * 60);
-
-        return new Stats(prdyClose, baseline, baselineOffsetMin, discPrice, discPct, endPrice, endMin, endPct,
-                mfePct, peakPrice, peakMin, peakTime,
-                maePct, troughPrice, troughMin, troughTime, pattern);
     }
 
     /**
@@ -362,21 +267,16 @@ public class DisclosurePriceTracker {
                 : String.format("💰 1주 %,d원 (100만원 초과)", price);
     }
 
-    /** 기준가 대비 변동률(%). */
-    private static double pct(long price, long base) {
-        return base > 0 ? (price - base) * 100.0 / base : 0.0;
-    }
-
     /**
      * 시작가(공시 {@value #PRE_MIN}분 전 종가) 대비 10분 뒤 종료가의 순방향 — "상승/하락/보합".
-     * 패턴 임계(±{@value #FLAT_EPS_PCT}%) 안이면 "보합". 모양 패턴("올랐다 내림" 등)만으로는
+     * 패턴 임계(±{@value Stats#FLAT_EPS_PCT}%) 안이면 "보합". 모양 패턴("올랐다 내림" 등)만으로는
      * 순방향이 안 보여, 이 값을 패턴 앞에 붙여 "시작가보다 결국 올랐나 내렸나"를 먼저 알린다.
      * (순수 함수 — 테스트용 패키지 가시성)
      */
     static String startDirection(long discPrice, long endPrice) {
-        double p = pct(endPrice, discPrice);
-        if (p >= FLAT_EPS_PCT) return "상승";
-        if (p <= -FLAT_EPS_PCT) return "하락";
+        double p = discPrice > 0 ? (endPrice - discPrice) * 100.0 / discPrice : 0.0;
+        if (p >= Stats.FLAT_EPS_PCT) return "상승";
+        if (p <= -Stats.FLAT_EPS_PCT) return "하락";
         return "보합";
     }
 
@@ -384,59 +284,8 @@ public class DisclosurePriceTracker {
         return Math.round(v * 10) / 10.0;
     }
 
-    /**
-     * 움직임 패턴 분류 — "올랐다 내렸나 / 내렸다 올랐나 / 계속 한 방향인가".
-     *
-     * 기준가(공시 2분 전) 대비 고점·저점만으로 보면, 고점 찍고 기준가 근처로 되돌려도 기준가를 안 깨면
-     * "계속 상승"으로 잘못 잡힌다. 그래서 종료가가 고점에서 임계(FLAT_EPS_PCT) 이상 되돌렸으면(pullback)
-     * "올랐다 내림", 저점에서 그만큼 되올라왔으면(bounce) "내렸다 오름"으로 본다.
-     *  - 기준가 양쪽을 다 건드린 경우(up&&down): 먼저 찍은 극점으로 방향 결정(기존과 동일).
-     *  - 한쪽만 건드린 경우: 그 극점에서 종료가가 얼마나 되돌렸는지로 반전 여부 판정.
-     */
-    static String classify(double mfePct, double maePct, double endPct, long peakSec, long troughSec) {
-        boolean up = mfePct >= FLAT_EPS_PCT;
-        boolean down = maePct <= -FLAT_EPS_PCT;
-        if (!up && !down) return "횡보";
-        if (up && down) return peakSec <= troughSec ? "올랐다 내림" : "내렸다 오름";
-        if (up) return (mfePct - endPct) >= FLAT_EPS_PCT ? "올랐다 내림" : "계속 상승";
-        return (endPct - maePct) >= FLAT_EPS_PCT ? "내렸다 오름" : "계속 하락";
-    }
-
-    /** KRX 정규장(09:00~15:30) 밖이면 true — 프리·애프터마켓은 NXT만 거래하므로 통합 분봉이 필요. */
-    static boolean nxtSession(LocalTime t) {
-        return t.isBefore(REG_OPEN) || !t.isBefore(REG_CLOSE);
-    }
-
     private boolean withinWindow(ZonedDateTime now) {
         if (!calendar.isTradingDay(now.toLocalDate())) return false;   // 주말·공휴일
-        LocalTime t = now.toLocalTime();
-        return !t.isBefore(TRACK_OPEN) && !t.isAfter(TRACK_CLOSE);
+        return TradingSession.withinExtendedHours(now.toLocalTime());
     }
-
-    /**
-     * 공시 후 주가 통계 한 건. 모든 %(discPct·endPct·mfePct·maePct)는 전일종가 대비 당일 등락률이다
-     * (prdyClose=0이면 기준가 대비로 폴백). 단 pattern은 기준가 대비 움직임으로 분류한 결과다.
-     *
-     * @param prdyClose         전일종가(원, 표기 %의 기준) — 0이면 기준가로 폴백한 상태
-     * @param baseline          기준가(공시 PRE_MIN분 전 봉 종가, 원) — 패턴 분류 기준점
-     * @param baselineOffsetMin 기준가 봉이 공시 시점에서 몇 분 전인지(보통 PRE_MIN)
-     * @param discPrice         시작가 = 공시 2분전 봉 종가(원, baseline과 동일)
-     * @param discPct           시작가의 당일 등락률(전일종가 대비, %)
-     * @param endPrice          종료가(공시+창 봉 종가, 원)
-     * @param endMin            종료 시점까지 경과(분) — 보통 WINDOW_MIN, 마감에 잘리면 그보다 작음
-     * @param endPct            종료가의 당일 등락률(전일종가 대비, %)
-     * @param mfePct            고점의 당일 등락률(전일종가 대비, %)
-     * @param peakPrice         고점(원)
-     * @param peakMin           고점 발생 시점(공시 기준 경과 분)
-     * @param peakAt            고점 발생 시계 시각(예: 10:07)
-     * @param maePct            저점의 당일 등락률(전일종가 대비, %)
-     * @param troughPrice       저점(원)
-     * @param troughMin         저점 발생 시점(공시 기준 경과 분)
-     * @param troughAt          저점 발생 시계 시각
-     * @param pattern           움직임 패턴(기준가 대비 움직임으로 분류)
-     */
-    record Stats(long prdyClose, long baseline, long baselineOffsetMin, long discPrice, double discPct,
-                 long endPrice, long endMin, double endPct,
-                 double mfePct, long peakPrice, long peakMin, LocalTime peakAt,
-                 double maePct, long troughPrice, long troughMin, LocalTime troughAt, String pattern) {}
 }

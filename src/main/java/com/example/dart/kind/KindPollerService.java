@@ -1,5 +1,8 @@
 package com.example.dart.kind;
 
+import com.example.dart.common.infra.PollBackoff;
+import com.example.dart.common.infra.PollWorker;
+import com.example.dart.common.infra.RetryScheduler;
 import com.example.dart.config.AppConfig;
 import com.example.dart.filter.NewsFilter;
 import com.example.dart.notify.Notifier;
@@ -22,9 +25,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -70,13 +70,13 @@ public class KindPollerService {
     private final MarketCalendar calendar;
     private final Set<String> allowedMarkets;
     private final int intervalSec;
-    private final ScheduledExecutorService scheduler;
-    private final ScheduledExecutorService enrichmentPool;
+    private final PollWorker scheduler;
+    private final PollWorker enrichmentPool;
+    private final RetryScheduler enrichRetry;
     /** 자동매매 트리거 리스너 — 비활성 시 null(무동작). 계약 규모 확정 시점에 호출한다. */
     private com.example.dart.trade.TradeSignalListener tradeListener;
 
-    private int consecutiveFailures = 0;
-    private int skipPolls = 0;
+    private final PollBackoff backoff = new PollBackoff();
 
     public KindPollerService(KindClient client, NewsFilter newsFilter, Notifier notifier,
                              KindAlertComposer alertComposer, KindDocumentClient docClient,
@@ -100,8 +100,9 @@ public class KindPollerService {
                         .map(String::trim).filter(s -> !s.isEmpty())
                         .collect(Collectors.toUnmodifiableSet());
         this.intervalSec = config.kindPollIntervalSec();
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "kind-poller"));
-        this.enrichmentPool = Executors.newScheduledThreadPool(2, r -> new Thread(r, "kind-enrich"));
+        this.scheduler = new PollWorker("kind-poller");
+        this.enrichmentPool = new PollWorker("kind-enrich", 2);
+        this.enrichRetry = new RetryScheduler(enrichmentPool, ENRICH_RETRY_DELAY_SEC, ENRICH_MAX_ATTEMPTS);
     }
 
     /** 자동매매 트리거 리스너를 등록한다(선택). null이면 자동매매 미동작. */
@@ -111,32 +112,17 @@ public class KindPollerService {
 
     public void start() {
         log.info("KIND 폴링 시작 (주기: {}초, 운영시간 {}~{} KST)", intervalSec, OPEN, CLOSE);
-        scheduler.scheduleWithFixedDelay(this::poll, 0, intervalSec, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::poll, 0, intervalSec);
     }
 
     public void stop() {
-        scheduler.shutdown();
-        enrichmentPool.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-            if (!enrichmentPool.awaitTermination(5, TimeUnit.SECONDS)) {
-                enrichmentPool.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            enrichmentPool.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        scheduler.stop();
+        enrichmentPool.stop();
         log.info("KIND 폴링 중지 완료");
     }
 
     private void poll() {
-        if (skipPolls > 0) {
-            skipPolls--;
-            return;
-        }
+        if (backoff.shouldSkip()) return;
         ZonedDateTime now = ZonedDateTime.now(KST);
         if (!calendar.isTradingDay(now.toLocalDate())) return;   // 주말·공휴일엔 거래소 공시 없음
         LocalTime t = now.toLocalTime();
@@ -145,13 +131,12 @@ public class KindPollerService {
         List<KindDisclosure> disclosures;
         try {
             disclosures = client.fetchToday();
-            consecutiveFailures = 0;
+            backoff.success();
         } catch (Exception e) {
-            consecutiveFailures++;
             // 연속 실패 시 폴링을 건너뛰며 점진 백오프 — 차단·점검 중 무의미한 재시도 억제
-            skipPolls = Math.min(1 << consecutiveFailures, 40);
+            int skips = backoff.failure();
             log.warn("KIND 조회 실패 ({}연속) — {}회 폴링 건너뜀: {}",
-                    consecutiveFailures, skipPolls, e.toString());
+                    backoff.consecutiveFailures(), skips, e.toString());
             return;
         }
 
@@ -189,11 +174,11 @@ public class KindPollerService {
         // (정정 본문은 정정전/정정후가 섞여 계약금액 파싱이 틀리므로 비율 분석 자체를 건너뛴다.)
         if (NewsFilter.CATEGORY_CONTRACT.equals(match.get().category())
                 && !NewsFilter.isCorrection(d.title())) {
-            scheduleEnrichment(d, 1);
+            scheduleEnrichment(d);
         } else if (NewsFilter.isStockCancellation(d.title())) {
             // 주식소각결정 — KIND 뷰어 본문에서 소각예정금액을 뽑아 시총 대비%와 함께 보강한다.
             // DART 폴러는 KIND 선행 시 소각 보강을 생략(PollerService)하므로 이 경로가 유일한 보강이다.
-            scheduleCancellationEnrichment(d, 1);
+            scheduleCancellationEnrichment(d);
         }
     }
 
@@ -201,32 +186,25 @@ public class KindPollerService {
      * KIND 뷰어 본문을 파싱해 규모 분석 후속 메시지를 보낸다. KIND 선행 공시는 DART가 보강을 건너뛰므로
      * (PollerService 참고) 이 경로가 유일한 규모 분석이다 — 본문은 DART 원문 지연과 무관하게 즉시 받을 수 있다.
      */
-    private void scheduleEnrichment(KindDisclosure d, int attempt) {
-        enrichmentPool.submit(() -> {
-            try {
-                KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
-                DocumentParser.ContractInfo c =
-                        documentParser.extractContractFromText(documentParser.htmlToPlainText(doc.bodyHtml()));
-                OptionalLong cap = doc.stockCode() != null
-                        ? quoteClient.marketCapWon(doc.stockCode())
-                        : OptionalLong.empty();
-                log.info("KIND 규모 분석 [{} - {}] 계약금액 {}", d.company(), d.title(),
-                        c.contractWon().isPresent() ? KoreanMoney.format(c.contractWon().getAsLong()) : "미추출");
-                notifier.send(alertComposer.composeFollowup(d, c, cap));
-                fireTradeSignal(d, doc.stockCode(), c);
-            } catch (Exception e) {
-                if (attempt < ENRICH_MAX_ATTEMPTS) {
-                    log.info("KIND 본문 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
-                            ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString());
-                    enrichmentPool.schedule(() -> scheduleEnrichment(d, attempt + 1),
-                            ENRICH_RETRY_DELAY_SEC, TimeUnit.SECONDS);
-                } else {
-                    log.warn("KIND 본문 보강 {}회 실패 — 규모 분석 생략: {} - {}",
-                            ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
-                    notifier.send(String.format("📊 **시총·매출 대비** | %s — %s\n상세 조회 실패",
-                            d.company(), d.title()));
-                }
-            }
+    private void scheduleEnrichment(KindDisclosure d) {
+        enrichRetry.run(() -> {
+            KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
+            DocumentParser.ContractInfo c =
+                    documentParser.extractContractFromText(documentParser.htmlToPlainText(doc.bodyHtml()));
+            OptionalLong cap = doc.stockCode() != null
+                    ? quoteClient.marketCapWon(doc.stockCode())
+                    : OptionalLong.empty();
+            log.info("KIND 규모 분석 [{} - {}] 계약금액 {}", d.company(), d.title(),
+                    c.contractWon().isPresent() ? KoreanMoney.format(c.contractWon().getAsLong()) : "미추출");
+            notifier.send(alertComposer.composeFollowup(d, c, cap));
+            fireTradeSignal(d, doc.stockCode(), c);
+        }, (e, attempt) -> log.info("KIND 본문 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
+                ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString()),
+        e -> {
+            log.warn("KIND 본문 보강 {}회 실패 — 규모 분석 생략: {} - {}",
+                    ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
+            notifier.send(String.format("📊 **시총·매출 대비** | %s — %s\n상세 조회 실패",
+                    d.company(), d.title()));
         });
     }
 
@@ -235,31 +213,24 @@ public class KindPollerService {
      * 본문 조회 실패만 재시도하고, 조회는 됐으나 금액을 못 뽑으면 금액 줄 없이 시총만 보낸다
      * (계약 규모 분석과 동일한 관용). 본문은 DART 원문 지연과 무관하게 즉시 받을 수 있다.
      */
-    private void scheduleCancellationEnrichment(KindDisclosure d, int attempt) {
-        enrichmentPool.submit(() -> {
-            try {
-                KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
-                OptionalLong amount = documentParser.cancellationAmountWon(
-                        documentParser.htmlToPlainText(doc.bodyHtml()));
-                OptionalLong cap = doc.stockCode() != null
-                        ? quoteClient.marketCapWon(doc.stockCode())
-                        : OptionalLong.empty();
-                log.info("KIND 소각금액 분석 [{} - {}] {}", d.company(), d.title(),
-                        amount.isPresent() ? KoreanMoney.format(amount.getAsLong()) : "미추출");
-                notifier.send(alertComposer.composeCancellation(d, amount, cap));
-            } catch (Exception e) {
-                if (attempt < ENRICH_MAX_ATTEMPTS) {
-                    log.info("KIND 소각 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
-                            ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString());
-                    enrichmentPool.schedule(() -> scheduleCancellationEnrichment(d, attempt + 1),
-                            ENRICH_RETRY_DELAY_SEC, TimeUnit.SECONDS);
-                } else {
-                    log.warn("KIND 소각 보강 {}회 실패 — 소각금액 생략: {} - {}",
-                            ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
-                    notifier.send(String.format("📊 **시총·소각금액** | %s — %s\n상세 조회 실패",
-                            d.company(), d.title()));
-                }
-            }
+    private void scheduleCancellationEnrichment(KindDisclosure d) {
+        enrichRetry.run(() -> {
+            KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
+            OptionalLong amount = documentParser.cancellationAmountWon(
+                    documentParser.htmlToPlainText(doc.bodyHtml()));
+            OptionalLong cap = doc.stockCode() != null
+                    ? quoteClient.marketCapWon(doc.stockCode())
+                    : OptionalLong.empty();
+            log.info("KIND 소각금액 분석 [{} - {}] {}", d.company(), d.title(),
+                    amount.isPresent() ? KoreanMoney.format(amount.getAsLong()) : "미추출");
+            notifier.send(alertComposer.composeCancellation(d, amount, cap));
+        }, (e, attempt) -> log.info("KIND 소각 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
+                ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString()),
+        e -> {
+            log.warn("KIND 소각 보강 {}회 실패 — 소각금액 생략: {} - {}",
+                    ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
+            notifier.send(String.format("📊 **시총·소각금액** | %s — %s\n상세 조회 실패",
+                    d.company(), d.title()));
         });
     }
 

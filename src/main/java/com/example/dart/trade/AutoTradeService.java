@@ -1,5 +1,7 @@
 package com.example.dart.trade;
 
+import com.example.dart.common.domain.TradingSession;
+import com.example.dart.common.infra.PollWorker;
 import com.example.dart.config.AppConfig;
 import com.example.dart.kis.KisClient;
 import com.example.dart.kis.MinuteCandle;
@@ -19,9 +21,6 @@ import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 공시 기반 자동매매 — Stage 1: 드라이런(모의 시뮬레이션).
@@ -40,12 +39,6 @@ public class AutoTradeService implements TradeSignalListener {
     private static final DateTimeFormatter HHMMSS = DateTimeFormatter.ofPattern("HHmmss");
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 
-    /** 감시 운영시간 — NXT 프리마켓 08:00 ~ 애프터마켓 20:00. 정규장 밖은 통합("UN") 분봉으로 조회. */
-    private static final LocalTime TRACK_OPEN = LocalTime.of(8, 0);
-    private static final LocalTime TRACK_CLOSE = LocalTime.of(20, 0);
-    private static final LocalTime REG_OPEN = LocalTime.of(9, 0);
-    private static final LocalTime REG_CLOSE = LocalTime.of(15, 30);
-
     private final KisClient kisClient;
     private final Notifier notifier;
     private final MarketCalendar calendar;
@@ -62,14 +55,7 @@ public class AutoTradeService implements TradeSignalListener {
     private final Map<String, Position> open = new ConcurrentHashMap<>();
     /** 처리한 공시 접수번호 — 같은 공시로 재진입 방지. */
     private final Set<String> handled = ConcurrentHashMap.newKeySet();
-    private final ScheduledExecutorService scheduler =
-            Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "auto-trade"));
-
-    /** 열린(모의) 포지션 한 건. */
-    record Position(String stockCode, String corpName, long entryPrice, long qty,
-                    ZonedDateTime entryAt, double salesRatioPct) {
-        long budget() { return entryPrice * qty; }
-    }
+    private final PollWorker scheduler = new PollWorker("auto-trade");
 
     public AutoTradeService(KisClient kisClient, Notifier notifier, MarketCalendar calendar, AppConfig config) {
         this.kisClient = kisClient;
@@ -85,20 +71,14 @@ public class AutoTradeService implements TradeSignalListener {
     }
 
     public void start() {
-        scheduler.scheduleWithFixedDelay(this::monitor, monitorSec, monitorSec, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::monitor, monitorSec, monitorSec);
         log.info("🤖 공시 자동매매(드라이런) 활성 — 트리거: 매출대비≥{}%, 예산 {}, 손절 -{}% / 익절 +{}%, 동시 {}종목, 감시 {}초, 장마감청산 {}",
                 trimPct(minSalesRatio), KoreanMoney.format(budgetWon), trimPct(stopLossPct), trimPct(takeProfitPct),
                 maxPositions, monitorSec, eodClose);
     }
 
     public void stop() {
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) scheduler.shutdownNow();
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        scheduler.stop();
     }
 
     @Override
@@ -124,7 +104,7 @@ public class AutoTradeService implements TradeSignalListener {
                 return;
             }
             long entry = price.getAsLong();
-            long qty = qtyFor(budgetWon, entry);
+            long qty = Position.qtyFor(budgetWon, entry);
             if (qty <= 0) {
                 log.info("자동매매 진입 생략(예산<1주, 고가주): {} {} 진입가 {}원", stockCode, corpName, entry);
                 return;
@@ -158,7 +138,7 @@ public class AutoTradeService implements TradeSignalListener {
                 OptionalLong cur = currentPrice(p.stockCode(), now);
                 if (cur.isEmpty()) continue;
                 long price = cur.getAsLong();
-                double pnl = pnlPct(p.entryPrice(), price);
+                double pnl = Position.pnlPct(p.entryPrice(), price);
                 if (pnl <= -stopLossPct) {
                     exit(p, price, pnl, now, "손절");
                 } else if (pnl >= takeProfitPct) {
@@ -192,29 +172,11 @@ public class AutoTradeService implements TradeSignalListener {
     private OptionalLong currentPrice(String code, ZonedDateTime now) {
         LocalTime nowMin = now.toLocalTime().truncatedTo(ChronoUnit.MINUTES);
         String endHms = nowMin.format(HHMMSS);
-        boolean extended = nxtSession(nowMin);
-        List<MinuteCandle> candles = kisClient.minuteCandles(code, endHms, extended ? "UN" : "J");
-        if (candles.isEmpty() && extended) candles = kisClient.minuteCandles(code, endHms, "J");
+        List<MinuteCandle> candles =
+                kisClient.minuteCandlesWithFallback(code, endHms, TradingSession.nxtSession(nowMin));
         if (candles.isEmpty()) return OptionalLong.empty();
         long close = latest(candles).close();
         return close > 0 ? OptionalLong.of(close) : OptionalLong.empty();
-    }
-
-    // ── 순수 함수(테스트용) ────────────────────────────────────────────────
-
-    /** 예산으로 살 수 있는 정수 주식 수. 가격이 0 이하면 0. */
-    static long qtyFor(long budgetWon, long price) {
-        return price <= 0 ? 0 : budgetWon / price;
-    }
-
-    /** 진입가 대비 손익률(%). */
-    static double pnlPct(long entryPrice, long currentPrice) {
-        return entryPrice <= 0 ? 0.0 : (currentPrice - entryPrice) * 100.0 / entryPrice;
-    }
-
-    /** 정규장 밖(프리·애프터마켓, NXT만 거래)이면 true — 통합("UN") 분봉 필요. */
-    static boolean nxtSession(LocalTime t) {
-        return t.isBefore(REG_OPEN) || !t.isBefore(REG_CLOSE);
     }
 
     private static MinuteCandle latest(List<MinuteCandle> candles) {
@@ -227,8 +189,7 @@ public class AutoTradeService implements TradeSignalListener {
 
     private boolean withinWindow(ZonedDateTime now) {
         if (!calendar.isTradingDay(now.toLocalDate())) return false;   // 주말·공휴일
-        LocalTime t = now.toLocalTime();
-        return !t.isBefore(TRACK_OPEN) && !t.isAfter(TRACK_CLOSE);
+        return TradingSession.withinExtendedHours(now.toLocalTime());
     }
 
     private static LocalTime parseTime(String hhmm, LocalTime fallback) {

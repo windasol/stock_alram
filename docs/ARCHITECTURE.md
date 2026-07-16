@@ -31,9 +31,14 @@ DART와 KIND는 별개 컨텍스트가 **아니다** — 같은 공시 도메인
 disclosure ──(TradeSignalListener 포트만)──▶ trade
 disclosure ──(DisclosurePriceTracker 공개 API)──▶ pricetrack
 kis ──(NewsHeadlineBuffer 공개 API)──▶ news
+pricetrack ──(공유 KisClient·MinuteCandle)──▶ kis
+trade ──(공유 KisClient·MinuteCandle)──▶ kis
 모든 컨텍스트 ──▶ notify, llm, common, config
 App ──▶ 전부 (유일한 조립 루트)
 ```
+
+pricetrack·trade의 kis 의존은 KIS 토큰 한도(분당 1회) 때문에 단일 `KisClient`를 공유해야 해서 생기는
+의도된 의존이다 — kis의 application/infra 구체 구현이 아닌 `KisClient`(공유 어댑터)와 도메인 record만 쓴다.
 
 - 위에 없는 컨텍스트 간 import는 **금지**.
 - 타 컨텍스트의 `infra/` import는 **어떤 경우에도 금지** (공개 진입점은 application/domain 층에 있어야 한다).

@@ -21,34 +21,34 @@ class DisclosurePriceTrackerTest {
 
     @Test
     void 변동_거의_없으면_횡보() {
-        assertEquals("횡보", DisclosurePriceTracker.classify(0.3, -0.2, 0.1, 60, 120));
+        assertEquals("횡보", Stats.classify(0.3, -0.2, 0.1, 60, 120));
     }
 
     @Test
     void 올라서_고점_근처로_끝나면_계속_상승() {
         // 고점 +4.0%, 종료 +3.9% — 고점에서 거의 안 내려옴.
-        assertEquals("계속 상승", DisclosurePriceTracker.classify(4.0, -0.1, 3.9, 300, 30));
+        assertEquals("계속 상승", Stats.classify(4.0, -0.1, 3.9, 300, 30));
     }
 
     @Test
     void 내려서_저점_근처로_끝나면_계속_하락() {
-        assertEquals("계속 하락", DisclosurePriceTracker.classify(0.2, -3.5, -3.4, 30, 300));
+        assertEquals("계속 하락", Stats.classify(0.2, -3.5, -3.4, 30, 300));
     }
 
     @Test
     void 고점이_저점보다_먼저면_올랐다_내림() {
-        assertEquals("올랐다 내림", DisclosurePriceTracker.classify(5.0, -2.0, -1.0, 120, 480));
+        assertEquals("올랐다 내림", Stats.classify(5.0, -2.0, -1.0, 120, 480));
     }
 
     @Test
     void 저점이_고점보다_먼저면_내렸다_오름() {
-        assertEquals("내렸다 오름", DisclosurePriceTracker.classify(3.0, -4.0, 0.5, 480, 120));
+        assertEquals("내렸다 오름", Stats.classify(3.0, -4.0, 0.5, 480, 120));
     }
 
     @Test
     void 기준가_안깨도_고점에서_되돌리면_올랐다_내림() {
         // 우진아이엔에스 케이스: 고점 +5.4% 찍고 +0.6%로 복귀(기준가 밑으론 안 감). 계속 상승이 아님.
-        assertEquals("올랐다 내림", DisclosurePriceTracker.classify(5.4, 0.0, 0.6, 0, 60));
+        assertEquals("올랐다 내림", Stats.classify(5.4, 0.0, 0.6, 0, 60));
     }
 
     // startDirection(discPrice, endPrice) — 시작가 대비 10분 뒤 종가의 순방향(±FLAT_EPS_PCT=0.5% 임계).
@@ -80,20 +80,7 @@ class DisclosurePriceTrackerTest {
         assertEquals("하락", DisclosurePriceTracker.startDirection(10_000, 9_950));    // -0.5% 경계
     }
 
-    // nxtSession(t) — 정규장 밖(프리·애프터마켓)이면 통합("UN") 분봉이 필요
-
-    @Test
-    void 정규장_안이면_NXT세션_아님() {
-        assertFalse(DisclosurePriceTracker.nxtSession(LocalTime.of(10, 5)));
-        assertFalse(DisclosurePriceTracker.nxtSession(LocalTime.of(9, 0)));   // 09:00 개장
-    }
-
-    @Test
-    void 프리_애프터마켓이면_NXT세션() {
-        assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(8, 30)));   // 프리마켓
-        assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(15, 30)));  // 애프터마켓 시작
-        assertTrue(DisclosurePriceTracker.nxtSession(LocalTime.of(18, 0)));   // 애프터마켓
-    }
+    // nxtSession은 common/domain TradingSession으로 통합 — TradingSessionTest에서 검증한다.
 
     // pickAtOrBefore(candles, target) — "공시 2분 전 가격" 봉 선택(≤target 중 가장 늦은 봉).
 
@@ -162,7 +149,7 @@ class DisclosurePriceTrackerTest {
                 c(10, 13, 10_500, 10_510, 9_700, 9_750),   // +8분 저점
                 c(10, 15, 9_750, 9_810, 9_760, 9_800));    // +10분 종료
 
-        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+        Stats st = Stats.compute(
                 candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L);
 
         assertEquals(10_000, st.baseline());
@@ -194,7 +181,7 @@ class DisclosurePriceTrackerTest {
                 c(10, 13, 188_200, 188_210, 187_800, 187_900),  // 저점 187,800
                 c(10, 15, 187_900, 188_010, 187_850, 188_000)); // 종료 188,000
 
-        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+        Stats st = Stats.compute(
                 candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 200_000L);
 
         // 표기 %는 전일종가 200,000 대비 — +0.x%가 아니라 실제 당일 등락률(-6%대)로 찍혀야 한다.
@@ -217,7 +204,7 @@ class DisclosurePriceTrackerTest {
                 c(10, 5, 10_100, 10_350, 10_090, 10_300),  // 공시 시점(시작가로 쓰면 안 됨)
                 c(10, 15, 10_300, 10_320, 10_280, 10_310)); // 종료
 
-        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+        Stats st = Stats.compute(
                 candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L);
 
         assertEquals(10_000, st.baseline());
@@ -232,7 +219,7 @@ class DisclosurePriceTrackerTest {
                 c(10, 5, 9_500, 9_700, 9_500, 9_650),
                 c(10, 15, 9_650, 9_700, 9_600, 9_680));
 
-        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+        Stats st = Stats.compute(
                 candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L);
 
         assertEquals(9_500, st.baseline());
@@ -250,7 +237,7 @@ class DisclosurePriceTrackerTest {
                 c(11, 54, 95_000, 101_000, 95_000, 100_000), // 고점 101,000
                 c(12, 3, 100_000, 100_010, 97_000, 98_000)); // 종료
 
-        DisclosurePriceTracker.Stats st = DisclosurePriceTracker.computeStats(
+        Stats st = Stats.compute(
                 candles, LocalTime.of(11, 53), LocalTime.of(11, 51), LocalTime.of(12, 3), 100_000L);
 
         assertEquals(94_000, st.discPrice());
@@ -269,7 +256,7 @@ class DisclosurePriceTrackerTest {
     void 창에_봉이_없으면_null() {
         // 모든 봉이 창 밖(11시대) → null.
         List<MinuteCandle> candles = List.of(c(11, 0, 100, 100, 100, 100));
-        assertNull(DisclosurePriceTracker.computeStats(
+        assertNull(Stats.compute(
                 candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L));
     }
 
@@ -277,7 +264,7 @@ class DisclosurePriceTrackerTest {
     void 공시후_봉이_없으면_null() {
         // 기준가 봉만 있고 공시 시점 이후 봉이 없음 → null.
         List<MinuteCandle> candles = List.of(c(10, 3, 10_000, 10_010, 9_990, 10_000));
-        assertNull(DisclosurePriceTracker.computeStats(
+        assertNull(Stats.compute(
                 candles, LocalTime.of(10, 5), LocalTime.of(10, 3), LocalTime.of(10, 15), 0L));
     }
 }
