@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.disclosure.infra.DartClient;
 import com.example.dart.disclosure.infra.DocumentNotReadyException;
 import com.example.dart.disclosure.domain.NewsFilter;
@@ -20,12 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * AlertComposer 특성화(스냅샷) 테스트 — 메시지 출력 문자열을 고정 입력으로 못박는다.
+ * DisclosureEnricher 특성화(스냅샷) 테스트 — 메시지 출력 문자열을 고정 입력으로 못박는다.
  *
  * 리팩토링(조립 로직 분리·Treasury 3중복 통합) 전후로 알림 문자열이 바이트 단위로
  * 동일함을 보장하는 안전망. 기대값은 현재 구현의 실제 출력을 그대로 기록한 것이다.
  */
-class AlertComposerTest {
+class DisclosureEnricherTest {
 
     private static final Disclosure CONTRACT = new Disclosure(
             "테스트전자", "00123456", "123456", "Y",
@@ -50,11 +51,11 @@ class AlertComposerTest {
     }
 
     private static class StubDocs extends DocumentService {
-        DocumentParser.ContractInfo contract;
+        ContractInfo contract;
         String plainText;
         RuntimeException failure;
         StubDocs() { super(new StubDart(OptionalLong.empty()), new DocumentParser()); }
-        @Override public DocumentParser.ContractInfo contractInfo(String rceptNo) {
+        @Override public ContractInfo contractInfo(String rceptNo) {
             if (failure != null) throw failure;
             return contract;
         }
@@ -93,8 +94,8 @@ class AlertComposerTest {
     }
 
     /** KIND 없이(DART 경로만) 구성한 컴포저 — 시총 2,000억, DART 매출 405억 기본. */
-    private static AlertComposer dartOnlyComposer(StubDocs docs) {
-        return new AlertComposer(docs, new NewsFilter(),
+    private static DisclosureEnricher dartOnlyComposer(StubDocs docs) {
+        return new DisclosureEnricher(docs, new NewsFilter(),
                 new StubQuote(OptionalLong.of(200_000_000_000L)),
                 new StubDart(OptionalLong.of(40_500_000_000L)),
                 null, null, new DocumentParser());
@@ -104,7 +105,7 @@ class AlertComposerTest {
 
     @Test
     void 헤더는_감지시각만_변동하고_나머지는_고정_포맷이다() {
-        AlertComposer composer = dartOnlyComposer(new StubDocs());
+        DisclosureEnricher composer = dartOnlyComposer(new StubDocs());
         String msg = composer.composeHeader(CONTRACT, new NewsFilter.TitleMatch("수주·계약", "공급계약"));
         String normalized = msg.replaceFirst("감지 \\d{2}:\\d{2}:\\d{2}", "감지 <TIME>");
         assertEquals("""
@@ -118,7 +119,7 @@ class AlertComposerTest {
         Disclosure correction = new Disclosure(
                 "테스트전자", "00123456", "123456", "Y",
                 "[기재정정]단일판매ㆍ공급계약체결", "20260715000003", "20260715", "테스트전자");
-        AlertComposer composer = dartOnlyComposer(new StubDocs());
+        DisclosureEnricher composer = dartOnlyComposer(new StubDocs());
         String msg = composer.composeHeader(correction, new NewsFilter.TitleMatch("수주·계약", "공급계약"));
         String normalized = msg.replaceFirst("감지 \\d{2}:\\d{2}:\\d{2}", "감지 <TIME>");
         assertEquals("""
@@ -132,7 +133,7 @@ class AlertComposerTest {
     @Test
     void 후속_메시지는_계약금액_매출대비_시총대비_핵심정보를_모두_담는다() {
         StubDocs docs = new StubDocs();
-        docs.contract = new DocumentParser.ContractInfo(
+        docs.contract = new ContractInfo(
                 OptionalLong.of(50_000_000_000L), 12.3, OptionalLong.of(40_500_000_000L),
                 "ABC상사", "2025-01-01 ~ 2026-12-31");
         String msg = dartOnlyComposer(docs).composeFollowup(CONTRACT);
@@ -145,9 +146,9 @@ class AlertComposerTest {
     @Test
     void 명시_비율이_없으면_계약금액을_DART_매출로_나눠_계산한다() {
         StubDocs docs = new StubDocs();
-        docs.contract = new DocumentParser.ContractInfo(
+        docs.contract = new ContractInfo(
                 OptionalLong.of(50_000_000_000L), null, OptionalLong.empty(), null, null);
-        AlertComposer composer = new AlertComposer(docs, new NewsFilter(),
+        DisclosureEnricher composer = new DisclosureEnricher(docs, new NewsFilter(),
                 new StubQuote(OptionalLong.of(200_000_000_000L)),
                 new StubDart(OptionalLong.of(250_000_000_000L)),
                 null, null, new DocumentParser());
@@ -170,7 +171,7 @@ class AlertComposerTest {
     void 원문_미공개_014는_삼키지_않고_전파해_재조회를_트리거한다() {
         StubDocs docs = new StubDocs();
         docs.failure = new DocumentNotReadyException("014");
-        AlertComposer composer = dartOnlyComposer(docs);
+        DisclosureEnricher composer = dartOnlyComposer(docs);
         assertThrows(DocumentNotReadyException.class, () -> composer.composeFollowup(CONTRACT));
     }
 
@@ -179,9 +180,9 @@ class AlertComposerTest {
     @Test
     void 계약_규모_확정_시_자동매매_리스너에_원시값으로_신호를_넘긴다() {
         StubDocs docs = new StubDocs();
-        docs.contract = new DocumentParser.ContractInfo(
+        docs.contract = new ContractInfo(
                 OptionalLong.of(50_000_000_000L), 12.3, OptionalLong.of(40_500_000_000L), null, null);
-        AlertComposer composer = dartOnlyComposer(docs);
+        DisclosureEnricher composer = dartOnlyComposer(docs);
         RecordingListener listener = new RecordingListener();
         composer.setTradeSignalListener(listener);
         composer.composeFollowup(CONTRACT);
@@ -200,9 +201,9 @@ class AlertComposerTest {
                 "테스트전자", "00123456", "123456", "Y",
                 "[기재정정]단일판매ㆍ공급계약체결", "20260715000003", "20260715", "테스트전자");
         StubDocs docs = new StubDocs();
-        docs.contract = new DocumentParser.ContractInfo(
+        docs.contract = new ContractInfo(
                 OptionalLong.of(50_000_000_000L), 12.3, OptionalLong.of(40_500_000_000L), null, null);
-        AlertComposer composer = dartOnlyComposer(docs);
+        DisclosureEnricher composer = dartOnlyComposer(docs);
         RecordingListener listener = new RecordingListener();
         composer.setTradeSignalListener(listener);
         composer.composeFollowup(correction);
@@ -226,7 +227,7 @@ class AlertComposerTest {
     void 자기주식_직접취득은_KIND_본문이_있으면_KIND에서_금액을_뽑는다() {
         StubDocs docs = new StubDocs();
         docs.failure = new RuntimeException("DART 경로를 타면 안 됨");
-        AlertComposer composer = new AlertComposer(docs, new NewsFilter(),
+        DisclosureEnricher composer = new DisclosureEnricher(docs, new NewsFilter(),
                 new StubQuote(OptionalLong.of(200_000_000_000L)),
                 new StubDart(OptionalLong.of(40_500_000_000L)),
                 new StubKind("20260715900001"),
@@ -281,7 +282,7 @@ class AlertComposerTest {
     void 자기주식_원문_미공개_014는_전파해_재조회를_트리거한다() {
         StubDocs docs = new StubDocs();
         docs.failure = new DocumentNotReadyException("014");
-        AlertComposer composer = dartOnlyComposer(docs);
+        DisclosureEnricher composer = dartOnlyComposer(docs);
         assertThrows(DocumentNotReadyException.class, () -> composer.composeTreasury(TREASURY));
     }
 
@@ -298,7 +299,7 @@ class AlertComposerTest {
 
     @Test
     void 시총_매출_둘_다_없으면_타이틀만_보낸다() {
-        AlertComposer composer = new AlertComposer(new StubDocs(), new NewsFilter(),
+        DisclosureEnricher composer = new DisclosureEnricher(new StubDocs(), new NewsFilter(),
                 new StubQuote(OptionalLong.empty()), new StubDart(OptionalLong.empty()),
                 null, null, new DocumentParser());
         Disclosure dividend = new Disclosure(

@@ -5,7 +5,7 @@ import java.util.OptionalLong;
 /**
  * 공시 보강(계약금액·매출액·비율 확정) 직후 자동매매로 넘기는 트리거 신호.
  *
- * 공시 알림 파이프라인(DART {@code AlertComposer} / KIND {@code KindPollerService})이 계약 규모를 계산한
+ * 공시 알림 파이프라인(DART {@code DisclosureEnricher} / KIND {@code KindPollerService})이 계약 규모를 계산한
  * 그 지점에서 호출한다. 자동매매가 비활성이면 리스너는 null이라 아무 일도 일어나지 않는다(기존 알림 흐름 무변화).
  * 임계(≥N%) 판정·중복·한도 등 매매 결정은 전적으로 구현체(AutoTradeService)가 한다.
  *

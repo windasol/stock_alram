@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.infra;
 
+import com.example.dart.disclosure.domain.ContractInfo;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -68,7 +69,7 @@ class DocumentParserTest {
                 + "<tr><td>최근매출액(원)</td><td>150,379,282,702</td></tr>"
                 + "<tr><td>매출액대비(%)</td><td>7.27</td></tr>"
                 + "</table></body></html>";
-        DocumentParser.ContractInfo c =
+        ContractInfo c =
                 parser.extractContractFromText(parser.htmlToPlainText(html.getBytes(StandardCharsets.UTF_8)));
         assertEquals(10_932_184_000L, c.contractWon().getAsLong());
         assertEquals(150_379_282_702L, c.recentRevenueWon().getAsLong());
@@ -147,28 +148,28 @@ class DocumentParserTest {
     void 명시비율이_있으면_그대로_쓴다() {
         // 공시가 매출액대비 30%로 적었으면(거래소 표준 지표) 연환산 없이 그대로 표시 — 다년 계약이어도 변형 안 함.
         assertEquals("매출 대비 30.0%",
-                DocumentParser.salesRatioLabel(1L, java.util.OptionalLong.empty(), 30.0));
+                ContractInfo.salesRatioLabel(1L, java.util.OptionalLong.empty(), 30.0));
     }
 
     @Test
     void 명시비율_없으면_계약금액_매출_총비율() {
         // 명시값이 없을 때만 계약금액÷매출액으로 총비율 계산 (연환산 없음).
         assertEquals("매출 대비 90.0%",
-                DocumentParser.salesRatioLabel(45_000_000_000L, java.util.OptionalLong.of(50_000_000_000L), null));
+                ContractInfo.salesRatioLabel(45_000_000_000L, java.util.OptionalLong.of(50_000_000_000L), null));
         assertEquals("매출 대비 50.0%",
-                DocumentParser.salesRatioLabel(50_000_000_000L, java.util.OptionalLong.of(100_000_000_000L), null));
+                ContractInfo.salesRatioLabel(50_000_000_000L, java.util.OptionalLong.of(100_000_000_000L), null));
     }
 
     @Test
     void 명시비율도_매출도_없으면_null() {
-        assertNull(DocumentParser.salesRatioLabel(50_000_000_000L, java.util.OptionalLong.empty(), null));
+        assertNull(ContractInfo.salesRatioLabel(50_000_000_000L, java.util.OptionalLong.empty(), null));
     }
 
     @Test
     void salesRatioValue_공시명시값_우선() {
         // 자동매매 트리거용 숫자값 — 명시값(30%)이 있으면 계약÷매출을 무시하고 그대로 쓴다.
         java.util.OptionalDouble v =
-                DocumentParser.salesRatioValue(45_000_000_000L, java.util.OptionalLong.of(50_000_000_000L), 30.0);
+                ContractInfo.salesRatioValue(45_000_000_000L, java.util.OptionalLong.of(50_000_000_000L), 30.0);
         assertTrue(v.isPresent());
         assertEquals(30.0, v.getAsDouble(), 0.001);
     }
@@ -176,16 +177,16 @@ class DocumentParserTest {
     @Test
     void salesRatioValue_명시없으면_계약나누기매출() {
         java.util.OptionalDouble v =
-                DocumentParser.salesRatioValue(50_000_000_000L, java.util.OptionalLong.of(100_000_000_000L), null);
+                ContractInfo.salesRatioValue(50_000_000_000L, java.util.OptionalLong.of(100_000_000_000L), null);
         assertTrue(v.isPresent());
         assertEquals(50.0, v.getAsDouble(), 0.001);
     }
 
     @Test
     void salesRatioValue_명시도_매출도_없으면_empty() {
-        assertTrue(DocumentParser.salesRatioValue(50_000_000_000L, java.util.OptionalLong.empty(), null).isEmpty());
+        assertTrue(ContractInfo.salesRatioValue(50_000_000_000L, java.util.OptionalLong.empty(), null).isEmpty());
         // 매출 0도 나눗셈 불가 → empty.
-        assertTrue(DocumentParser.salesRatioValue(50_000_000_000L, java.util.OptionalLong.of(0L), null).isEmpty());
+        assertTrue(ContractInfo.salesRatioValue(50_000_000_000L, java.util.OptionalLong.of(0L), null).isEmpty());
     }
 
     @Test

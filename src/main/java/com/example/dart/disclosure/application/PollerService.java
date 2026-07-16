@@ -7,7 +7,7 @@ import com.example.dart.disclosure.infra.DartClient;
 import com.example.dart.disclosure.infra.DocumentNotReadyException;
 import com.example.dart.disclosure.domain.NewsFilter;
 import com.example.dart.disclosure.domain.Disclosure;
-import com.example.dart.disclosure.application.AlertComposer;
+import com.example.dart.disclosure.application.DisclosureEnricher;
 import com.example.dart.notify.Notifier;
 import com.example.dart.pricetrack.application.DisclosurePriceTracker;
 import com.example.dart.disclosure.domain.DisclosureKeys;
@@ -55,7 +55,7 @@ public class PollerService {
     private final DartClient dartClient;
     private final NewsFilter newsFilter;
     private final Notifier notifier;
-    private final AlertComposer alertComposer;
+    private final DisclosureEnricher enricher;
     private final SeenStore seenStore;
     private final SeenStore disclosureKeys;
     private final AppConfig config;
@@ -68,13 +68,13 @@ public class PollerService {
     private final RetryScheduler enrichRetry;
 
     public PollerService(DartClient dartClient, NewsFilter newsFilter,
-                         Notifier notifier, AlertComposer alertComposer,
+                         Notifier notifier, DisclosureEnricher enricher,
                          SeenStore seenStore, SeenStore disclosureKeys, AppConfig config,
                          DisclosurePriceTracker priceTracker) {
         this.dartClient = dartClient;
         this.newsFilter = newsFilter;
         this.notifier = notifier;
-        this.alertComposer = alertComposer;
+        this.enricher = enricher;
         this.seenStore = seenStore;
         this.disclosureKeys = disclosureKeys;
         this.config = config;
@@ -145,10 +145,10 @@ public class PollerService {
                 log.info("KIND 선행 — KIND가 헤더·규모 분석 담당, DART 생략: {} - {}", d.corpName(), d.reportNm());
             } else if (treasury) {
                 log.info("KIND 선행 — 취득금액·시총·매출 DART가 보강: {} - {}", d.corpName(), d.reportNm());
-                scheduleTreasuryEnrichment(d, () -> alertComposer.composeTreasury(d));
+                scheduleTreasuryEnrichment(d, () -> enricher.composeTreasury(d));
             } else if (trust) {
                 log.info("KIND 선행 — 신탁계약금액·시총·매출 DART가 보강: {} - {}", d.corpName(), d.reportNm());
-                scheduleTreasuryEnrichment(d, () -> alertComposer.composeTreasuryTrust(d));
+                scheduleTreasuryEnrichment(d, () -> enricher.composeTreasuryTrust(d));
             } else if (cancellation) {
                 // 소각은 계약처럼 KIND 폴러가 자기 본문으로 소각금액을 보강하므로 DART는 손을 뗀다.
                 log.info("KIND 선행 — 소각금액은 KIND가 담당, DART 생략: {} - {}", d.corpName(), d.reportNm());
@@ -162,7 +162,7 @@ public class PollerService {
         // 1단계: 감지 즉시 헤더 전송
         log.info("호재 공시 감지 [{}|{}|{}]: {} - {}",
                 d.marketName(), m.category(), m.matchedKeyword(), d.corpName(), d.reportNm());
-        notifier.send(alertComposer.composeHeader(d, m));
+        notifier.send(enricher.composeHeader(d, m));
 
         // 2단계: 보강 — 폴링 루프를 막지 않게 비동기로 후송.
         // 비정정 수주공급계약은 계약금액 대비 매출·시총(빠른 KIND 본문 우선, 실패 시 DART 원문),
@@ -170,12 +170,12 @@ public class PollerService {
         if (contract && !correction) {
             scheduleFastEnrichment(d);
         } else if (treasury) {
-            scheduleTreasuryEnrichment(d, () -> alertComposer.composeTreasury(d));
+            scheduleTreasuryEnrichment(d, () -> enricher.composeTreasury(d));
         } else if (trust) {
-            scheduleTreasuryEnrichment(d, () -> alertComposer.composeTreasuryTrust(d));
+            scheduleTreasuryEnrichment(d, () -> enricher.composeTreasuryTrust(d));
         } else if (cancellation) {
             // DART 선행 — DART가 소각금액 보강(KIND 본문 우선→DART 원문 폴백). 재시도·폴백 로직 공유.
-            scheduleTreasuryEnrichment(d, () -> alertComposer.composeCancellation(d));
+            scheduleTreasuryEnrichment(d, () -> enricher.composeCancellation(d));
         } else {
             scheduleScaleOnly(d);
         }
@@ -187,7 +187,7 @@ public class PollerService {
      * 끝내 못 구하면 기존 DART 원문 경로({@link #scheduleEnrichment})로 폴백한다.
      */
     private void scheduleFastEnrichment(Disclosure d) {
-        fastRetry.run(() -> notifier.send(alertComposer.composeFollowupFast(d)),
+        fastRetry.run(() -> notifier.send(enricher.composeFollowupFast(d)),
                 (e, attempt) -> log.info("빠른 KIND 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
                         FAST_RETRY_DELAY_SEC, attempt, FAST_MAX_ATTEMPTS, d.corpName(), d.reportNm(), e.toString()),
                 e -> {
@@ -210,7 +210,7 @@ public class PollerService {
         }
         enrichmentPool.submit(() -> {
             try {
-                notifier.send(alertComposer.composeScaleOnly(d));
+                notifier.send(enricher.composeScaleOnly(d));
             } catch (Exception e) {
                 log.warn("시총·매출 보강 실패 — 헤더 알림은 이미 전송됨: {} - {}", d.corpName(), d.reportNm(), e);
             }
@@ -235,11 +235,11 @@ public class PollerService {
                 e -> {
                     log.warn("취득금액 원문 미공개 — 재조회 {}회 실패, 시총·매출만 발송: {} - {}",
                             ENRICH_MAX_ATTEMPTS, d.corpName(), d.reportNm());
-                    notifier.send(alertComposer.composeScaleOnly(d));
+                    notifier.send(enricher.composeScaleOnly(d));
                 },
                 e -> {
                     log.warn("취득금액 보강 실패 — 시총·매출만 발송: {} - {}", d.corpName(), d.reportNm(), e);
-                    notifier.send(alertComposer.composeScaleOnly(d));
+                    notifier.send(enricher.composeScaleOnly(d));
                 });
     }
 
@@ -248,7 +248,7 @@ public class PollerService {
      * {@link DocumentNotReadyException}이 올라오므로, 일정 간격으로 재시도한다.
      */
     private void scheduleEnrichment(Disclosure d) {
-        enrichRetry.run(() -> notifier.send(alertComposer.composeFollowup(d)),
+        enrichRetry.run(() -> notifier.send(enricher.composeFollowup(d)),
                 e -> e instanceof DocumentNotReadyException,
                 (e, attempt) -> log.info("원문 미공개 — {}초 뒤 재조회 ({}/{}): {} - {}",
                         ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.corpName(), d.reportNm()),

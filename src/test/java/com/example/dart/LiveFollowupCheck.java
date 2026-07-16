@@ -1,11 +1,12 @@
 package com.example.dart;
 
+import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.disclosure.infra.DartClient;
 import com.example.dart.disclosure.domain.NewsFilter;
 import com.example.dart.disclosure.infra.KindClient;
 import com.example.dart.disclosure.infra.KindDocumentClient;
 import com.example.dart.disclosure.domain.Disclosure;
-import com.example.dart.disclosure.application.AlertComposer;
+import com.example.dart.disclosure.application.DisclosureEnricher;
 import com.example.dart.disclosure.infra.DocumentParser;
 import com.example.dart.common.infra.StockQuoteClient;
 import com.example.dart.disclosure.application.DocumentService;
@@ -36,7 +37,7 @@ class LiveFollowupCheck {
         DocumentParser documentParser = new DocumentParser();
         DocumentService documentService = new DocumentService(dartClient, documentParser);
         NewsFilter newsFilter = new NewsFilter();
-        AlertComposer composer = new AlertComposer(documentService, newsFilter, new StockQuoteClient(), dartClient,
+        DisclosureEnricher composer = new DisclosureEnricher(documentService, newsFilter, new StockQuoteClient(), dartClient,
                 new KindClient(), new KindDocumentClient(), documentParser);
 
         Disclosure[] tests = {

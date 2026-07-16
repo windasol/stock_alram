@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.common.infra.PollBackoff;
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.common.infra.RetryScheduler;
@@ -192,7 +193,7 @@ public class KindPollerService {
     private void scheduleEnrichment(KindDisclosure d) {
         enrichRetry.run(() -> {
             KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
-            DocumentParser.ContractInfo c =
+            ContractInfo c =
                     documentParser.extractContractFromText(documentParser.htmlToPlainText(doc.bodyHtml()));
             OptionalLong cap = doc.stockCode() != null
                     ? quoteClient.marketCapWon(doc.stockCode())
@@ -238,11 +239,11 @@ public class KindPollerService {
     }
 
     /** 계약 규모 확정 시 자동매매 리스너에 신호 전달(KIND 경로) — 리스너 없음·종목코드 없음·계약금액/비율 미상이면 무시. */
-    private void fireTradeSignal(KindDisclosure d, String stockCode, DocumentParser.ContractInfo c) {
+    private void fireTradeSignal(KindDisclosure d, String stockCode, ContractInfo c) {
         if (tradeListener == null || stockCode == null || stockCode.isBlank() || c.contractWon().isEmpty()) return;
         long won = c.contractWon().getAsLong();
         java.util.OptionalDouble ratio =
-                DocumentParser.salesRatioValue(won, c.recentRevenueWon(), c.salesRatioPct());
+                ContractInfo.salesRatioValue(won, c.recentRevenueWon(), c.salesRatioPct());
         if (ratio.isEmpty()) return;
         try {
             tradeListener.onContractSignal(d.acptNo(), d.company(), stockCode, won,

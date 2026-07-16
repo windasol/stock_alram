@@ -29,7 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 예산(기본 100만원)으로 몇 주를 샀을지·진입 후 -손절%/+익절%/장마감에 어떻게 청산됐을지를
  * 실제 KIS 분봉으로 감시하며 알림·로그로 남긴다. **실제 주문은 내지 않는다**(mode=dryrun).
  *
- * 트리거는 {@link TradeSignalListener}로 공시 알림 파이프라인(AlertComposer / KIND 폴러)에서 들어온다.
+ * 트리거는 {@link TradeSignalListener}로 공시 알림 파이프라인(DisclosureEnricher / KIND 폴러)에서 들어온다.
  * 진입 지연(≥임계% 판정이 본문 파싱 후라 1~10분 소요)은 의도적으로 그대로 두고 드라이런으로 실측한다.
  */
 public class AutoTradeService implements TradeSignalListener {

@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.common.domain.KoreanMoney;
 import com.example.dart.disclosure.domain.NewsFilter;
 import com.example.dart.disclosure.infra.DocumentParser;
@@ -43,7 +44,7 @@ public class KindAlertComposer {
      * @param c         KIND 본문에서 파싱한 핵심값 (계약금액·매출액대비·최근매출액·계약상대방·계약기간)
      * @param marketCap 종목 시가총액(원) — 종목코드 없거나 조회 실패면 empty
      */
-    public String composeFollowup(KindDisclosure d, DocumentParser.ContractInfo c, OptionalLong marketCap) {
+    public String composeFollowup(KindDisclosure d, ContractInfo c, OptionalLong marketCap) {
         StringBuilder sb = new StringBuilder(
                 String.format("📊 **%s시총·매출 대비** | %s — %s",
                         NewsFilter.isCorrection(d.title()) ? "[정정] " : "", d.company(), d.title()));
@@ -53,7 +54,7 @@ public class KindAlertComposer {
             sb.append("\n💰 계약금액 ").append(KoreanMoney.format(won));
 
             // 매출 대비 % — 공시 명시값(거래소 표준) 우선, 없으면 계약금액÷매출액. 연환산은 안 함(공시값과 일치).
-            String salesLabel = DocumentParser.salesRatioLabel(won, c.recentRevenueWon(), c.salesRatioPct());
+            String salesLabel = ContractInfo.salesRatioLabel(won, c.recentRevenueWon(), c.salesRatioPct());
             if (salesLabel != null) {
                 sb.append(" · ").append(salesLabel);
             }

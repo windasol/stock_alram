@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.disclosure.infra.DartClient;
 import com.example.dart.disclosure.infra.DocumentParser;
 import org.slf4j.Logger;
@@ -51,7 +52,7 @@ public class DocumentService {
     }
 
     /** 알림용: 수주공급계약 핵심값(계약금액·매출액대비·최근매출액·계약상대방·계약기간)을 깔끔하게 추출. */
-    public DocumentParser.ContractInfo contractInfo(String rceptNo) {
+    public ContractInfo contractInfo(String rceptNo) {
         log.info("규모 분석 핵심값 조회: {}", rceptNo);
         return documentParser.extractContract(fetchBytes(rceptNo));
     }

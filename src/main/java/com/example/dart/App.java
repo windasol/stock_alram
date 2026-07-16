@@ -21,7 +21,7 @@ import com.example.dart.news.NewsHeadlineBuffer;
 import com.example.dart.news.NewsPollerService;
 import com.example.dart.news.RssClient;
 import com.example.dart.news.RssFeed;
-import com.example.dart.disclosure.application.AlertComposer;
+import com.example.dart.disclosure.application.DisclosureEnricher;
 import com.example.dart.notify.DiscordService;
 import com.example.dart.notify.Notifier;
 import com.example.dart.notify.WebexService;
@@ -82,7 +82,7 @@ public class App {
         // KIND 폴러에서도 같은 인스턴스를 재사용한다. KIND 비활성 시 null이면 빠른 경로는 즉시 폴백한다.
         KindClient kindClient = config.kindEnabled() ? new KindClient() : null;
         KindDocumentClient kindDocumentClient = config.kindEnabled() ? new KindDocumentClient() : null;
-        AlertComposer alertComposer = new AlertComposer(documentService, newsFilter, quoteClient, dartClient,
+        DisclosureEnricher enricher = new DisclosureEnricher(documentService, newsFilter, quoteClient, dartClient,
                 kindClient, kindDocumentClient, documentParser);
 
         Notifier notifier = createNotifier(config, null);
@@ -125,20 +125,20 @@ public class App {
         DisclosurePriceTracker priceTracker = new DisclosurePriceTracker(
                 quoteClient, kisClient, notifier, Path.of("disclosure_price_stats.jsonl"), marketCalendar);
 
-        // 공시 기반 자동매매(드라이런) — 계약 규모(매출 대비 ≥임계%) 신호를 두 공시 소스(DART AlertComposer / KIND)에서
+        // 공시 기반 자동매매(드라이런) — 계약 규모(매출 대비 ≥임계%) 신호를 두 공시 소스(DART DisclosureEnricher / KIND)에서
         // 받아 모의 매매한다. 현재가는 KIS 분봉으로 조회하므로 kisClient가 있어야 동작한다. 비활성/키 없음이면 리스너 null(무동작).
         KindAlertComposer kindAlertComposer = new KindAlertComposer();
         AutoTradeService autoTrader = null;
         if (config.autoTradeEnabled() && kisClient != null) {
             autoTrader = new AutoTradeService(kisClient, notifier, marketCalendar, config);
-            alertComposer.setTradeSignalListener(autoTrader);   // DART 경로 훅(AlertComposer.buildFollowup)
+            enricher.setTradeSignalListener(autoTrader);   // DART 경로 훅(DisclosureEnricher.buildFollowup)
             autoTrader.start();
         } else if (config.autoTradeEnabled()) {
             log.warn("자동매매 활성이지만 KIS 미설정 — 현재가 조회 불가로 비활성. KIS_APP_KEY/KIS_APP_SECRET 확인");
         }
 
         PollerService pollerService = new PollerService(
-                dartClient, newsFilter, notifier, alertComposer,
+                dartClient, newsFilter, notifier, enricher,
                 seenStore, disclosureKeys, config, priceTracker);
         pollerService.start();
 
