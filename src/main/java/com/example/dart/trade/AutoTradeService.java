@@ -57,17 +57,17 @@ public class AutoTradeService implements TradeSignalListener {
     private final Set<String> handled = ConcurrentHashMap.newKeySet();
     private final PollWorker scheduler = new PollWorker("auto-trade");
 
-    public AutoTradeService(KisClient kisClient, Notifier notifier, MarketCalendar calendar, AppConfig config) {
+    public AutoTradeService(KisClient kisClient, Notifier notifier, MarketCalendar calendar, AppConfig.TradeConfig config) {
         this.kisClient = kisClient;
         this.notifier = notifier;
         this.calendar = calendar;
-        this.budgetWon = config.autoTradeBudgetWon();
-        this.minSalesRatio = config.autoTradeMinSalesRatio();
-        this.stopLossPct = config.autoTradeStopLossPct();
-        this.takeProfitPct = config.autoTradeTakeProfitPct();
-        this.maxPositions = config.autoTradeMaxPositions();
-        this.monitorSec = config.autoTradeMonitorSec();
-        this.eodClose = parseTime(config.autoTradeEodClose(), LocalTime.of(15, 20));
+        this.budgetWon = config.budgetWon();
+        this.minSalesRatio = config.minSalesRatio();
+        this.stopLossPct = config.stopLossPct();
+        this.takeProfitPct = config.takeProfitPct();
+        this.maxPositions = config.maxPositions();
+        this.monitorSec = config.monitorSec();
+        this.eodClose = parseTime(config.eodClose(), LocalTime.of(15, 20));
     }
 
     public void start() {

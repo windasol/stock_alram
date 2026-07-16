@@ -142,16 +142,16 @@ infra ──▶ application ──▶ domain
 | Gradle 멀티모듈 분리 | 10k줄에서는 패키지 규칙 + ArchUnit으로 충분 |
 | 전 컨텍스트 3층 강제 | news/notify/llm처럼 어댑터 묶음에 가까운 컨텍스트는 평면 유지. 층은 코드가 요구할 때만 |
 
-## §10. 알려진 위반 + 해소 로드맵
+## §10. 위반 해소 이력
 
-리팩토링은 단계별로 진행 중이며, 아래는 이 문서 기준의 현재 위반과 해소 계획이다.
-**이 표가 비었는데 코드에 위반이 있다면 문서를 갱신하라 — 문서가 현실과 다르면 문서가 죽는다.**
+리팩토링 Phase 1~5로 아래 위반이 모두 해소됐다. **이 표가 비었는데 코드에 위반이 있다면 문서를
+갱신하라 — 문서가 현실과 다르면 문서가 죽는다.** 현재 알려진 미해소 위반은 없다(ArchUnit 그린).
 
 | # | 위반 | 해소 | 상태 |
 |---|---|---|---|
-| 1 | NXT 세션판정 중복 2벌, 폴러 백오프 3벌, enrichment 재시도 6벌, 분봉 UN→J 폴백 3벌 | Phase 1: `common`으로 통합 | 예정 |
-| 2 | 도메인 record(Gainer·Turnover·Stats·Position)가 서비스 내부에 숨음 | Phase 1: 컨텍스트 최상위로 승격 | 예정 |
-| 3 | 패키지가 컨텍스트 구조(§1)와 불일치 (`model/`·`service/`·`filter/`·`parse/` 등 수평 패키지 잔존) | Phase 2: 기계적 이동 | 예정 |
-| 4 | `KisPollerService` 1,274줄 God class (도메인+인프라+프레젠테이션+프롬프트 혼재), `market` 클라이언트 필드 `new` (§6 위반) | Phase 3: 6개 서비스로 분해 + 주입 전환 | 예정 |
-| 5 | `AlertComposer`가 이름과 달리 fetch 오케스트레이션 수행 (§7 위반), Treasury/Trust/Cancellation 3중복 | Phase 4: `AlertMessages`(순수) + `DisclosureEnricher`(오케스트레이션) 분리 | 예정 |
-| 6 | `AppConfig` 64필드 God config — 어느 컨텍스트가 어떤 설정을 쓰는지 타입으로 안 드러남 | Phase 5: 컨텍스트별 중첩 record 분해 | 예정 |
+| 1 | NXT 세션판정 중복 2벌, 폴러 백오프 3벌, enrichment 재시도 6벌, 분봉 UN→J 폴백 3벌 | Phase 1: `common`(TradingSession·PollWorker·PollBackoff·RetryScheduler)으로 통합, `KisClient.minuteCandlesWithFallback`로 폴백 흡수 | ✅ 해소 |
+| 2 | 도메인 record(Gainer·Turnover·Stats·Position)가 서비스 내부에 숨음 | Phase 1: 컨텍스트 최상위(이후 Phase 2에서 domain 패키지)로 승격 | ✅ 해소 |
+| 3 | 패키지가 컨텍스트 구조(§1)와 불일치 (`model/`·`service/`·`filter/`·`parse/` 등 수평 패키지 잔존) | Phase 2: 기계적 이동 + ArchUnit 6규칙으로 재발 방지 | ✅ 해소 |
+| 4 | `KisPollerService` 1,274줄 God class (도메인+인프라+프레젠테이션+프롬프트 혼재), `market` 클라이언트 필드 `new` (§6 위반) | Phase 3: 파사드(216줄) + 협력자 7개로 분해, market 클라이언트 App 주입 전환 | ✅ 해소 |
+| 5 | `AlertComposer`가 이름과 달리 fetch 오케스트레이션 수행 (§7 위반), Treasury/Trust/Cancellation 3중복 | Phase 4: `AlertMessages`(순수 조립) + `DisclosureEnricher`(오케스트레이션) 분리, 3중복을 단일 파이프라인으로 통합 | ✅ 해소 |
+| 6 | `AppConfig` 64필드 God config — 어느 컨텍스트가 어떤 설정을 쓰는지 타입으로 안 드러남 | Phase 5: 컨텍스트별 중첩 record(Dart·Notify·News·Kind·Kis·Llm·Trade) 분해, 각 서비스는 자기 서브 config만 수령 | ✅ 해소 |

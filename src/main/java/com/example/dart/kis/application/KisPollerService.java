@@ -80,18 +80,18 @@ public class KisPollerService {
     private volatile Session lastSession;
 
     public KisPollerService(KisClient client, Notifier notifier, Notifier reportNotifier,
-                            KisAlertComposer alertComposer, AppConfig config, Path sectorsFile,
+                            KisAlertComposer alertComposer, AppConfig.KisConfig config, Path sectorsFile,
                             LlmClient llm, MarketCalendar calendar, NewsHeadlineBuffer headlineBuffer,
                             UsFuturesClient usFutures, DomesticMarketClient domesticMarket) {
         this.client = client;
         this.calendar = calendar;
         this.headlineBuffer = headlineBuffer;
-        this.intervalSec = config.kisPollIntervalSec();
-        this.minChangePct = config.kisMinChangePct();
-        this.sectorSummaryMin = config.kisSectorSummaryMin();
-        this.investorFlowMin = config.kisInvestorFlowMin();
-        this.marketFlowMin = config.kisMarketFlowMin();
-        this.gainerAlertEnabled = config.kisGainerAlertEnabled();
+        this.intervalSec = config.pollIntervalSec();
+        this.minChangePct = config.minChangePct();
+        this.sectorSummaryMin = config.sectorSummaryMin();
+        this.investorFlowMin = config.investorFlowMin();
+        this.marketFlowMin = config.marketFlowMin();
+        this.gainerAlertEnabled = config.gainerAlertEnabled();
         // 리포트는 LLM이 주입되고 활성 설정일 때만 동작(둘 중 하나라도 없으면 비활성).
         this.llm = config.marketReportEnabled() ? llm : null;
         this.reportIntervalMin = config.marketReportIntervalMin();   // 시황 매크로 분석 주기(시간당)
@@ -100,7 +100,7 @@ public class KisPollerService {
         // 컨텍스트 내부 협력자 조립 — 외부 IO 클라이언트는 전부 주입분을 넘긴다.
         SectorCacheStore sectors = new SectorCacheStore(client, sectorsFile);
         this.gainerScout = new GainerScout(notifier, alertComposer, minChangePct,
-                Duration.ofMinutes(config.kisCooldownMin()));
+                Duration.ofMinutes(config.cooldownMin()));
         this.sectorSummary = new SectorSummaryService(client, sectors, notifier, minChangePct);
         this.turnoverRanking = new TurnoverRankingService(client, sectors, notifier);
         this.investorFlow = new InvestorFlowService(client, notifier, domesticMarket, calendar,

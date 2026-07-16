@@ -35,41 +35,41 @@ public class NewsPollerService {
     private final SeenStore seenStore;
     /** 잡음 제거용 제외 키워드(소문자). 제목에 포함되면 버퍼에 넣지 않는다(스포츠·연예 등). */
     private final List<String> excludeKeywords;
-    private final AppConfig config;
+    private final AppConfig.NewsConfig config;
     private final PollWorker scheduler;
 
     public NewsPollerService(RssClient rssClient, List<RssFeed> rssFeeds, List<RssFeed> googleFeeds,
                              NaverNewsClient newsClient, NewsHeadlineBuffer headlineBuffer,
-                             SeenStore seenStore, AppConfig config) {
+                             SeenStore seenStore, AppConfig.NewsConfig config) {
         this.rssClient = rssClient;
         this.rssFeeds = rssFeeds;
         this.googleFeeds = googleFeeds;
         this.newsClient = newsClient;
         this.headlineBuffer = headlineBuffer;
         this.seenStore = seenStore;
-        this.excludeKeywords = config.newsExcludeKeywords().stream()
+        this.excludeKeywords = config.excludeKeywords().stream()
                 .map(s -> s.toLowerCase(Locale.ROOT)).toList();
         this.config = config;
         this.scheduler = new PollWorker("news-poller");
     }
 
     public void start() {
-        int queryCount = config.allNewsKeywords().size();
-        long dailyCalls = (long) queryCount * 86_400 / config.newsPollIntervalSec();
+        int queryCount = config.allKeywords().size();
+        long dailyCalls = (long) queryCount * 86_400 / config.pollIntervalSec();
         log.info("뉴스 수집 시작 (RSS {}개 피드 {}초 주기, 구글뉴스 {}개 키워드 {}초 주기, 네이버 키워드 {}개 {}초 주기 — 예상 일 호출 {}회, 시황 리포트 재료로 버퍼링)",
-                rssFeeds.size(), config.newsRssPollIntervalSec(),
-                googleFeeds.size(), config.newsGooglePollIntervalSec(),
-                queryCount, config.newsPollIntervalSec(), dailyCalls);
+                rssFeeds.size(), config.rssPollIntervalSec(),
+                googleFeeds.size(), config.googlePollIntervalSec(),
+                queryCount, config.pollIntervalSec(), dailyCalls);
         if (dailyCalls > NAVER_DAILY_LIMIT) {
             log.warn("네이버 예상 일 호출 수가 한도({}회)를 초과합니다 — NEWS_POLL_INTERVAL_SEC를 늘리거나 키워드를 줄이세요.",
                     NAVER_DAILY_LIMIT);
         }
-        scheduler.scheduleWithFixedDelay(this::pollRss, 0, config.newsRssPollIntervalSec());
+        scheduler.scheduleWithFixedDelay(this::pollRss, 0, config.rssPollIntervalSec());
         if (!googleFeeds.isEmpty()) {
-            scheduler.scheduleWithFixedDelay(this::pollGoogle, 10, config.newsGooglePollIntervalSec());
+            scheduler.scheduleWithFixedDelay(this::pollGoogle, 10, config.googlePollIntervalSec());
         }
         if (newsClient != null) {
-            scheduler.scheduleWithFixedDelay(this::pollNaver, 5, config.newsPollIntervalSec());
+            scheduler.scheduleWithFixedDelay(this::pollNaver, 5, config.pollIntervalSec());
         }
     }
 
@@ -105,7 +105,7 @@ public class NewsPollerService {
     private void pollNaver() {
         try {
             int collected = 0;
-            for (String keyword : config.allNewsKeywords()) {
+            for (String keyword : config.allKeywords()) {
                 for (NewsArticle article : newsClient.search(keyword)) {
                     if (collect(article)) collected++;
                 }

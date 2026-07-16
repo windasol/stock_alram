@@ -58,7 +58,7 @@ public class PollerService {
     private final DisclosureEnricher enricher;
     private final SeenStore seenStore;
     private final SeenStore disclosureKeys;
-    private final AppConfig config;
+    private final AppConfig.DartConfig config;
     private final DisclosurePriceTracker priceTracker;
     private final PollWorker scheduler;
     private final PollWorker enrichmentPool;
@@ -69,7 +69,7 @@ public class PollerService {
 
     public PollerService(DartClient dartClient, NewsFilter newsFilter,
                          Notifier notifier, DisclosureEnricher enricher,
-                         SeenStore seenStore, SeenStore disclosureKeys, AppConfig config,
+                         SeenStore seenStore, SeenStore disclosureKeys, AppConfig.DartConfig config,
                          DisclosurePriceTracker priceTracker) {
         this.dartClient = dartClient;
         this.newsFilter = newsFilter;

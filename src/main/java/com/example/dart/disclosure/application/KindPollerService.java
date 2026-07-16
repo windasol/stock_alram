@@ -85,7 +85,7 @@ public class KindPollerService {
     public KindPollerService(KindClient client, NewsFilter newsFilter, Notifier notifier,
                              KindAlertComposer alertComposer, KindDocumentClient docClient,
                              DocumentParser documentParser, StockQuoteClient quoteClient,
-                             SeenStore seenStore, SeenStore disclosureKeys, AppConfig config,
+                             SeenStore seenStore, SeenStore disclosureKeys, AppConfig.KindConfig config,
                              MarketCalendar calendar) {
         this.client = client;
         this.calendar = calendar;
@@ -103,7 +103,7 @@ public class KindPollerService {
                 : Arrays.stream(config.corpCls().split(","))
                         .map(String::trim).filter(s -> !s.isEmpty())
                         .collect(Collectors.toUnmodifiableSet());
-        this.intervalSec = config.kindPollIntervalSec();
+        this.intervalSec = config.pollIntervalSec();
         this.scheduler = new PollWorker("kind-poller");
         this.enrichmentPool = new PollWorker("kind-enrich", 2);
         this.enrichRetry = new RetryScheduler(enrichmentPool, ENRICH_RETRY_DELAY_SEC, ENRICH_MAX_ATTEMPTS);

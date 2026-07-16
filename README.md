@@ -55,39 +55,47 @@ KisPollerService.generateMacroReport() (시간당, kis-poller 스레드)
 
 ## 패키지 구조
 
+패키지-바이-컨텍스트 + 컨텍스트 내부 경량 헥사고날. 각 컨텍스트는 `domain`(순수 판정·값 객체) /
+`application`(폴링·오케스트레이션) / `infra`(외부 API·파일 IO)로 나뉜다. 아키텍처 규칙은
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)에 있고 `ArchUnit` 테스트로 강제된다.
+
 ```
 com.example.dart
-├── App                  조립 루트 — 의존성 생성·연결, 생명주기
-├── config/AppConfig     환경변수(.env) 로드·검증
-├── dart/DartClient      DART OpenAPI 클라이언트 (list.json, document.xml)
-├── kind                 KIND(거래소 공시) 선행 감시 — DART보다 빠른 공시 소스
-│   ├── KindClient           오늘의공시 AJAX 호출·HTML 테이블 파싱
-│   ├── KindDisclosure       공시 1행 DTO (시장 코드 변환 포함)
-│   ├── KindAlertComposer    헤더 전용 알림 조립 (본문 없이 즉시)
-│   └── KindPollerService    폴링 루프 (운영시간 제한·백오프·교차 중복)
-├── filter/NewsFilter    2단계 호재 필터 (룰 테이블 + 안전망 룰)
-├── news                 뉴스 병렬 감시 (공시 파이프라인과 독립)
-│   ├── RssClient            언론사 속보 RSS 클라이언트 (가장 빠른 소스)
-│   ├── RssFeed              피드 1개 ("이름|URL" 설정 파싱)
-│   ├── GoogleNewsFeeds      구글뉴스 키워드 검색 RSS 피드 팩토리 (키 불필요)
-│   ├── NaverNewsClient      네이버 뉴스 검색 Open API 클라이언트 (보완망)
-│   ├── NewsArticle          기사 1건 DTO (HTML 제거된 평문)
-│   ├── NewsHeadlineBuffer   지난 1시간 헤드라인 롤링 버퍼 (시황 리포트 재료)
-│   └── NewsPollerService    RSS·구글·네이버 폴링 → 버퍼 적재 (별도 스레드)
-├── model/Disclosure     공시 1건 DTO (corp_cls → 코스피/코스닥 변환 포함)
-├── parse/DocumentParser 원문 ZIP → 평문 변환, 핵심 정보 요약 추출
-├── service
-│   ├── PollerService    폴링 루프, 필터 → 알림 오케스트레이션
-│   └── DocumentService  원문 조회 (문서 캐시로 중복 다운로드 방지)
-├── notify
-│   ├── Notifier         전송 인터페이스 (send(String))
-│   ├── HttpNotifier     JSON POST 공통 골격 (전송 실패는 삼킴)
-│   ├── AlertComposer    알림 메시지 조립 (헤더 + 원문 요약)
-│   ├── DiscordService   Discord 채널 메시지 전송 (2,000자 제한)
-│   └── WebexService     Webex 룸 메시지 전송 (7,000자 제한)
-└── util
-    ├── SeenStore        처리한 공시 ID 영속 저장
-    └── DisclosureKeys   DART↔KIND 교차 중복 키 (회사명+제목 정규화)
+├── App                     조립 루트 — 의존성 생성·연결, 생명주기 (유일하게 전 컨텍스트를 안다)
+├── config/AppConfig        환경변수(.env) 로드·검증 — 컨텍스트별 중첩 record로 분해
+├── common                  공유 커널 (어떤 컨텍스트도 import하지 않음)
+│   ├── domain/  TradingSession(세션 판정), KoreanMoney(금액 표기)
+│   ├── text/    TextTable(전각 표시폭 정렬)
+│   └── infra/   SeenStore, TrustStores, StockQuoteClient,
+│                PollWorker(스레드풀·graceful shutdown), PollBackoff(지수 백오프),
+│                RetryScheduler(enrichment 재시도 골격), MarketCalendar(거래일)
+├── disclosure              공시 컨텍스트 — DART + KIND 두 인바운드 소스 통합
+│   ├── domain/       Disclosure, ContractInfo(+비율 판정), DisclosureKeys(교차 중복 키),
+│   │                 NewsFilter(2단계 호재 필터), AlertMessages(순수 문자열 조립)
+│   ├── application/  PollerService(DART 폴링), KindPollerService(KIND 폴링),
+│   │                 DisclosureEnricher(규모 보강 오케스트레이션·자동매매 신호), DocumentService,
+│   │                 KindAlertComposer
+│   └── infra/        DartClient, KindClient, KindDocumentClient, KindDisclosure,
+│                     DocumentParser, DartException, DocumentNotReadyException
+├── pricetrack             공시 후 주가 추적 컨텍스트
+│   ├── domain/       Stats(+통계 산출·패턴 분류)
+│   └── application/  DisclosurePriceTracker
+├── kis                    KIS 시장분석 컨텍스트 (급등·수급·섹터·시황 리포트)
+│   ├── domain/       Session, FlowPhase, Investor, KisMoney,
+│   │                 VolumeRankItem·TradingValueItem·InvestorFlowItem 등 DTO
+│   ├── application/  KisPollerService(스케줄러 파사드), GainerScout, SectorSummaryService,
+│   │                 TurnoverRankingService, InvestorFlowService, MacroReportService,
+│   │                 KisAlertComposer
+│   └── infra/        KisClient, UsFuturesClient, DomesticMarketClient, SectorCacheStore
+├── news                  뉴스 수집 컨텍스트 (평면 — 시황 리포트 재료 버퍼링)
+│   ├── RssClient, RssFeed, GoogleNewsFeeds, NaverNewsClient, NewsArticle,
+│   └── NewsHeadlineBuffer, NewsPollerService
+├── trade                 공시 기반 자동매매 컨텍스트 (Stage 1: 드라이런)
+│   ├── TradeSignalListener(포트), Position(+주식수·손익 판정), AutoTradeService
+├── notify                알림 발송 (평면 — 포트/어댑터)
+│   ├── Notifier, HttpNotifier, DiscordService, WebexService
+└── llm                   시황 분석 LLM (평면 — 포트/어댑터)
+    ├── LlmClient, GeminiClient, OllamaClient
 ```
 
 ## 필터 정책

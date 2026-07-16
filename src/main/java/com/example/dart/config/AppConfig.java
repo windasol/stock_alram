@@ -5,71 +5,151 @@ import io.github.cdimascio.dotenv.Dotenv;
 import java.util.Arrays;
 import java.util.List;
 
+/**
+ * 앱 전체 설정 — 컨텍스트별 중첩 record로 나눠, 어느 컨텍스트가 어떤 설정을 쓰는지 타입으로 드러낸다.
+ * 각 서비스는 {@code AppConfig} 전체가 아니라 자기 서브 설정만 생성자로 받는다(God config 방지).
+ * 로드·검증 진입점은 {@link #load()} 하나로 유지한다(.env + 시스템 환경변수, env 우선).
+ */
 public record AppConfig(
-        String dartApiKey,
-        String notifier,
-        String webexBotToken,
-        String webexRoomId,
-        String webexNewsRoomId,
-        String discordBotToken,
-        String discordChannelId,
-        String discordNewsChannelId,
-        int pollIntervalSec,
-        String corpCls,
-        String pblntfTy,
-        List<String> filterExtraKeywords,
-        List<String> filterExcludeKeywords,
-        boolean newsEnabled,
-        String naverClientId,
-        String naverClientSecret,
-        int newsPollIntervalSec,
-        int newsRssPollIntervalSec,
-        List<String> newsKeywords,
-        List<String> newsBadKeywords,
-        List<String> newsMacroKeywords,
-        List<String> newsMacroTopics,
-        List<String> newsMacroTriggers,
-        List<String> newsFlipKeywords,
-        List<String> newsExcludeKeywords,
-        List<String> newsBreakingKeywords,
-        List<String> newsRssFeeds,
-        int newsMaxAgeMin,
-        int newsMacroCooldownMin,
-        List<String> newsGoogleKeywords,
-        int newsGooglePollIntervalSec,
-        boolean kindEnabled,
-        int kindPollIntervalSec,
-        String kisAppKey,
-        String kisAppSecret,
-        int kisPollIntervalSec,
-        double kisMinChangePct,
-        int kisCooldownMin,
-        String kisMarketDivCode,
-        int kisSectorSummaryMin,
-        int kisInvestorFlowMin,
-        int kisMarketFlowMin,
-        boolean kisGainerAlertEnabled,
-        boolean kisPaper,
-        String webexKisRoomId,
-        String discordKisChannelId,
-        boolean marketReportEnabled,
-        int marketReportIntervalMin,
-        boolean marketReportGrounding,
-        String llmProvider,
-        String geminiApiKey,
-        String geminiModel,
-        String ollamaBaseUrl,
-        String ollamaModel,
-        boolean autoTradeEnabled,
-        String autoTradeMode,
-        long autoTradeBudgetWon,
-        double autoTradeMinSalesRatio,
-        double autoTradeStopLossPct,
-        double autoTradeTakeProfitPct,
-        int autoTradeMaxPositions,
-        int autoTradeMonitorSec,
-        String autoTradeEodClose
+        DartConfig dart,
+        NotifyConfig notification,
+        NewsConfig news,
+        KindConfig kind,
+        KisConfig kis,
+        LlmConfig llm,
+        TradeConfig trade
 ) {
+
+    /** DART 공시 폴링 + 공시 제목 필터 설정. */
+    public record DartConfig(
+            String apiKey,
+            int pollIntervalSec,
+            String corpCls,
+            String pblntfTy,
+            List<String> filterExtraKeywords,
+            List<String> filterExcludeKeywords) {}
+
+    /** 알림 채널(Discord/Webex) 설정 — 공시 기본 채널 + 뉴스/KIS 분리 채널(선택). */
+    public record NotifyConfig(
+            String notifier,
+            String webexBotToken,
+            String webexRoomId,
+            String webexNewsRoomId,
+            String webexKisRoomId,
+            String discordBotToken,
+            String discordChannelId,
+            String discordNewsChannelId,
+            String discordKisChannelId) {
+
+        /** 뉴스 전용 채널/룸 ID. 미설정이면 null — 공시와 같은 채널 사용. */
+        public String newsChannelId() {
+            String id = switch (notifier) {
+                case "discord" -> discordNewsChannelId;
+                case "webex"   -> webexNewsRoomId;
+                default        -> null;
+            };
+            return (id == null || id.isBlank()) ? null : id;
+        }
+
+        /** KIS 변동성 전용 채널/룸 ID. 미설정이면 null — 공시와 같은 채널 사용. */
+        public String kisChannelId() {
+            String id = switch (notifier) {
+                case "discord" -> discordKisChannelId;
+                case "webex"   -> webexKisRoomId;
+                default        -> null;
+            };
+            return (id == null || id.isBlank()) ? null : id;
+        }
+    }
+
+    /** 뉴스 수집(RSS/구글/네이버) 설정 — 수집만 하고 발송은 시황 리포트가 소비한다. */
+    public record NewsConfig(
+            boolean enabled,
+            String naverClientId,
+            String naverClientSecret,
+            int pollIntervalSec,
+            int rssPollIntervalSec,
+            List<String> keywords,
+            List<String> badKeywords,
+            List<String> macroKeywords,
+            List<String> macroTopics,
+            List<String> macroTriggers,
+            List<String> flipKeywords,
+            List<String> excludeKeywords,
+            List<String> breakingKeywords,
+            List<String> rssFeeds,
+            int maxAgeMin,
+            int macroCooldownMin,
+            List<String> googleKeywords,
+            int googlePollIntervalSec) {
+
+        /**
+         * 네이버 검색에 쓰는 전체 키워드 (호재 + 악재 + 시황 단독).
+         * 시황 주제어(미국, 트럼프 등)는 검색어로 쓰면 일상 기사가 쏟아지므로 제외 —
+         * 주제어+충격어 조합 이슈는 RSS 폴링이 잡는다.
+         */
+        public List<String> allKeywords() {
+            List<String> all = new java.util.ArrayList<>(keywords);
+            all.addAll(badKeywords);
+            all.addAll(macroKeywords);
+            return all;
+        }
+
+        /** 네이버 검색 보완망 사용 여부 — 키 설정 시에만. */
+        public boolean naverEnabled() {
+            return naverClientId != null && !naverClientId.isBlank();
+        }
+    }
+
+    /** KIND(거래소 공시) 선행 폴링 설정. corpCls는 DART와 같은 CORP_CLS 값을 공유한다. */
+    public record KindConfig(
+            boolean enabled,
+            int pollIntervalSec,
+            String corpCls) {}
+
+    /** KIS 시장분석(급등·수급·섹터·시황 리포트) 설정. */
+    public record KisConfig(
+            String appKey,
+            String appSecret,
+            int pollIntervalSec,
+            double minChangePct,
+            int cooldownMin,
+            String marketDivCode,
+            int sectorSummaryMin,
+            int investorFlowMin,
+            int marketFlowMin,
+            boolean gainerAlertEnabled,
+            boolean paper,
+            boolean marketReportEnabled,
+            int marketReportIntervalMin,
+            boolean marketReportGrounding) {
+
+        /** KIS 변동성 정찰 사용 여부 — 앱키·시크릿이 모두 설정된 경우에만 (별도 플래그 불필요). */
+        public boolean enabled() {
+            return appKey != null && !appKey.isBlank()
+                    && appSecret != null && !appSecret.isBlank();
+        }
+    }
+
+    /** 시황 분석용 LLM(Gemini/Ollama) 설정. */
+    public record LlmConfig(
+            String provider,
+            String geminiApiKey,
+            String geminiModel,
+            String ollamaBaseUrl,
+            String ollamaModel) {}
+
+    /** 공시 기반 자동매매(Stage 1: 드라이런) 설정. */
+    public record TradeConfig(
+            boolean enabled,
+            String mode,
+            long budgetWon,
+            double minSalesRatio,
+            double stopLossPct,
+            double takeProfitPct,
+            int maxPositions,
+            int monitorSec,
+            String eodClose) {}
 
     /**
      * 재현율 우선 — 이슈가 될 "가능성"이 있는 표현은 최대한 넓게 잡는다.
@@ -148,49 +228,6 @@ public record AppConfig(
      */
     private static final String DEFAULT_NEWS_GOOGLE_KEYWORDS =
             "수주,공급계약,기술수출,품목허가,FDA 승인,무상증자,자사주 소각,흑자전환,우선협상대상자,임상 3상";
-
-    /**
-     * 네이버 검색에 쓰는 전체 키워드 (호재 + 악재 + 시황 단독).
-     * 시황 주제어(미국, 트럼프 등)는 검색어로 쓰면 일상 기사가 쏟아지므로 제외 —
-     * 주제어+충격어 조합 이슈는 RSS 폴링이 잡는다.
-     */
-    public List<String> allNewsKeywords() {
-        List<String> all = new java.util.ArrayList<>(newsKeywords);
-        all.addAll(newsBadKeywords);
-        all.addAll(newsMacroKeywords);
-        return all;
-    }
-
-    /** 네이버 검색 보완망 사용 여부 — 키 설정 시에만. */
-    public boolean naverEnabled() {
-        return naverClientId != null && !naverClientId.isBlank();
-    }
-
-    /** KIS 변동성 정찰 사용 여부 — 앱키·시크릿이 모두 설정된 경우에만 (별도 플래그 불필요). */
-    public boolean kisEnabled() {
-        return kisAppKey != null && !kisAppKey.isBlank()
-                && kisAppSecret != null && !kisAppSecret.isBlank();
-    }
-
-    /** 뉴스 전용 채널/룸 ID. 미설정이면 null — 공시와 같은 채널 사용. */
-    public String newsChannelId() {
-        String id = switch (notifier) {
-            case "discord" -> discordNewsChannelId;
-            case "webex"   -> webexNewsRoomId;
-            default        -> null;
-        };
-        return (id == null || id.isBlank()) ? null : id;
-    }
-
-    /** KIS 변동성 전용 채널/룸 ID. 미설정이면 null — 공시와 같은 채널 사용. */
-    public String kisChannelId() {
-        String id = switch (notifier) {
-            case "discord" -> discordKisChannelId;
-            case "webex"   -> webexKisRoomId;
-            default        -> null;
-        };
-        return (id == null || id.isBlank()) ? null : id;
-    }
 
     public static AppConfig load() {
         Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
@@ -334,26 +371,26 @@ public record AppConfig(
                     "KIS_APP_KEY와 KIS_APP_SECRET은 둘 다 설정하거나 둘 다 비워야 합니다.");
         }
 
-        return new AppConfig(dartApiKey, notifier, webexBotToken, webexRoomId, webexNewsRoomId,
-                discordBotToken, discordChannelId, discordNewsChannelId,
-                pollInterval, corpCls, pblntfTy,
-                filterExtraKeywords, filterExcludeKeywords,
-                newsEnabled, naverClientId, naverClientSecret,
-                newsPollInterval, newsRssPollInterval,
-                newsKeywords, newsBadKeywords, newsMacroKeywords,
-                newsMacroTopics, newsMacroTriggers, newsFlipKeywords, newsExcludeKeywords,
-                newsBreakingKeywords,
-                newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin,
-                newsGoogleKeywords, newsGooglePollInterval, kindEnabled, kindPollIntervalSec,
-                kisAppKey, kisAppSecret, kisPollIntervalSec,
-                kisMinChangePct, kisCooldownMin,
-                kisMarketDivCode, kisSectorSummaryMin, kisInvestorFlowMin, kisMarketFlowMin, kisGainerAlertEnabled,
-                kisPaper, webexKisRoomId, discordKisChannelId,
-                marketReportEnabled, marketReportIntervalMin, marketReportGrounding,
-                llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel,
-                autoTradeEnabled, autoTradeMode, autoTradeBudgetWon, autoTradeMinSalesRatio,
-                autoTradeStopLossPct, autoTradeTakeProfitPct, autoTradeMaxPositions,
-                autoTradeMonitorSec, autoTradeEodClose);
+        return new AppConfig(
+                new DartConfig(dartApiKey, pollInterval, corpCls, pblntfTy,
+                        filterExtraKeywords, filterExcludeKeywords),
+                new NotifyConfig(notifier, webexBotToken, webexRoomId, webexNewsRoomId, webexKisRoomId,
+                        discordBotToken, discordChannelId, discordNewsChannelId, discordKisChannelId),
+                new NewsConfig(newsEnabled, naverClientId, naverClientSecret,
+                        newsPollInterval, newsRssPollInterval,
+                        newsKeywords, newsBadKeywords, newsMacroKeywords,
+                        newsMacroTopics, newsMacroTriggers, newsFlipKeywords, newsExcludeKeywords,
+                        newsBreakingKeywords, newsRssFeeds, newsMaxAgeMin, newsMacroCooldownMin,
+                        newsGoogleKeywords, newsGooglePollInterval),
+                new KindConfig(kindEnabled, kindPollIntervalSec, corpCls),
+                new KisConfig(kisAppKey, kisAppSecret, kisPollIntervalSec, kisMinChangePct, kisCooldownMin,
+                        kisMarketDivCode, kisSectorSummaryMin, kisInvestorFlowMin, kisMarketFlowMin,
+                        kisGainerAlertEnabled, kisPaper,
+                        marketReportEnabled, marketReportIntervalMin, marketReportGrounding),
+                new LlmConfig(llmProvider, geminiApiKey, geminiModel, ollamaBaseUrl, ollamaModel),
+                new TradeConfig(autoTradeEnabled, autoTradeMode, autoTradeBudgetWon, autoTradeMinSalesRatio,
+                        autoTradeStopLossPct, autoTradeTakeProfitPct, autoTradeMaxPositions,
+                        autoTradeMonitorSec, autoTradeEodClose));
     }
 
     private static List<String> parseCsv(String csv) {
