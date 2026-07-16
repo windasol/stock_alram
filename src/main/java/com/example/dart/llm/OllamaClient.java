@@ -1,7 +1,8 @@
 package com.example.dart.llm;
 
+import com.example.dart.common.infra.HttpJson;
+import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
@@ -17,7 +18,8 @@ import java.time.Duration;
  * 로컬 Ollama 서버(기본 http://localhost:11434) 클라이언트 — 시장 분석 요약문 생성에 쓴다.
  *
  * 내 PC에서 도는 무료 오픈소스 LLM이라 API 키·인증이 없다. KIS·네이버 클라이언트와 같은
- * HttpClient 패턴이되, 로컬 http라 TrustStores(회사망 SSL 검사)와 무관하다.
+ * HttpClient 패턴을 쓴다. 기본은 로컬 http(localhost:11434)라 SSL 검사와 무관하지만,
+ * OLLAMA_BASE_URL을 원격 https로 지정한 경우까지 대응하도록 공용 빌더(TrustStores)를 경유한다.
  *
  * CPU 추론은 모델·사양에 따라 수십 초~수 분이 걸리므로 요청 타임아웃을 넉넉히 둔다.
  * 서버 미기동·모델 미설치 등 실패 시 null을 반환해 호출부가 리포트를 건너뛰게 한다(앱을 멈추지 않는다).
@@ -29,7 +31,6 @@ public class OllamaClient implements LlmClient {
     private final String baseUrl;
     private final String model;
     private final HttpClient httpClient;
-    private final ObjectMapper mapper = new ObjectMapper();
     private final Duration requestTimeout;
 
     public OllamaClient(String baseUrl, String model) {
@@ -41,7 +42,8 @@ public class OllamaClient implements LlmClient {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.model = model;
         this.requestTimeout = requestTimeout;
-        this.httpClient = HttpClient.newBuilder()
+        // 공용 빌더(회사망 SSL 검사 대응 신뢰저장소)를 쓰되, 로컬 서버 미기동을 빨리 감지하도록 연결 타임아웃은 5초로 덮어쓴다.
+        this.httpClient = TrustStores.newHttpClientBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
     }
@@ -58,7 +60,7 @@ public class OllamaClient implements LlmClient {
      */
     public String chat(String systemPrompt, String userPrompt) {
         try {
-            ObjectNode body = mapper.createObjectNode();
+            ObjectNode body = HttpJson.MAPPER.createObjectNode();
             body.put("model", model);
             body.put("stream", false);
             ObjectNode options = body.putObject("options");
@@ -71,7 +73,7 @@ public class OllamaClient implements LlmClient {
                     .uri(URI.create(baseUrl + "/api/chat"))
                     .timeout(requestTimeout)
                     .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
+                    .POST(HttpRequest.BodyPublishers.ofString(HttpJson.MAPPER.writeValueAsString(body)))
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -79,7 +81,7 @@ public class OllamaClient implements LlmClient {
                 log.warn("Ollama 응답 실패: status={}, body={}", response.statusCode(), brief(response.body()));
                 return null;
             }
-            JsonNode content = mapper.readTree(response.body()).path("message").path("content");
+            JsonNode content = HttpJson.MAPPER.readTree(response.body()).path("message").path("content");
             String text = content.asText("").trim();
             if (text.isEmpty()) {
                 log.warn("Ollama 응답이 비어 있음 (모델 {} 확인)", model);

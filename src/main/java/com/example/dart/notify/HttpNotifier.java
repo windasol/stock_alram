@@ -1,7 +1,7 @@
 package com.example.dart.notify;
 
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,7 +21,6 @@ abstract class HttpNotifier implements Notifier {
     protected final Logger log = LoggerFactory.getLogger(getClass());
 
     private final HttpClient httpClient = TrustStores.newHttpClient();
-    private final ObjectMapper mapper = new ObjectMapper();
 
     protected void postJson(String url, Map<String, String> headers, Map<String, ?> payload) {
         try {
@@ -29,7 +28,7 @@ abstract class HttpNotifier implements Notifier {
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(15))
                     .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(payload)));
+                    .POST(HttpRequest.BodyPublishers.ofString(HttpJson.MAPPER.writeValueAsString(payload)));
             headers.forEach(builder::header);
 
             HttpResponse<String> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());

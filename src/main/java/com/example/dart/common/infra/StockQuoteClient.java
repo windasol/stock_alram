@@ -1,15 +1,12 @@
 package com.example.dart.common.infra;
 
 import com.example.dart.common.domain.KoreanMoney;
-import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Optional;
@@ -29,7 +26,6 @@ public class StockQuoteClient {
     private static final int REQUEST_TIMEOUT_SEC = 10;
 
     private final HttpClient httpClient;
-    private final ObjectMapper mapper = new ObjectMapper();
 
     public StockQuoteClient() {
         this.httpClient = TrustStores.newHttpClient();
@@ -50,13 +46,9 @@ public class StockQuoteClient {
     private Optional<String> getBody(String stockCode, String label) {
         if (stockCode == null || stockCode.isBlank()) return Optional.empty();
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(String.format(API, stockCode)))
-                    .timeout(Duration.ofSeconds(REQUEST_TIMEOUT_SEC))
-                    .header("User-Agent", USER_AGENT)
-                    .GET()
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HttpJson.get(httpClient,
+                    URI.create(String.format(API, stockCode)), Duration.ofSeconds(REQUEST_TIMEOUT_SEC),
+                    "User-Agent", USER_AGENT);
             if (response.statusCode() != 200) {
                 log.warn("{} 실패 (code={}): status={}", label, stockCode, response.statusCode());
                 return Optional.empty();
@@ -98,7 +90,7 @@ public class StockQuoteClient {
      */
     PriceSnapshot parseSnapshot(String json) {
         try {
-            JsonNode datas = mapper.readTree(json).path("datas");
+            JsonNode datas = HttpJson.MAPPER.readTree(json).path("datas");
             if (datas.isArray() && !datas.isEmpty()) {
                 JsonNode d = datas.get(0);
                 JsonNode over = d.path("overMarketPriceInfo");
@@ -146,7 +138,7 @@ public class StockQuoteClient {
     /** integration 응답의 totalInfos[code=lastClosePrice].value("322,500")를 원으로 파싱. (테스트용 패키지 가시성) */
     OptionalLong parsePreviousClose(String json) {
         try {
-            for (JsonNode info : mapper.readTree(json).path("totalInfos")) {
+            for (JsonNode info : HttpJson.MAPPER.readTree(json).path("totalInfos")) {
                 if ("lastClosePrice".equals(info.path("code").asText())) {
                     return wonOf(info.path("value").asText());
                 }
@@ -160,7 +152,7 @@ public class StockQuoteClient {
     /** integration 응답의 totalInfos[code=marketValue].value("1,970조 1,959억")를 원으로 파싱. */
     OptionalLong parseMarketCap(String json) {
         try {
-            for (JsonNode info : mapper.readTree(json).path("totalInfos")) {
+            for (JsonNode info : HttpJson.MAPPER.readTree(json).path("totalInfos")) {
                 if ("marketValue".equals(info.path("code").asText())) {
                     return KoreanMoney.parseWon(info.path("value").asText());
                 }

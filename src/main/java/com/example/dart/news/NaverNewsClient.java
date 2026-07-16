@@ -1,8 +1,8 @@
 package com.example.dart.news;
 
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jsoup.Jsoup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -37,13 +36,11 @@ public class NaverNewsClient {
     private final String clientId;
     private final String clientSecret;
     private final HttpClient httpClient;
-    private final ObjectMapper mapper;
 
     public NaverNewsClient(String clientId, String clientSecret) {
         this.clientId = clientId;
         this.clientSecret = clientSecret;
         this.httpClient = TrustStores.newHttpClient();
-        this.mapper = new ObjectMapper();
     }
 
     /** 키워드로 최신 뉴스를 검색한다. 실패 시 빈 목록 — 폴링 루프를 멈추지 않는다. */
@@ -53,15 +50,9 @@ public class NaverNewsClient {
                 + "&display=20&sort=date";
 
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("X-Naver-Client-Id", clientId)
-                    .header("X-Naver-Client-Secret", clientSecret)
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HttpJson.get(httpClient, URI.create(url), Duration.ofSeconds(15),
+                    "X-Naver-Client-Id", clientId,
+                    "X-Naver-Client-Secret", clientSecret);
 
             if (response.statusCode() == 429) {
                 log.warn("네이버 API 호출 한도 초과 (query={})", query);
@@ -75,7 +66,7 @@ public class NaverNewsClient {
             }
 
             List<NewsArticle> result = new ArrayList<>();
-            for (JsonNode item : mapper.readTree(response.body()).path("items")) {
+            for (JsonNode item : HttpJson.MAPPER.readTree(response.body()).path("items")) {
                 result.add(toArticle(item));
             }
             log.debug("뉴스 조회 완료 (query={}, {}건)", query, result.size());

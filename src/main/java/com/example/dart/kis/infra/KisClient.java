@@ -1,5 +1,6 @@
 package com.example.dart.kis.infra;
 
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
 import com.example.dart.kis.domain.Investor;
 import com.example.dart.kis.domain.InvestorConfirmed;
@@ -106,8 +107,8 @@ public class KisClient {
     private static final int CANDLE_TIMEOUT_SEC = 20;
     /** 0건 진단용 원본 응답 debug 로깅 시 최대 길이. */
     private static final int DEBUG_BODY_MAX = 700;
-    /** JSON 파서 공용 인스턴스(스레드 세이프) — 파서마다 재생성하지 않는다. */
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** JSON 파서 공용 인스턴스(스레드 세이프) — 프로젝트 공용 {@link HttpJson#MAPPER}를 재사용한다. */
+    private static final ObjectMapper MAPPER = HttpJson.MAPPER;
 
     private final String appKey;
     private final String appSecret;

@@ -9,7 +9,7 @@ import com.example.dart.notify.Notifier;
 import com.example.dart.pricetrack.domain.Stats;
 import com.example.dart.common.infra.StockQuoteClient;
 import com.example.dart.common.infra.MarketCalendar;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.dart.common.infra.HttpJson;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,7 +68,6 @@ public class DisclosurePriceTracker {
     private final Path storeFile;
     /** 거래일 판정(주말·공휴일). 휴장일에 뜬 공시는 분봉이 없어 추적을 건너뛴다. */
     private final MarketCalendar calendar;
-    private final ObjectMapper mapper = new ObjectMapper();
     private final PollWorker pool = new PollWorker("price-tracker", 2);
 
     public DisclosurePriceTracker(StockQuoteClient quoteClient, KisClient kisClient,
@@ -197,7 +196,7 @@ public class DisclosurePriceTracker {
 
     private void persist(Disclosure d, String category, ZonedDateTime t0, Stats st) {
         try {
-            ObjectNode o = mapper.createObjectNode();
+            ObjectNode o = HttpJson.MAPPER.createObjectNode();
             o.put("t0", t0.toString());
             o.put("rceptNo", d.rceptNo());
             o.put("corpName", d.corpName());
@@ -222,7 +221,7 @@ public class DisclosurePriceTracker {
             o.put("maeAt", CLOCK.format(st.troughAt()));
             o.put("maeWon", st.troughPrice());
             o.put("pattern", st.pattern());
-            Files.writeString(storeFile, mapper.writeValueAsString(o) + System.lineSeparator(),
+            Files.writeString(storeFile, HttpJson.MAPPER.writeValueAsString(o) + System.lineSeparator(),
                     StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (IOException e) {
             log.warn("주가 통계 저장 실패: {} - {}", d.corpName(), d.reportNm(), e);

@@ -1,9 +1,9 @@
 package com.example.dart.disclosure.infra;
 
 import com.example.dart.disclosure.domain.Disclosure;
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,7 +35,6 @@ public class DartClient {
 
     private final String apiKey;
     private final HttpClient httpClient;
-    private final ObjectMapper mapper;
     /**
      * 같은 회사 공시가 연속으로 와도 재무 API를 반복 호출하지 않도록 매출액을 회사별로 캐시.
      * 단, 새 사업보고서·정정(소급재작성)이 하루 안에 반영되도록 조회일을 함께 저장해 매일 갱신한다.
@@ -49,7 +48,6 @@ public class DartClient {
     public DartClient(String apiKey) {
         this.apiKey = apiKey;
         this.httpClient = TrustStores.newHttpClient();
-        this.mapper = new ObjectMapper();
     }
 
     /**
@@ -176,13 +174,7 @@ public class DartClient {
                 + "&bsns_year=" + year
                 + "&reprt_code=11011";   // 11011 = 사업보고서(연간)
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .GET()
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            JsonNode root = mapper.readTree(response.body());
+            JsonNode root = HttpJson.getJson(httpClient, URI.create(url), Duration.ofSeconds(15));
             if (!"000".equals(root.path("status").asText())) return OptionalLong.empty();
 
             Long cfs = null, ofs = null;   // 연결 / 별도
@@ -227,14 +219,7 @@ public class DartClient {
                 + (pblntfTy != null ? "&pblntf_ty=" + enc(pblntfTy) : "");
 
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            JsonNode root = mapper.readTree(response.body());
+            JsonNode root = HttpJson.getJson(httpClient, URI.create(url), Duration.ofSeconds(15));
             String status = root.path("status").asText();
 
             switch (status) {
@@ -242,7 +227,7 @@ public class DartClient {
                     JsonNode listNode = root.path("list");
                     List<Disclosure> result = new ArrayList<>();
                     for (JsonNode node : listNode) {
-                        result.add(mapper.treeToValue(node, Disclosure.class));
+                        result.add(HttpJson.MAPPER.treeToValue(node, Disclosure.class));
                     }
                     log.info("공시 조회 완료 (corp_cls={}, pblntf_ty={}, {}건)", corpCls, pblntfTy, result.size());
                     return result;

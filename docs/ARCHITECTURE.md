@@ -155,3 +155,4 @@ infra ──▶ application ──▶ domain
 | 4 | `KisPollerService` 1,274줄 God class (도메인+인프라+프레젠테이션+프롬프트 혼재), `market` 클라이언트 필드 `new` (§6 위반) | Phase 3: 파사드(216줄) + 협력자 7개로 분해, market 클라이언트 App 주입 전환 | ✅ 해소 |
 | 5 | `AlertComposer`가 이름과 달리 fetch 오케스트레이션 수행 (§7 위반), Treasury/Trust/Cancellation 3중복 | Phase 4: `AlertMessages`(순수 조립) + `DisclosureEnricher`(오케스트레이션) 분리, 3중복을 단일 파이프라인으로 통합 | ✅ 해소 |
 | 6 | `AppConfig` 64필드 God config — 어느 컨텍스트가 어떤 설정을 쓰는지 타입으로 안 드러남 | Phase 5: 컨텍스트별 중첩 record(Dart·Notify·News·Kind·Kis·Llm·Trade) 분해, 각 서비스는 자기 서브 config만 수령 | ✅ 해소 |
+| 7 | HTTP+JSON 보일러플레이트 중복 — 클라이언트 9곳이 각자 `new ObjectMapper()`, GET 요청 조립·전송 블록 다수 반복 | Phase 6a: `common.infra.HttpJson`(공용 `MAPPER` + `get`/`getJson`)로 통합, `OllamaClient`도 공용 빌더(TrustStores) 경유로 일관화 | ✅ 해소 |

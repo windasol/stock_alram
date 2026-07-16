@@ -1,8 +1,8 @@
 package com.example.dart.llm;
 
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
@@ -27,12 +27,10 @@ public class GeminiClient implements LlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(GeminiClient.class);
     private static final String API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/";
-    private static final ObjectMapper PARSER = new ObjectMapper();   // 응답 파싱 전용(정적·스레드 안전)
 
     private final String apiKey;
     private final String model;
     private final HttpClient httpClient;
-    private final ObjectMapper mapper = new ObjectMapper();
     private final Duration requestTimeout;
 
     public GeminiClient(String apiKey, String model) {
@@ -78,7 +76,7 @@ public class GeminiClient implements LlmClient {
             return null;
         }
         try {
-            ObjectNode body = mapper.createObjectNode();
+            ObjectNode body = HttpJson.MAPPER.createObjectNode();
             // system_instruction — 모델 역할·제약(숫자 지어내지 말 것 등)을 분리해 전달.
             body.putObject("system_instruction").putArray("parts").addObject().put("text", systemPrompt);
             ArrayNode contents = body.putArray("contents");
@@ -96,7 +94,7 @@ public class GeminiClient implements LlmClient {
                     .timeout(requestTimeout)
                     .header("Content-Type", "application/json")
                     .header("x-goog-api-key", apiKey)   // 키를 URL이 아닌 헤더로 — 로그 노출 방지
-                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
+                    .POST(HttpRequest.BodyPublishers.ofString(HttpJson.MAPPER.writeValueAsString(body)))
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -118,7 +116,7 @@ public class GeminiClient implements LlmClient {
      */
     static String extractText(String responseBody) {
         try {
-            JsonNode root = PARSER.readTree(responseBody);
+            JsonNode root = HttpJson.MAPPER.readTree(responseBody);
             JsonNode parts = root.path("candidates").path(0).path("content").path("parts");
             StringBuilder text = new StringBuilder();
             for (JsonNode part : parts) {
@@ -146,7 +144,7 @@ public class GeminiClient implements LlmClient {
      */
     static String extractSources(String responseBody) {
         try {
-            JsonNode chunks = PARSER.readTree(responseBody)
+            JsonNode chunks = HttpJson.MAPPER.readTree(responseBody)
                     .path("candidates").path(0).path("groundingMetadata").path("groundingChunks");
             if (!chunks.isArray() || chunks.isEmpty()) return "";
             StringBuilder sb = new StringBuilder("🔎 출처: ");

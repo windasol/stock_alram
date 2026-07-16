@@ -1,15 +1,14 @@
 package com.example.dart.kis.infra;
 
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -37,7 +36,6 @@ public class UsFuturesClient {
             new Symbol("YM=F", "다우"));
 
     private final HttpClient httpClient;
-    private final ObjectMapper mapper = new ObjectMapper();
 
     public UsFuturesClient() {
         this.httpClient = TrustStores.newHttpClient();
@@ -59,13 +57,8 @@ public class UsFuturesClient {
     private OptionalDouble fetchChangePct(String symbol) {
         try {
             String url = String.format(API, URLEncoder.encode(symbol, StandardCharsets.UTF_8));
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(10))
-                    .header("User-Agent", "Mozilla/5.0")   // 야후는 UA 없으면 거부(429/401)
-                    .GET()
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HttpJson.get(httpClient, URI.create(url), Duration.ofSeconds(10),
+                    "User-Agent", "Mozilla/5.0");   // 야후는 UA 없으면 거부(429/401)
             if (response.statusCode() != 200) {
                 log.warn("미국 선물 조회 실패 (symbol={}): status={}", symbol, response.statusCode());
                 return OptionalDouble.empty();
@@ -84,7 +77,7 @@ public class UsFuturesClient {
      */
     OptionalDouble parseChangePct(String json) {
         try {
-            JsonNode meta = mapper.readTree(json).path("chart").path("result").path(0).path("meta");
+            JsonNode meta = HttpJson.MAPPER.readTree(json).path("chart").path("result").path(0).path("meta");
             double price = meta.path("regularMarketPrice").asDouble(Double.NaN);
             double prev = meta.path("previousClose").asDouble(
                     meta.path("chartPreviousClose").asDouble(Double.NaN));
