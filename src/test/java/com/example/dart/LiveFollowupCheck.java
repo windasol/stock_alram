@@ -1,14 +1,14 @@
 package com.example.dart;
 
-import com.example.dart.dart.DartClient;
-import com.example.dart.filter.NewsFilter;
-import com.example.dart.kind.KindClient;
-import com.example.dart.kind.KindDocumentClient;
-import com.example.dart.model.Disclosure;
-import com.example.dart.notify.AlertComposer;
-import com.example.dart.parse.DocumentParser;
-import com.example.dart.quote.StockQuoteClient;
-import com.example.dart.service.DocumentService;
+import com.example.dart.disclosure.infra.DartClient;
+import com.example.dart.disclosure.domain.NewsFilter;
+import com.example.dart.disclosure.infra.KindClient;
+import com.example.dart.disclosure.infra.KindDocumentClient;
+import com.example.dart.disclosure.domain.Disclosure;
+import com.example.dart.disclosure.application.AlertComposer;
+import com.example.dart.disclosure.infra.DocumentParser;
+import com.example.dart.common.infra.StockQuoteClient;
+import com.example.dart.disclosure.application.DocumentService;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 

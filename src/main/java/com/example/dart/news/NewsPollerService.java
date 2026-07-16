@@ -2,7 +2,7 @@ package com.example.dart.news;
 
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.config.AppConfig;
-import com.example.dart.util.SeenStore;
+import com.example.dart.common.infra.SeenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

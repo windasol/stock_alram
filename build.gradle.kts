@@ -18,6 +18,8 @@ dependencies {
     implementation("io.github.cdimascio:dotenv-java:3.1.0")
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    // 아키텍처 규칙(docs/ARCHITECTURE.md §3·§4) 기계 검증 — 테스트 전용, 런타임 무프레임워크 유지
+    testImplementation("com.tngtech.archunit:archunit-junit5:1.3.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

@@ -1,6 +1,6 @@
 package com.example.dart.news;
 
-import com.example.dart.util.TrustStores;
+import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jsoup.Jsoup;

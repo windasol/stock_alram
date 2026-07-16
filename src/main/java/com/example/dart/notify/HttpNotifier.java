@@ -1,6 +1,6 @@
 package com.example.dart.notify;
 
-import com.example.dart.util.TrustStores;
+import com.example.dart.common.infra.TrustStores;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

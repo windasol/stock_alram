@@ -3,11 +3,11 @@ package com.example.dart.trade;
 import com.example.dart.common.domain.TradingSession;
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.config.AppConfig;
-import com.example.dart.kis.KisClient;
-import com.example.dart.kis.MinuteCandle;
+import com.example.dart.kis.infra.KisClient;
+import com.example.dart.kis.domain.MinuteCandle;
 import com.example.dart.notify.Notifier;
-import com.example.dart.util.KoreanMoney;
-import com.example.dart.util.MarketCalendar;
+import com.example.dart.common.domain.KoreanMoney;
+import com.example.dart.common.infra.MarketCalendar;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
