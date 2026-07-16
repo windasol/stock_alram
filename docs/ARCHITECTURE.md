@@ -156,3 +156,4 @@ infra ──▶ application ──▶ domain
 | 5 | `AlertComposer`가 이름과 달리 fetch 오케스트레이션 수행 (§7 위반), Treasury/Trust/Cancellation 3중복 | Phase 4: `AlertMessages`(순수 조립) + `DisclosureEnricher`(오케스트레이션) 분리, 3중복을 단일 파이프라인으로 통합 | ✅ 해소 |
 | 6 | `AppConfig` 64필드 God config — 어느 컨텍스트가 어떤 설정을 쓰는지 타입으로 안 드러남 | Phase 5: 컨텍스트별 중첩 record(Dart·Notify·News·Kind·Kis·Llm·Trade) 분해, 각 서비스는 자기 서브 config만 수령 | ✅ 해소 |
 | 7 | HTTP+JSON 보일러플레이트 중복 — 클라이언트 9곳이 각자 `new ObjectMapper()`, GET 요청 조립·전송 블록 다수 반복 | Phase 6a: `common.infra.HttpJson`(공용 `MAPPER` + `get`/`getJson`)로 통합, `OllamaClient`도 공용 빌더(TrustStores) 경유로 일관화 | ✅ 해소 |
+| 8 | 단일 poll 폴러 2곳(`PollerService`·`KindPollerService`)이 start/stop 생명주기 골격 중복 | Phase 6b: `common.infra.AbstractPoller`(시작 로그·고정지연 예약·graceful stop + `onStop` 훅)로 추출. 다중 스케줄 폴러(News·Kis)는 단일 poll 모델과 안 맞아 §9 따라 의도적 미상속 | ✅ 해소 |

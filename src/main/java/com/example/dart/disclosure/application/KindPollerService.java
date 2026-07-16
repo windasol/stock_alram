@@ -1,6 +1,7 @@
 package com.example.dart.disclosure.application;
 
 import com.example.dart.disclosure.domain.ContractInfo;
+import com.example.dart.common.infra.AbstractPoller;
 import com.example.dart.common.infra.PollBackoff;
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.common.infra.RetryScheduler;
@@ -16,8 +17,6 @@ import com.example.dart.disclosure.domain.DisclosureKeys;
 import com.example.dart.common.domain.KoreanMoney;
 import com.example.dart.common.infra.MarketCalendar;
 import com.example.dart.common.infra.SeenStore;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.LocalTime;
@@ -40,9 +39,8 @@ import java.util.stream.Collectors;
  * 본문(Stage 2) 필터는 생략 — KIND 뷰어 원문 파싱은 별도 작업이고, 수주공급계약의
  * 소액 계약 오탐을 약간 감수하는 대신 속도를 얻는다 (재현율 우선).
  */
-public class KindPollerService {
+public class KindPollerService extends AbstractPoller {
 
-    private static final Logger log = LoggerFactory.getLogger(KindPollerService.class);
     private static final ZoneId KST = ZoneId.of("Asia/Seoul");
     /** 교차중복 키 날짜 포맷 — DART rcept_dt(yyyyMMdd)와 동일해야 같은 공시가 매칭된다. */
     private static final DateTimeFormatter KEY_DATE_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
@@ -73,8 +71,6 @@ public class KindPollerService {
     /** 거래일 판정(주말·공휴일). 휴장일엔 거래소 공시가 없어 폴링을 건너뛴다. */
     private final MarketCalendar calendar;
     private final Set<String> allowedMarkets;
-    private final int intervalSec;
-    private final PollWorker scheduler;
     private final PollWorker enrichmentPool;
     private final RetryScheduler enrichRetry;
     /** 자동매매 트리거 리스너 — 비활성 시 null(무동작). 계약 규모 확정 시점에 호출한다. */
@@ -87,6 +83,8 @@ public class KindPollerService {
                              DocumentParser documentParser, StockQuoteClient quoteClient,
                              SeenStore seenStore, SeenStore disclosureKeys, AppConfig.KindConfig config,
                              MarketCalendar calendar) {
+        super("kind-poller", config.pollIntervalSec(),
+                String.format("KIND 폴링 시작 (주기: %d초, 운영시간 %s~%s KST)", config.pollIntervalSec(), OPEN, CLOSE));
         this.client = client;
         this.calendar = calendar;
         this.newsFilter = newsFilter;
@@ -103,8 +101,6 @@ public class KindPollerService {
                 : Arrays.stream(config.corpCls().split(","))
                         .map(String::trim).filter(s -> !s.isEmpty())
                         .collect(Collectors.toUnmodifiableSet());
-        this.intervalSec = config.pollIntervalSec();
-        this.scheduler = new PollWorker("kind-poller");
         this.enrichmentPool = new PollWorker("kind-enrich", 2);
         this.enrichRetry = new RetryScheduler(enrichmentPool, ENRICH_RETRY_DELAY_SEC, ENRICH_MAX_ATTEMPTS);
     }
@@ -114,18 +110,14 @@ public class KindPollerService {
         this.tradeListener = listener;
     }
 
-    public void start() {
-        log.info("KIND 폴링 시작 (주기: {}초, 운영시간 {}~{} KST)", intervalSec, OPEN, CLOSE);
-        scheduler.scheduleWithFixedDelay(this::poll, 0, intervalSec);
-    }
-
-    public void stop() {
-        scheduler.stop();
+    @Override
+    protected void onStop() {
         enrichmentPool.stop();
         log.info("KIND 폴링 중지 완료");
     }
 
-    private void poll() {
+    @Override
+    protected void poll() {
         if (backoff.shouldSkip()) return;
         ZonedDateTime now = ZonedDateTime.now(KST);
         if (!calendar.isTradingDay(now.toLocalDate())) return;   // 주말·공휴일엔 거래소 공시 없음

@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.common.infra.AbstractPoller;
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.common.infra.RetryScheduler;
 import com.example.dart.config.AppConfig;
@@ -12,8 +13,6 @@ import com.example.dart.notify.Notifier;
 import com.example.dart.pricetrack.application.DisclosurePriceTracker;
 import com.example.dart.disclosure.domain.DisclosureKeys;
 import com.example.dart.common.infra.SeenStore;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -27,9 +26,7 @@ import java.util.function.Supplier;
  *     폴링 루프를 막지 않아 다음 공시 처리가 지연되지 않는다.
  * (기존 본문 필터 게이트는 제거 — 소규모·조건부 계약도 일단 알리고 후속에서 규모를 표시한다.)
  */
-public class PollerService {
-
-    private static final Logger log = LoggerFactory.getLogger(PollerService.class);
+public class PollerService extends AbstractPoller {
 
     /**
      * DART 원문(document.xml)은 목록 등재보다 수 분~수 시간 늦게 공개된다(그 전엔 status 014).
@@ -60,7 +57,6 @@ public class PollerService {
     private final SeenStore disclosureKeys;
     private final AppConfig.DartConfig config;
     private final DisclosurePriceTracker priceTracker;
-    private final PollWorker scheduler;
     private final PollWorker enrichmentPool;
     /** 빠른 경로(KIND 본문) 재시도 — 짧게(10초×3회). 소진 시 DART 원문 경로로 폴백. */
     private final RetryScheduler fastRetry;
@@ -71,6 +67,8 @@ public class PollerService {
                          Notifier notifier, DisclosureEnricher enricher,
                          SeenStore seenStore, SeenStore disclosureKeys, AppConfig.DartConfig config,
                          DisclosurePriceTracker priceTracker) {
+        super("dart-poller", config.pollIntervalSec(),
+                "폴링 시작 (주기: " + config.pollIntervalSec() + "초)");
         this.dartClient = dartClient;
         this.newsFilter = newsFilter;
         this.notifier = notifier;
@@ -79,24 +77,19 @@ public class PollerService {
         this.disclosureKeys = disclosureKeys;
         this.config = config;
         this.priceTracker = priceTracker;
-        this.scheduler = new PollWorker("dart-poller");
         this.enrichmentPool = new PollWorker("dart-enrich", 2);
         this.fastRetry = new RetryScheduler(enrichmentPool, FAST_RETRY_DELAY_SEC, FAST_MAX_ATTEMPTS);
         this.enrichRetry = new RetryScheduler(enrichmentPool, ENRICH_RETRY_DELAY_SEC, ENRICH_MAX_ATTEMPTS);
     }
 
-    public void start() {
-        log.info("폴링 시작 (주기: {}초)", config.pollIntervalSec());
-        scheduler.scheduleWithFixedDelay(this::poll, 0, config.pollIntervalSec());
-    }
-
-    public void stop() {
-        scheduler.stop();
+    @Override
+    protected void onStop() {
         enrichmentPool.stop();
         log.info("폴링 중지 완료");
     }
 
-    private void poll() {
+    @Override
+    protected void poll() {
         try {
             for (Disclosure d : dartClient.fetchRecent(config.corpCls(), config.pblntfTy())) {
                 if (seenStore.contains(d.rceptNo())) continue;
