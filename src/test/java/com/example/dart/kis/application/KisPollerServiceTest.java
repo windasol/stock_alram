@@ -1,8 +1,12 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.text.TextTable;
+import com.example.dart.kis.domain.FlowPhase;
 import com.example.dart.kis.domain.Gainer;
 import com.example.dart.kis.domain.Investor;
 import com.example.dart.kis.domain.InvestorFlowItem;
+import com.example.dart.kis.domain.KisMoney;
+import com.example.dart.kis.domain.Session;
 import com.example.dart.kis.domain.InvestorPairItem;
 import com.example.dart.kis.domain.MarketInvestorFlow;
 import com.example.dart.kis.domain.Turnover;
@@ -33,46 +37,46 @@ class KisPollerServiceTest {
 
     @Test
     void 등락률_임계_이상이면_급등() {
-        assertTrue(KisPollerService.isBigGainer(item(18.0), MIN_CHG));
+        assertTrue(GainerScout.isBigGainer(item(18.0), MIN_CHG));
     }
 
     @Test
     void 등락률_임계_미만이면_제외() {
-        assertFalse(KisPollerService.isBigGainer(item(7.0), MIN_CHG));
+        assertFalse(GainerScout.isBigGainer(item(7.0), MIN_CHG));
     }
 
     @Test
     void 임계와_같으면_급등() {
-        assertTrue(KisPollerService.isBigGainer(item(10.0), MIN_CHG));
+        assertTrue(GainerScout.isBigGainer(item(10.0), MIN_CHG));
     }
 
     @Test
     void 하락이면_제외() {
-        assertFalse(KisPollerService.isBigGainer(item(-12.0), MIN_CHG));
+        assertFalse(GainerScout.isBigGainer(item(-12.0), MIN_CHG));
     }
 
     @Test
     void 장시작전이면_세션없음() {
-        assertNull(KisPollerService.sessionAt(LocalTime.of(8, 59)));
+        assertNull(Session.at(LocalTime.of(8, 59)));
     }
 
     @Test
     void 정규장_시간이면_J() {
-        assertEquals(KisPollerService.Session.REGULAR, KisPollerService.sessionAt(LocalTime.of(9, 0)));
-        assertEquals(KisPollerService.Session.REGULAR, KisPollerService.sessionAt(LocalTime.of(15, 39)));
-        assertEquals("J", KisPollerService.sessionAt(LocalTime.of(10, 0)).marketDiv);
+        assertEquals(Session.REGULAR, Session.at(LocalTime.of(9, 0)));
+        assertEquals(Session.REGULAR, Session.at(LocalTime.of(15, 39)));
+        assertEquals("J", Session.at(LocalTime.of(10, 0)).marketDiv);
     }
 
     @Test
     void 마감15시40분부터_NXT_애프터마켓_NX() {
-        assertEquals(KisPollerService.Session.NXT_AFTER, KisPollerService.sessionAt(LocalTime.of(15, 40)));
-        assertEquals(KisPollerService.Session.NXT_AFTER, KisPollerService.sessionAt(LocalTime.of(20, 0)));
-        assertEquals("NX", KisPollerService.sessionAt(LocalTime.of(18, 0)).marketDiv);
+        assertEquals(Session.NXT_AFTER, Session.at(LocalTime.of(15, 40)));
+        assertEquals(Session.NXT_AFTER, Session.at(LocalTime.of(20, 0)));
+        assertEquals("NX", Session.at(LocalTime.of(18, 0)).marketDiv);
     }
 
     @Test
     void 애프터마켓_종료후면_세션없음() {
-        assertNull(KisPollerService.sessionAt(LocalTime.of(20, 1)));
+        assertNull(Session.at(LocalTime.of(20, 1)));
     }
 
     @Test
@@ -83,7 +87,7 @@ class KisPollerServiceTest {
                 new Gainer("씨종목", "제약", 11.0),
                 new Gainer("디종목", "미분류", 30.0));
 
-        String msg = KisPollerService.composeSectorSummary(gainers, "정규장", LocalTime.of(14, 30));
+        String msg = SectorSummaryService.compose(gainers, "정규장", LocalTime.of(14, 30));
 
         // 헤더: 세션·시각·전체 종목 수
         assertTrue(msg.contains("정규장 14:30"), msg);
@@ -105,7 +109,7 @@ class KisPollerServiceTest {
                 new Turnover("SK하이닉스", "반도체", 1_200_000_000_000L),   // 1.2조 → 반도체 합 3.0조
                 new Turnover("현대차", "자동차", 700_000_000_000L));        // 0.7조
 
-        String msg = KisPollerService.composeTurnoverRanking(items, "정규장", LocalTime.of(14, 30));
+        String msg = TurnoverRankingService.compose(items, "정규장", LocalTime.of(14, 30));
 
         assertTrue(msg.contains("거래대금 섹터 랭킹"), msg);
         assertTrue(msg.contains("정규장 14:30"), msg);
@@ -120,15 +124,15 @@ class KisPollerServiceTest {
 
     @Test
     void formatWon_조_억_단위로_표기() {
-        assertEquals("4.2조", KisPollerService.formatWon(4_200_000_000_000L));
-        assertEquals("380억", KisPollerService.formatWon(38_000_000_000L));
+        assertEquals("4.2조", KisMoney.formatWon(4_200_000_000_000L));
+        assertEquals("380억", KisMoney.formatWon(38_000_000_000L));
     }
 
     @Test
     void formatNetWon_부호를_붙여_표기() {
-        assertEquals("+380억", KisPollerService.formatNetWon(38_000_000_000L));
-        assertEquals("-1,234억", KisPollerService.formatNetWon(-123_400_000_000L));
-        assertEquals("0", KisPollerService.formatNetWon(0));
+        assertEquals("+380억", KisMoney.formatNetWon(38_000_000_000L));
+        assertEquals("-1,234억", KisMoney.formatNetWon(-123_400_000_000L));
+        assertEquals("0", KisMoney.formatNetWon(0));
     }
 
     @Test
@@ -139,7 +143,7 @@ class KisPollerServiceTest {
         List<InvestorFlowItem> sells = List.of(
                 new InvestorFlowItem("035720", "카카오", -98_700_000_000L, -1.5));
 
-        String msg = KisPollerService.composeInvestorFlow(
+        String msg = InvestorFlowService.composeInvestorFlow(
                 Investor.FOREIGN, buys, sells, "정규장", LocalTime.of(13, 20), "가집계·추정");
 
         assertTrue(msg.contains("외국인"), msg);
@@ -166,7 +170,7 @@ class KisPollerServiceTest {
                 new InvestorFlowItem("005930", "삼성전자", 123_400_000_000L, 2.1));
         String indexLine = "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%";
 
-        String msg = KisPollerService.composeInvestorFlow(
+        String msg = InvestorFlowService.composeInvestorFlow(
                 Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간", indexLine);
 
         assertTrue(msg.contains(indexLine), msg);
@@ -181,9 +185,9 @@ class KisPollerServiceTest {
         List<InvestorFlowItem> buys = List.of(
                 new InvestorFlowItem("005930", "삼성전자", 123_400_000_000L, 2.1));
 
-        String withNull = KisPollerService.composeInvestorFlow(
+        String withNull = InvestorFlowService.composeInvestorFlow(
                 Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간", null);
-        String sixArg = KisPollerService.composeInvestorFlow(
+        String sixArg = InvestorFlowService.composeInvestorFlow(
                 Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간");
 
         assertEquals(sixArg, withNull);
@@ -192,7 +196,7 @@ class KisPollerServiceTest {
 
     @Test
     void 수급_랭킹_양쪽_다_비면_데이터없음_표기() {
-        String msg = KisPollerService.composeInvestorFlow(
+        String msg = InvestorFlowService.composeInvestorFlow(
                 Investor.INSTITUTION, List.of(), List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
         assertTrue(msg.contains("기관"), msg);
         assertTrue(msg.contains("(데이터 없음)"), msg);
@@ -206,7 +210,7 @@ class KisPollerServiceTest {
         List<InvestorPairItem> dualSell = List.of(
                 new InvestorPairItem("035720", "카카오", -30_000_000_000L, -15_000_000_000L, -1.5));
 
-        String msg = KisPollerService.composeInvestorPair(dualBuy, dualSell, "정규장", LocalTime.of(13, 20), "가집계·추정");
+        String msg = InvestorFlowService.composeInvestorPair(dualBuy, dualSell, "정규장", LocalTime.of(13, 20), "가집계·추정");
 
         assertTrue(msg.contains("외국인+기관 동시매매"), msg);
         assertTrue(msg.contains("정규장 13:20"), msg);
@@ -227,31 +231,31 @@ class KisPollerServiceTest {
     void 동시매매_한쪽이_비면_해당_종목_없음_표기() {
         List<InvestorPairItem> dualBuy = List.of(
                 new InvestorPairItem("005930", "삼성전자", 120_000_000_000L, 80_000_000_000L, 1.8));
-        String msg = KisPollerService.composeInvestorPair(dualBuy, List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
+        String msg = InvestorFlowService.composeInvestorPair(dualBuy, List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
         assertTrue(msg.contains("(해당 종목 없음)"), msg);
     }
 
     @Test
     void flowPhase는_시각에_따라_추정_KRX확정_NXT확정으로_갈린다() {
         // 09:00 이전엔 발송 없음(null)
-        assertNull(KisPollerService.flowPhaseAt(LocalTime.of(8, 59)));
+        assertNull(FlowPhase.at(LocalTime.of(8, 59)));
         // 09:00~15:35 추정
-        assertEquals(KisPollerService.FlowPhase.ESTIMATE, KisPollerService.flowPhaseAt(LocalTime.of(9, 0)));
-        assertEquals(KisPollerService.FlowPhase.ESTIMATE, KisPollerService.flowPhaseAt(LocalTime.of(15, 34)));
+        assertEquals(FlowPhase.ESTIMATE, FlowPhase.at(LocalTime.of(9, 0)));
+        assertEquals(FlowPhase.ESTIMATE, FlowPhase.at(LocalTime.of(15, 34)));
         // 15:35~20:05 KRX 확정
-        assertEquals(KisPollerService.FlowPhase.KRX_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(15, 35)));
-        assertEquals(KisPollerService.FlowPhase.KRX_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(20, 4)));
+        assertEquals(FlowPhase.KRX_CONFIRMED, FlowPhase.at(LocalTime.of(15, 35)));
+        assertEquals(FlowPhase.KRX_CONFIRMED, FlowPhase.at(LocalTime.of(20, 4)));
         // 20:05~ NXT 최종 확정
-        assertEquals(KisPollerService.FlowPhase.NXT_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(20, 5)));
-        assertEquals(KisPollerService.FlowPhase.NXT_CONFIRMED, KisPollerService.flowPhaseAt(LocalTime.of(23, 0)));
+        assertEquals(FlowPhase.NXT_CONFIRMED, FlowPhase.at(LocalTime.of(20, 5)));
+        assertEquals(FlowPhase.NXT_CONFIRMED, FlowPhase.at(LocalTime.of(23, 0)));
     }
 
     @Test
     void 확정_시장구분은_현재시각으로_판단_20시05분이후_NX_그전_J() {
-        assertEquals("J", KisPollerService.confirmedMarketDiv(LocalTime.of(15, 35)));
-        assertEquals("J", KisPollerService.confirmedMarketDiv(LocalTime.of(20, 4)));
-        assertEquals("NX", KisPollerService.confirmedMarketDiv(LocalTime.of(20, 5)));
-        assertEquals("NX", KisPollerService.confirmedMarketDiv(LocalTime.of(23, 0)));
+        assertEquals("J", FlowPhase.confirmedMarketDiv(LocalTime.of(15, 35)));
+        assertEquals("J", FlowPhase.confirmedMarketDiv(LocalTime.of(20, 4)));
+        assertEquals("NX", FlowPhase.confirmedMarketDiv(LocalTime.of(20, 5)));
+        assertEquals("NX", FlowPhase.confirmedMarketDiv(LocalTime.of(23, 0)));
     }
 
     @Test
@@ -269,7 +273,7 @@ class KisPollerServiceTest {
         Map<String, String> sectors = Map.of(
                 "005930", "반도체", "000660", "반도체", "373220", "2차전지", "035720", "미분류");
 
-        String facts = KisPollerService.buildFlowFacts(
+        String facts = MacroReportService.buildFlowFacts(
                 "🇰🇷 **국내 지수** | 코스피 -0.8%, 코스닥 +0.5%",
                 "📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억",
                 "💱 **원달러** | 1,350.2원 (+0.9%)",
@@ -304,7 +308,7 @@ class KisPollerServiceTest {
                 new InvestorFlowItem("005930", "삼성전자", 120_000_000_000L, 1.8));
         Map<String, String> sectors = Map.of("005930", "반도체");
 
-        String facts = KisPollerService.buildFlowFacts(
+        String facts = MacroReportService.buildFlowFacts(
                 null, null, null, null, frgnBuys, List.of(), List.of(), List.of(),
                 List.of(), null, sectors);
 
@@ -321,7 +325,7 @@ class KisPollerServiceTest {
         // 시장 전체(빈 라벨) 한 건 — 코스피/코스닥 분리 없이 한 줄.
         List<MarketInvestorFlow> flows = List.of(
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L));
-        String msg = KisPollerService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
+        String msg = InvestorFlowService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
 
         assertTrue(msg.startsWith("📊 **시장 수급** | 13:40  (가집계)"), msg);
         assertTrue(msg.contains("🌍 외국인 -3,200억"), msg);
@@ -340,7 +344,7 @@ class KisPollerServiceTest {
         List<MarketInvestorFlow> flows = List.of(
                 new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L),
                 new MarketInvestorFlow("코스닥", 80_000_000_000L, -30_000_000_000L, -50_000_000_000L));
-        String msg = KisPollerService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
+        String msg = InvestorFlowService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
 
         assertTrue(msg.contains("코스피  🌍 외국인 -3,200억 · 🏛 기관 +1,500억 · 👤 개인 +1,700억"), msg);
         assertTrue(msg.contains("코스닥  🌍 외국인 +800억 · 🏛 기관 -300억 · 👤 개인 -500억"), msg);
@@ -350,7 +354,7 @@ class KisPollerServiceTest {
 
     @Test
     void 시장수급_리포트라인은_코스피_코스닥을_슬래시로_구분한다() {
-        String line = KisPollerService.marketFlowLine(List.of(
+        String line = InvestorFlowService.marketFlowLine(List.of(
                 new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L),
                 new MarketInvestorFlow("코스닥", 80_000_000_000L, -30_000_000_000L, -50_000_000_000L)));
         assertEquals("📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억·개인 +1,700억 / "
@@ -363,7 +367,7 @@ class KisPollerServiceTest {
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L));
         String indexLine = "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%";
 
-        String msg = KisPollerService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계", indexLine);
+        String msg = InvestorFlowService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계", indexLine);
 
         // 제목(0) → 지수(1) → 수급(2) 순서
         List<String> lines = msg.lines().toList();
@@ -374,8 +378,8 @@ class KisPollerServiceTest {
 
     @Test
     void 시장_전체수급_리포트라인은_컴팩트_한줄이고_비면_null() {
-        assertNull(KisPollerService.marketFlowLine(List.of()));
-        String line = KisPollerService.marketFlowLine(List.of(
+        assertNull(InvestorFlowService.marketFlowLine(List.of()));
+        String line = InvestorFlowService.marketFlowLine(List.of(
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L)));
         assertEquals("📊 시장 수급 | 외국인 -3,200억·기관 +1,500억·개인 +1,700억", line);
     }
@@ -388,7 +392,7 @@ class KisPollerServiceTest {
                 new NewsArticle("연합뉴스", "A사 5조원 수주", "l2", null, "d", t.plusMinutes(1)),  // 정규화하면 중복
                 new NewsArticle("이데일리", "B사 신약 FDA 승인", "l3", null, "d", null));           // 발행시각 없음
 
-        String block = KisPollerService.buildNewsHeadlines(articles, 60);
+        String block = MacroReportService.buildNewsHeadlines(articles, 60);
 
         assertNotNull(block);
         assertTrue(block.startsWith("[지난 1시간 주요 뉴스 헤드라인]"), block);
@@ -401,17 +405,17 @@ class KisPollerServiceTest {
 
     @Test
     void 뉴스_헤드라인_블록은_비면_null() {
-        assertNull(KisPollerService.buildNewsHeadlines(List.of(), 60));
-        assertNull(KisPollerService.buildNewsHeadlines(null, 60));
+        assertNull(MacroReportService.buildNewsHeadlines(List.of(), 60));
+        assertNull(MacroReportService.buildNewsHeadlines(null, 60));
     }
 
     @Test
     void padDisplay_한글은_표시폭2로_정렬() {
         // "삼성전자"=표시폭8 → 폭12면 공백4 좌측정렬
-        assertEquals("삼성전자    ", KisPollerService.padDisplay("삼성전자", 12, true));
+        assertEquals("삼성전자    ", TextTable.padDisplay("삼성전자", 12, true));
         // 우측정렬(금액)
-        assertEquals("  +1,234억", KisPollerService.padDisplay("+1,234억", 10, false));
+        assertEquals("  +1,234억", TextTable.padDisplay("+1,234억", 10, false));
         // 폭 초과 시 표시폭 기준으로 자른다(전각이 폭을 안 넘게)
-        assertEquals("삼성", KisPollerService.padDisplay("삼성전자", 4, true));
+        assertEquals("삼성", TextTable.padDisplay("삼성전자", 4, true));
     }
 }

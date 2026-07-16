@@ -8,8 +8,10 @@ import com.example.dart.disclosure.infra.KindClient;
 import com.example.dart.disclosure.infra.KindDocumentClient;
 import com.example.dart.disclosure.application.KindPollerService;
 import com.example.dart.kis.application.KisAlertComposer;
-import com.example.dart.kis.infra.KisClient;
 import com.example.dart.kis.application.KisPollerService;
+import com.example.dart.kis.infra.DomesticMarketClient;
+import com.example.dart.kis.infra.KisClient;
+import com.example.dart.kis.infra.UsFuturesClient;
 import com.example.dart.llm.GeminiClient;
 import com.example.dart.llm.LlmClient;
 import com.example.dart.llm.OllamaClient;
@@ -184,7 +186,9 @@ public class App {
                     kisNotifier,     // 표·급등·섹터·수급 랭킹 → KIS 채널
                     newsNotifier,    // 시황 매크로 분석(LLM) → 뉴스 채널
                     new KisAlertComposer(), config, Path.of("kis_sectors.txt"), llm, marketCalendar,
-                    newsHeadlineBuffer);   // 지난 1시간 뉴스 헤드라인을 분석 재료로 읽는다
+                    newsHeadlineBuffer,    // 지난 1시간 뉴스 헤드라인을 분석 재료로 읽는다
+                    new UsFuturesClient(),       // 시황 리포트 '대외 여건' 소스
+                    new DomesticMarketClient()); // 국내 지수·환율·시장 수급(네이버) 소스
             kisPollerService.start();
         } else {
             kisPollerService = null;
