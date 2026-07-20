@@ -2,6 +2,7 @@ package com.example.dart.config;
 
 import io.github.cdimascio.dotenv.Dotenv;
 
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.List;
 
@@ -17,7 +18,8 @@ public record AppConfig(
         KindConfig kind,
         KisConfig kis,
         LlmConfig llm,
-        TradeConfig trade
+        TradeConfig trade,
+        EconCalendarConfig econCalendar
 ) {
 
     /** DART 공시 폴링 + 공시 제목 필터 설정. */
@@ -29,17 +31,19 @@ public record AppConfig(
             List<String> filterExtraKeywords,
             List<String> filterExcludeKeywords) {}
 
-    /** 알림 채널(Discord/Webex) 설정 — 공시 기본 채널 + 뉴스/KIS 분리 채널(선택). */
+    /** 알림 채널(Discord/Webex) 설정 — 공시 기본 채널 + 뉴스/KIS/경제캘린더 분리 채널(선택). */
     public record NotifyConfig(
             String notifier,
             String webexBotToken,
             String webexRoomId,
             String webexNewsRoomId,
             String webexKisRoomId,
+            String webexEconCalRoomId,
             String discordBotToken,
             String discordChannelId,
             String discordNewsChannelId,
-            String discordKisChannelId) {
+            String discordKisChannelId,
+            String discordEconCalChannelId) {
 
         /** 뉴스 전용 채널/룸 ID. 미설정이면 null — 공시와 같은 채널 사용. */
         public String newsChannelId() {
@@ -56,6 +60,16 @@ public record AppConfig(
             String id = switch (notifier) {
                 case "discord" -> discordKisChannelId;
                 case "webex"   -> webexKisRoomId;
+                default        -> null;
+            };
+            return (id == null || id.isBlank()) ? null : id;
+        }
+
+        /** 경제/실적 캘린더 전용 채널/룸 ID. 미설정이면 null — 호출부가 뉴스/공시 채널로 폴백한다. */
+        public String econCalChannelId() {
+            String id = switch (notifier) {
+                case "discord" -> discordEconCalChannelId;
+                case "webex"   -> webexEconCalRoomId;
                 default        -> null;
             };
             return (id == null || id.isBlank()) ? null : id;
@@ -152,6 +166,41 @@ public record AppConfig(
             String eodClose) {}
 
     /**
+     * 경제/실적 캘린더 다이제스트 설정 — 매일 아침 "향후 N일 주요 일정"(미국 지표·기업 실적·FOMC)을 발송한다.
+     * FRED(지표)·Finnhub(실적) 무료 API 키로 동작하며, 키는 시스템 환경변수/.env로 주입(env 우선).
+     */
+    public record EconCalendarConfig(
+            String fredApiKey,
+            String finnhubApiKey,
+            String sendTime,
+            int windowDays,
+            List<String> tickers,
+            List<String> releaseKeywords) {
+
+        /** 키가 하나라도 있으면 활성 — FRED만 있으면 지표만, Finnhub만 있으면 실적만 발송한다. */
+        public boolean enabled() {
+            return hasFred() || hasFinnhub();
+        }
+
+        public boolean hasFred() {
+            return fredApiKey != null && !fredApiKey.isBlank();
+        }
+
+        public boolean hasFinnhub() {
+            return finnhubApiKey != null && !finnhubApiKey.isBlank();
+        }
+
+        /** 발송 시각 파싱 — 형식이 잘못되면 08:00으로 안전 폴백(앱을 멈추지 않는다). */
+        public LocalTime sendTimeParsed() {
+            try {
+                return LocalTime.parse(sendTime.trim());
+            } catch (Exception e) {
+                return LocalTime.of(8, 0);
+            }
+        }
+    }
+
+    /**
      * 재현율 우선 — 이슈가 될 "가능성"이 있는 표현은 최대한 넓게 잡는다.
      * 넓은 키워드("임상", "특허")의 부정 문맥은 반전어(NEWS_FLIP_KEYWORDS)가 악재로 돌린다.
      */
@@ -230,6 +279,21 @@ public record AppConfig(
             "수주,공급계약,기술수출,품목허가,FDA 승인,무상증자,자사주 소각,흑자전환,우선협상대상자,임상 3상";
 
     /**
+     * 실적 캘린더 기본 워치리스트 — 글로벌 반도체·빅테크 대장주(미국 상장분). ASML·TSM은 ADR로 미국 상장돼
+     * 무료 티어에 잡힌다. 관심 종목은 ECON_CAL_TICKERS로 덮어쓴다.
+     */
+    private static final String DEFAULT_ECONCAL_TICKERS =
+            "AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,ASML,TSM,AMD,AVGO,MU,SMCI,INTC,QCOM";
+
+    /**
+     * FRED 경제지표 필터 키워드(영문 release_name의 부분 일치) — 시장 영향이 큰 미국 매크로만 남긴다.
+     * ECON_CAL_RELEASES로 덮어쓴다.
+     */
+    private static final String DEFAULT_ECONCAL_RELEASES =
+            "Consumer Price Index,Producer Price Index,Employment Situation,"
+            + "Gross Domestic Product,Personal Income,Retail";
+
+    /**
      * .env + 시스템 환경변수(env 우선)에서 설정을 읽어 컨텍스트별 서브 record로 조립한다.
      * 각 {@code loadXxx}가 자기 record만 책임지고, 조립 후 {@link #validate}가 필수·상호 제약을 검증한다.
      */
@@ -244,10 +308,11 @@ public record AppConfig(
         KisConfig kis = loadKis(dotenv);
         LlmConfig llm = loadLlm(dotenv);
         TradeConfig trade = loadTrade(dotenv);
+        EconCalendarConfig econCalendar = loadEconCalendar(dotenv);
 
         validate(dart, notify, news, kis);
 
-        return new AppConfig(dart, notify, news, kind, kis, llm, trade);
+        return new AppConfig(dart, notify, news, kind, kis, llm, trade, econCalendar);
     }
 
     private static DartConfig loadDart(Dotenv dotenv) {
@@ -269,10 +334,13 @@ public record AppConfig(
                 resolve(dotenv, "WEBEX_NEWS_ROOM_ID"),
                 // KIS 변동성 전용 채널(선택) — 미설정이면 공시 채널 공유. 뉴스 채널 분리와 동일 패턴.
                 resolve(dotenv, "WEBEX_KIS_ROOM_ID"),
+                // 경제/실적 캘린더 전용 채널(선택) — 미설정이면 뉴스/공시 채널로 폴백.
+                resolve(dotenv, "WEBEX_ECONCAL_ROOM_ID"),
                 resolve(dotenv, "DISCORD_BOT_TOKEN"),
                 resolve(dotenv, "DISCORD_CHANNEL_ID"),
                 resolve(dotenv, "DISCORD_NEWS_CHANNEL_ID"),
-                resolve(dotenv, "DISCORD_KIS_CHANNEL_ID"));
+                resolve(dotenv, "DISCORD_KIS_CHANNEL_ID"),
+                resolve(dotenv, "DISCORD_ECONCAL_CHANNEL_ID"));
     }
 
     private static NewsConfig loadNews(Dotenv dotenv) {
@@ -373,6 +441,23 @@ public record AppConfig(
         return new TradeConfig(autoTradeEnabled, autoTradeMode, autoTradeBudgetWon, autoTradeMinSalesRatio,
                 autoTradeStopLossPct, autoTradeTakeProfitPct, autoTradeMaxPositions,
                 autoTradeMonitorSec, autoTradeEodClose);
+    }
+
+    /**
+     * 경제/실적 캘린더 다이제스트 설정 — 키(FRED·Finnhub)는 시스템 환경변수/.env로 주입(env 우선).
+     * 키가 하나라도 있으면 자동 활성(별도 ENABLED 플래그 없음, KIS·네이버와 동일 패턴).
+     */
+    private static EconCalendarConfig loadEconCalendar(Dotenv dotenv) {
+        // 매일 발송 시각(KST, HH:mm). 기본 08:00 — 장 시작 전 그날+향후 일정을 훑도록.
+        String sendTime  = resolveOrDefault(dotenv, "ECON_CAL_SEND_TIME", "08:00");
+        // 오늘부터 며칠 앞까지 볼지. 기본 5(오늘~+5일).
+        int windowDays   = Integer.parseInt(resolveOrDefault(dotenv, "ECON_CAL_WINDOW_DAYS", "5"));
+        return new EconCalendarConfig(
+                resolve(dotenv, "FRED_API_KEY"),
+                resolve(dotenv, "FINNHUB_API_KEY"),
+                sendTime, windowDays,
+                parseCsv(resolveOrDefault(dotenv, "ECON_CAL_TICKERS", DEFAULT_ECONCAL_TICKERS)),
+                parseCsv(resolveOrDefault(dotenv, "ECON_CAL_RELEASES", DEFAULT_ECONCAL_RELEASES)));
     }
 
     /** 필수값·선택자별 조건부 필수·키 쌍 짝맞춤을 검증한다. 문제가 있으면 즉시 {@link IllegalStateException}. */

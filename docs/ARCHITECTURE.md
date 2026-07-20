@@ -19,6 +19,7 @@ stock_alram의 구조 규칙 문서. **새 클래스 추가·패키지 이동·�
 | **KIS 시장분석 (kis)** | `kis/` | 급등·거래대금·수급·시황 리포트 | `kis-poller` | `kis_sectors.txt`, `kis_token.txt` | `KIS_APP_KEY` 존재 |
 | **뉴스 (news)** | `news/` | RSS/구글/네이버 헤드라인 수집 → 버퍼 | `news-poller` | `seen_news.txt` | `NEWS_ENABLED` |
 | **자동매매 (trade)** | `trade/` | 계약 공시 신호 → 드라이런 매매 | `auto-trade` | (메모리) | `AUTO_TRADE_ENABLED` |
+| **경제캘린더 (econcal)** | `econcal/` | 매일 아침 향후 N일 미국 지표(FRED)·기업 실적(Finnhub)·FOMC 다이제스트 | `econcal-poller` | (없음 — 발송 시각 스케줄로 이중발송 방지) | `FRED_API_KEY` 또는 `FINNHUB_API_KEY` 존재 |
 | **알림 (notify)** | `notify/` | Discord/Webex 발송 | 호출자 스레드 | — | 항상 |
 | **LLM (llm)** | `llm/` | Gemini/Ollama 시황 분석 | 호출자 스레드 | — | `MARKET_REPORT_*` |
 

@@ -22,6 +22,9 @@ import com.example.dart.news.NewsPollerService;
 import com.example.dart.news.RssClient;
 import com.example.dart.news.RssFeed;
 import com.example.dart.disclosure.application.DisclosureEnricher;
+import com.example.dart.econcal.application.EconCalendarPoller;
+import com.example.dart.econcal.infra.FinnhubClient;
+import com.example.dart.econcal.infra.FredClient;
 import com.example.dart.notify.DiscordService;
 import com.example.dart.notify.Notifier;
 import com.example.dart.notify.WebexService;
@@ -199,8 +202,37 @@ public class App {
             log.info("뉴스 폴링 비활성화 (NEWS_ENABLED=false)");
         }
 
+        // 경제/실적 캘린더 다이제스트 — 매일 아침 향후 N일의 미국 지표(FRED)·기업 실적(Finnhub)·FOMC를 한 번 발송.
+        // 키가 하나라도 있으면 활성. 전용 채널이 설정되면 분리, 아니면 뉴스 채널(없으면 공시 채널)로 폴백.
+        EconCalendarPoller econCalPoller = null;
+        Notifier econCalNotifier = null;   // 전용 채널을 새로 연 경우에만 non-null(종료 시 stop 대상)
+        if (config.econCalendar().enabled()) {
+            FredClient fredClient = config.econCalendar().hasFred()
+                    ? new FredClient(config.econCalendar().fredApiKey()) : null;
+            FinnhubClient finnhubClient = config.econCalendar().hasFinnhub()
+                    ? new FinnhubClient(config.econCalendar().finnhubApiKey()) : null;
+
+            String econCalChannelId = config.notification().econCalChannelId();
+            Notifier target;
+            if (econCalChannelId != null) {
+                econCalNotifier = createNotifier(config, econCalChannelId);
+                econCalNotifier.start();
+                econCalNotifier.send("📅 경제/실적 캘린더 알림이 시작되었습니다. (매일 아침 향후 일정 발송)");
+                target = econCalNotifier;
+                log.info("경제/실적 캘린더 채널 분리 (channel/room: {})", econCalChannelId);
+            } else {
+                target = newsNotifier;   // 뉴스 채널 공유(뉴스 채널이 없으면 그 자체가 공시 채널)
+            }
+            econCalPoller = new EconCalendarPoller(fredClient, finnhubClient, target, config.econCalendar());
+            econCalPoller.start();
+        } else {
+            log.info("경제/실적 캘린더 다이제스트 비활성화 (FRED_API_KEY/FINNHUB_API_KEY 미설정)");
+        }
+
         // 람다 캡처용 final 참조 (kisNotifier는 위에서 재할당될 수 있어 effectively final이 아님).
         final Notifier kisNotifierRef = kisNotifier;
+        final EconCalendarPoller econCalPollerRef = econCalPoller;
+        final Notifier econCalNotifierRef = econCalNotifier;
         final boolean separateKisChannelRef = separateKisChannel;
         final AutoTradeService autoTraderRef = autoTrader;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -210,10 +242,12 @@ public class App {
             if (kindPollerService != null) kindPollerService.stop();
             if (kisPollerService != null) kisPollerService.stop();
             if (newsPollerService != null) newsPollerService.stop();
+            if (econCalPollerRef != null) econCalPollerRef.stop();
             if (autoTraderRef != null) autoTraderRef.stop();
             notifier.stop();
             if (newsNotifier != notifier) newsNotifier.stop();
             if (separateKisChannelRef) kisNotifierRef.stop();
+            if (econCalNotifierRef != null) econCalNotifierRef.stop();
             log.info("봇 종료 완료");
         }));
     }
