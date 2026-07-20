@@ -1,16 +1,14 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.disclosure.domain.AlertMessages;
 import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.common.domain.KoreanMoney;
 import com.example.dart.disclosure.domain.NewsFilter;
-import com.example.dart.disclosure.infra.DocumentParser;
 import com.example.dart.disclosure.infra.KindDisclosure;
 
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.OptionalLong;
 
 /**
@@ -45,35 +43,9 @@ public class KindAlertComposer {
      * @param marketCap 종목 시가총액(원) — 종목코드 없거나 조회 실패면 empty
      */
     public String composeFollowup(KindDisclosure d, ContractInfo c, OptionalLong marketCap) {
-        StringBuilder sb = new StringBuilder(
-                String.format("📊 **%s시총·매출 대비** | %s — %s",
-                        NewsFilter.isCorrection(d.title()) ? "[정정] " : "", d.company(), d.title()));
-
-        if (c.contractWon().isPresent()) {
-            long won = c.contractWon().getAsLong();
-            sb.append("\n💰 계약금액 ").append(KoreanMoney.format(won));
-
-            // 매출 대비 % — 공시 명시값(거래소 표준) 우선, 없으면 계약금액÷매출액. 연환산은 안 함(공시값과 일치).
-            String salesLabel = ContractInfo.salesRatioLabel(won, c.recentRevenueWon(), c.salesRatioPct());
-            if (salesLabel != null) {
-                sb.append(" · ").append(salesLabel);
-            }
-
-            // 시총 대비 % — 뷰어에서 읽은 종목코드로 조회한 시가총액 대비(딜 규모 vs 회사 가치라 총액 기준).
-            if (marketCap.isPresent() && marketCap.getAsLong() > 0) {
-                sb.append(String.format(" · 시총 대비 %.1f%%", won * 100.0 / marketCap.getAsLong()));
-            }
-        }
-
-        // 📈 핵심정보 한 줄 — 시총·매출 원시값 + 계약 부가정보(있는 것만).
-        List<String> info = new ArrayList<>();
-        marketCap.ifPresent(v -> info.add("시총 " + KoreanMoney.format(v)));
-        c.recentRevenueWon().ifPresent(rev -> info.add("매출액 " + KoreanMoney.format(rev)));
-        if (c.counterparty() != null) info.add("계약상대방 " + c.counterparty());
-        if (c.period() != null) info.add("계약기간 " + c.period());
-        if (!info.isEmpty()) sb.append("\n📈 ").append(String.join(" · ", info));
-
-        return sb.toString();
+        // 본문 조립은 DART 경로와 동일 — AlertMessages.contractBody 공유(중복 제거). KIND는 매출액을 본문에서 읽는다.
+        return AlertMessages.contractBody(
+                NewsFilter.isCorrection(d.title()), d.company(), d.title(), c, marketCap, c.recentRevenueWon());
     }
 
     /**

@@ -36,9 +36,19 @@ public final class AlertMessages {
      * 링크는 넣지 않는다(원문은 헤더 알림의 링크로 확인).
      */
     public static String followup(Disclosure d, ContractInfo c, OptionalLong cap, OptionalLong revenue) {
+        return contractBody(NewsFilter.isCorrection(d.reportNm()), d.corpName(), d.reportNm(), c, cap, revenue);
+    }
+
+    /**
+     * 계약 규모 후속 본문의 순수 조립 — DART 폴러(domain)와 KIND 폴러(application)가 공유한다.
+     * 두 경로는 매출액 출처만 다르다(DART는 corp_code 백필 매출, KIND는 본문 최근매출액) — 그 값을
+     * {@code revenue}로 받아 매출 대비 %와 📈 매출액 줄에 동일하게 쓴다. 헤더 아이콘·링크는 각 경로가 따로 붙인다.
+     */
+    public static String contractBody(boolean correction, String company, String title,
+                                      ContractInfo c, OptionalLong cap, OptionalLong revenue) {
         StringBuilder sb = new StringBuilder(
                 String.format("📊 **%s시총·매출 대비** | %s — %s",
-                        NewsFilter.isCorrection(d.reportNm()) ? "[정정] " : "", d.corpName(), d.reportNm()));
+                        correction ? "[정정] " : "", company, title));
 
         if (c.contractWon().isPresent()) {
             long won = c.contractWon().getAsLong();
