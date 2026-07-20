@@ -1,5 +1,6 @@
 package com.example.dart.trade;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.domain.TradingSession;
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.config.AppConfig;
@@ -35,7 +36,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AutoTradeService implements TradeSignalListener {
 
     private static final Logger log = LoggerFactory.getLogger(AutoTradeService.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
     private static final DateTimeFormatter HHMMSS = DateTimeFormatter.ofPattern("HHmmss");
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 

@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.disclosure.domain.AlertMessages;
 import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.common.domain.KoreanMoney;
@@ -21,7 +22,7 @@ import java.util.OptionalLong;
 public class KindAlertComposer {
 
     private static final DateTimeFormatter DETECT_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
 
     /** 1단계 — 감지 즉시 전송할 헤더. 본문 조회 없음(가장 빠름). */
     public String compose(KindDisclosure d, NewsFilter.TitleMatch match) {

@@ -1,5 +1,6 @@
 package com.example.dart.news;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.infra.TrustStores;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -30,7 +31,7 @@ import java.util.Locale;
 public class RssClient {
 
     private static final Logger log = LoggerFactory.getLogger(RssClient.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
 
     /**
      * 피드마다 pubDate 시간대 표기가 다르다 — 순서대로 시도:

@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.disclosure.domain.ContractInfo;
 import com.example.dart.common.infra.AbstractPoller;
 import com.example.dart.common.infra.PollBackoff;
@@ -41,7 +42,7 @@ import java.util.stream.Collectors;
  */
 public class KindPollerService extends AbstractPoller {
 
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
     /** 교차중복 키 날짜 포맷 — DART rcept_dt(yyyyMMdd)와 동일해야 같은 공시가 매칭된다. */
     private static final DateTimeFormatter KEY_DATE_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
 

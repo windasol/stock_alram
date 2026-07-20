@@ -34,6 +34,7 @@ import com.example.dart.pricetrack.application.DisclosurePriceTracker;
 import com.example.dart.disclosure.application.DocumentService;
 import com.example.dart.disclosure.application.PollerService;
 import com.example.dart.trade.AutoTradeService;
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.infra.MarketCalendar;
 import com.example.dart.common.infra.SeenStore;
 import com.example.dart.common.infra.SingleInstanceLock;
@@ -42,7 +43,6 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.time.LocalDate;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
@@ -260,7 +260,7 @@ public class App {
         Path holidayFile = Path.of("krx_holidays.txt");
         Set<LocalDate> holidays = new TreeSet<>(MarketCalendar.loadFile(holidayFile));
         if (kisClient != null) {
-            List<LocalDate> fetched = kisClient.marketClosedDays(LocalDate.now(ZoneId.of("Asia/Seoul")));
+            List<LocalDate> fetched = kisClient.marketClosedDays(LocalDate.now(KstTime.ZONE));
             if (!fetched.isEmpty()) {
                 holidays.addAll(fetched);
                 MarketCalendar.saveFile(holidayFile, holidays);   // 실측 성공 시에만 캐시 갱신(빈 조회로 덮어쓰지 않음)

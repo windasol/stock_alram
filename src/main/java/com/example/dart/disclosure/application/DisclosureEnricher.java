@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.domain.KoreanMoney;
 import com.example.dart.common.infra.StockQuoteClient;
 import com.example.dart.disclosure.domain.AlertMessages;
@@ -33,7 +34,7 @@ import java.util.function.Function;
 public class DisclosureEnricher {
 
     private static final Logger log = LoggerFactory.getLogger(DisclosureEnricher.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
 
     private final DocumentService documentService;
     private final NewsFilter newsFilter;

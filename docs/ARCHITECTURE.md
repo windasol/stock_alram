@@ -145,7 +145,7 @@ infra ──▶ application ──▶ domain
 
 ## §10. 위반 해소 이력
 
-리팩토링 Phase 1~5로 아래 위반이 모두 해소됐다. **이 표가 비었는데 코드에 위반이 있다면 문서를
+리팩토링 Phase 1~7로 아래 위반·중복이 모두 해소됐다. **이 표가 비었는데 코드에 위반이 있다면 문서를
 갱신하라 — 문서가 현실과 다르면 문서가 죽는다.** 현재 알려진 미해소 위반은 없다(ArchUnit 그린).
 
 | # | 위반 | 해소 | 상태 |
@@ -162,3 +162,4 @@ infra ──▶ application ──▶ domain
 | 10 | `KisClient` 799줄 — HTTP 조회 + 토큰 수명 + 11개 응답 파싱이 한 클래스에 혼재 | Phase 6d: 순수 파싱을 `kis.infra.KisResponseParser`(정적, 도메인 매핑), 토큰 발급·영속화·재사용을 `kis.infra.KisTokenStore`로 분리. `KisClient`는 요청 조립·전송·유량제한만(~380줄). 파싱 테스트 19개는 `KisResponseParserTest`로 이관 | ✅ 해소 |
 | 11 | DART 후속 메시지 조립이 domain(`AlertMessages.followup`)과 application(`KindAlertComposer.composeFollowup`)에 near-verbatim 2벌 중복 (매출액 출처만 상이) | Phase 7a: 공용 순수 빌더 `AlertMessages.contractBody`로 통합, 두 경로가 위임. 회귀 방지 스냅샷 `AlertMessagesTest` 신설 | ✅ 해소 |
 | 12 | JSON POST 조립(`newBuilder().POST(ofString(...))` + `Content-Type: application/json`)이 4곳(`HttpNotifier`·`KisTokenStore`·`GeminiClient`·`OllamaClient`)에 손으로 반복 — `HttpJson`은 GET만 커버 | Phase 7b: `HttpJson.post`(GET과 대칭, 상태검사·파싱은 호출부) 추가로 통합. 폼 전송(`KindClient`, x-www-form-urlencoded)은 대상 외. `HttpJsonTest`에 POST 케이스 보강 | ✅ 해소 |
+| 13 | `ZoneId.of("Asia/Seoul")`(KST)가 13개 파일에 각자 재선언 — 존 문자열 오타가 조용한 시각 버그가 될 위험 | Phase 7c: `common.domain.KstTime.ZONE`(순수 도메인 상수) 단일 정의로 통합, 각 파일은 이를 참조. 자기완결적 포맷터(HH:mm 등 지역 의미명)는 §9 따라 존치 | ✅ 해소 |

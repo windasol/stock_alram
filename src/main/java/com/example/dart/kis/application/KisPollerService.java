@@ -1,5 +1,6 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.infra.MarketCalendar;
 import com.example.dart.common.infra.PollBackoff;
 import com.example.dart.common.infra.PollWorker;
@@ -35,7 +36,7 @@ import java.util.List;
 public class KisPollerService {
 
     private static final Logger log = LoggerFactory.getLogger(KisPollerService.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
 
     /**
      * 재시작 후 첫 시황분석 발송 지연(초). 인메모리 뉴스 버퍼는 재시작 시 비므로, 뉴스 폴러

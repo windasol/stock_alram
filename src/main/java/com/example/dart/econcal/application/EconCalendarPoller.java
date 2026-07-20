@@ -1,5 +1,6 @@
 package com.example.dart.econcal.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.config.AppConfig;
 import com.example.dart.econcal.domain.EconCalendarComposer;
@@ -31,7 +32,7 @@ import java.util.List;
 public class EconCalendarPoller {
 
     private static final Logger log = LoggerFactory.getLogger(EconCalendarPoller.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
     private static final long DAY_SEC = 24 * 60 * 60L;
 
     /** 미국 지표 소스. null이면 FRED 키 미설정 — 지표 없이 실적·FOMC만. */

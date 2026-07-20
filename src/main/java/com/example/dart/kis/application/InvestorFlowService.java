@@ -1,5 +1,6 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.infra.MarketCalendar;
 import com.example.dart.common.text.TextTable;
 import com.example.dart.kis.domain.FlowPhase;
@@ -35,7 +36,7 @@ import java.util.stream.Collectors;
 public class InvestorFlowService {
 
     private static final Logger log = LoggerFactory.getLogger(InvestorFlowService.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
     private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
 
     /** 외국인·기관 수급 랭킹에서 순매수/순매도 각각 보여줄 종목 수. */

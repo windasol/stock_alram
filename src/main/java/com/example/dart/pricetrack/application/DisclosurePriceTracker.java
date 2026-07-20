@@ -1,5 +1,6 @@
 package com.example.dart.pricetrack.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.domain.TradingSession;
 import com.example.dart.common.infra.PollWorker;
 import com.example.dart.kis.infra.KisClient;
@@ -44,7 +45,7 @@ import java.util.List;
 public class DisclosurePriceTracker {
 
     private static final Logger log = LoggerFactory.getLogger(DisclosurePriceTracker.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
     private static final DateTimeFormatter HHMMSS = DateTimeFormatter.ofPattern("HHmmss");
     /** 고점/저점 발생 시각 표기용 — "10:07". */
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");

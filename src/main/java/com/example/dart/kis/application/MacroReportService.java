@@ -1,5 +1,6 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.infra.MarketCalendar;
 import com.example.dart.kis.domain.InvestorFlowItem;
 import com.example.dart.kis.domain.InvestorPairItem;
@@ -37,7 +38,7 @@ import java.util.stream.Collectors;
 public class MacroReportService {
 
     private static final Logger log = LoggerFactory.getLogger(MacroReportService.class);
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
     private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
     /** 시황 분석 '기준 날짜' 앵커용 — 예: 2026년 07월 10일(금). 요일까지 박아 LLM이 '오늘/이번 주'를 정확히 잡게 한다. */
     private static final DateTimeFormatter MACRO_DATE_FMT =

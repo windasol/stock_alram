@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.infra;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.disclosure.domain.DisclosureKeys;
 import com.example.dart.common.infra.TrustStores;
 import org.jsoup.Jsoup;
@@ -29,7 +30,7 @@ import java.util.regex.Pattern;
  */
 public class KindClient {
 
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
     private static final String ENDPOINT = "https://kind.krx.co.kr/disclosure/todaydisclosure.do";
 
     /** onclick="openDisclsViewer('20260612000528','')" 에서 접수번호 추출. */

@@ -1,5 +1,6 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.kis.domain.VolumeRankItem;
 
 import java.time.ZoneId;
@@ -10,7 +11,7 @@ import java.time.format.DateTimeFormatter;
 public class KisAlertComposer {
 
     private static final DateTimeFormatter DETECT_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
-    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+    private static final ZoneId KST = KstTime.ZONE;
 
     /** @param session 감지 시점의 시장 세션(정규장 / NXT 프리·애프터마켓) — KisPollerService.sessionLabel */
     public String compose(VolumeRankItem it, String session) {
