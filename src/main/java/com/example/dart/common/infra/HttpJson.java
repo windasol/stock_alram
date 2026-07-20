@@ -52,4 +52,27 @@ public final class HttpJson {
             throws IOException, InterruptedException {
         return MAPPER.readTree(get(client, uri, timeout, headers).body());
     }
+
+    /**
+     * 표준 JSON POST 전송 — {@code Content-Type: application/json}을 기본 설정하고, {@code jsonBody}를
+     * 그대로 본문으로 보낸다. 선택 헤더(키·값 번갈아)와 상태코드 검사·응답 파싱은 {@link #get}과 동일하게
+     * 호출부에 맡긴다 — 성공 판정(HTTP status vs. payload status)과 실패 로그가 API마다 다르기 때문이다.
+     * 폼 전송(application/x-www-form-urlencoded)은 대상이 아니다.
+     *
+     * @param jsonBody 직렬화 완료된 JSON 문자열(예: {@code MAPPER.writeValueAsString(node)})
+     * @param headers  키·값 쌍을 번갈아 나열(예: {@code "x-goog-api-key", key}). 없으면 생략.
+     */
+    public static HttpResponse<String> post(HttpClient client, URI uri, String jsonBody,
+                                            Duration timeout, String... headers)
+            throws IOException, InterruptedException {
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(uri)
+                .timeout(timeout)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody));
+        for (int i = 0; i + 1 < headers.length; i += 2) {
+            builder.header(headers[i], headers[i + 1]);
+        }
+        return client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+    }
 }

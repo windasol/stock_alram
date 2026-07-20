@@ -7,10 +7,10 @@ import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * JSON POST 기반 알림 채널의 공통 골격.
@@ -24,14 +24,12 @@ abstract class HttpNotifier implements Notifier {
 
     protected void postJson(String url, Map<String, String> headers, Map<String, ?> payload) {
         try {
-            HttpRequest.Builder builder = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(HttpJson.MAPPER.writeValueAsString(payload)));
-            headers.forEach(builder::header);
-
-            HttpResponse<String> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            // 채널별 추가 헤더(Authorization 등)를 공용 post의 가변인자(키·값 번갈아)로 펼친다.
+            String[] extraHeaders = headers.entrySet().stream()
+                    .flatMap(e -> Stream.of(e.getKey(), e.getValue()))
+                    .toArray(String[]::new);
+            HttpResponse<String> response = HttpJson.post(httpClient, URI.create(url),
+                    HttpJson.MAPPER.writeValueAsString(payload), Duration.ofSeconds(15), extraHeaders);
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 log.debug("메시지 전송 완료 (status={})", response.statusCode());

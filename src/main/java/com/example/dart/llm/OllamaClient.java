@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 
@@ -69,14 +68,9 @@ public class OllamaClient implements LlmClient {
             messages.addObject().put("role", "system").put("content", systemPrompt);
             messages.addObject().put("role", "user").put("content", userPrompt);
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + "/api/chat"))
-                    .timeout(requestTimeout)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(HttpJson.MAPPER.writeValueAsString(body)))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HttpJson.post(
+                    httpClient, URI.create(baseUrl + "/api/chat"),
+                    HttpJson.MAPPER.writeValueAsString(body), requestTimeout);
             if (response.statusCode() != 200) {
                 log.warn("Ollama 응답 실패: status={}, body={}", response.statusCode(), brief(response.body()));
                 return null;

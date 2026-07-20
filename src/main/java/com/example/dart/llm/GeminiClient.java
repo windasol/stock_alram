@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 
@@ -89,15 +88,10 @@ public class GeminiClient implements LlmClient {
                 body.putArray("tools").addObject().putObject("google_search");
             }
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(API_BASE + model + ":generateContent"))
-                    .timeout(requestTimeout)
-                    .header("Content-Type", "application/json")
-                    .header("x-goog-api-key", apiKey)   // 키를 URL이 아닌 헤더로 — 로그 노출 방지
-                    .POST(HttpRequest.BodyPublishers.ofString(HttpJson.MAPPER.writeValueAsString(body)))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HttpJson.post(
+                    httpClient, URI.create(API_BASE + model + ":generateContent"),
+                    HttpJson.MAPPER.writeValueAsString(body), requestTimeout,
+                    "x-goog-api-key", apiKey);   // 키를 URL이 아닌 헤더로 — 로그 노출 방지
             if (response.statusCode() != 200) {
                 log.warn("Gemini 응답 실패: status={}, grounded={}, body={}", response.statusCode(), grounded, brief(response.body()));
                 return null;

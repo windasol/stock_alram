@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -62,14 +61,8 @@ final class KisTokenStore {
                 .put("appsecret", appSecret)
                 .toString();
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + TOKEN_PATH))
-                .timeout(Duration.ofSeconds(15))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = HttpJson.post(
+                httpClient, URI.create(baseUrl + TOKEN_PATH), body, Duration.ofSeconds(15));
         JsonNode root = HttpJson.MAPPER.readTree(response.body());
         String accessToken = root.path("access_token").asText("");
         if (accessToken.isEmpty()) {

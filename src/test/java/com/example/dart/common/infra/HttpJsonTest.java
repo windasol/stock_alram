@@ -25,12 +25,18 @@ class HttpJsonTest {
 
     private HttpServer server;
     private final AtomicReference<String> seenHeader = new AtomicReference<>();
+    private final AtomicReference<String> seenMethod = new AtomicReference<>();
+    private final AtomicReference<String> seenContentType = new AtomicReference<>();
+    private final AtomicReference<String> seenBody = new AtomicReference<>();
 
     @BeforeEach
     void startServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
             seenHeader.set(exchange.getRequestHeaders().getFirst("X-Test"));
+            seenMethod.set(exchange.getRequestMethod());
+            seenContentType.set(exchange.getRequestHeaders().getFirst("Content-Type"));
+            seenBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] body = "{\"ok\":true,\"n\":42}".getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, body.length);
             exchange.getResponseBody().write(body);
@@ -61,6 +67,17 @@ class HttpJsonTest {
         JsonNode root = HttpJson.getJson(HttpClient.newHttpClient(), uri(), Duration.ofSeconds(5));
         assertTrue(root.path("ok").asBoolean());
         assertEquals(42, root.path("n").asInt());
+    }
+
+    @Test
+    void post는_json본문과_기본ContentType_추가헤더를_싣는다() throws Exception {
+        HttpResponse<String> res = HttpJson.post(HttpClient.newHttpClient(), uri(),
+                "{\"a\":1}", Duration.ofSeconds(5), "X-Test", "world");
+        assertEquals(200, res.statusCode());
+        assertEquals("POST", seenMethod.get());
+        assertEquals("application/json", seenContentType.get());
+        assertEquals("{\"a\":1}", seenBody.get());
+        assertEquals("world", seenHeader.get());   // 가변인자 헤더가 기본 Content-Type과 함께 실린다
     }
 
     @Test
