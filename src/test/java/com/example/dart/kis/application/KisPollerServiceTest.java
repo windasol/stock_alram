@@ -143,7 +143,7 @@ class KisPollerServiceTest {
         List<InvestorFlowItem> sells = List.of(
                 new InvestorFlowItem("035720", "카카오", -98_700_000_000L, -1.5));
 
-        String msg = InvestorFlowService.composeInvestorFlow(
+        String msg = InvestorFlowComposer.composeInvestorFlow(
                 Investor.FOREIGN, buys, sells, "정규장", LocalTime.of(13, 20), "가집계·추정");
 
         assertTrue(msg.contains("외국인"), msg);
@@ -170,7 +170,7 @@ class KisPollerServiceTest {
                 new InvestorFlowItem("005930", "삼성전자", 123_400_000_000L, 2.1));
         String indexLine = "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%";
 
-        String msg = InvestorFlowService.composeInvestorFlow(
+        String msg = InvestorFlowComposer.composeInvestorFlow(
                 Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간", indexLine);
 
         assertTrue(msg.contains(indexLine), msg);
@@ -185,9 +185,9 @@ class KisPollerServiceTest {
         List<InvestorFlowItem> buys = List.of(
                 new InvestorFlowItem("005930", "삼성전자", 123_400_000_000L, 2.1));
 
-        String withNull = InvestorFlowService.composeInvestorFlow(
+        String withNull = InvestorFlowComposer.composeInvestorFlow(
                 Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간", null);
-        String sixArg = InvestorFlowService.composeInvestorFlow(
+        String sixArg = InvestorFlowComposer.composeInvestorFlow(
                 Investor.FOREIGN, buys, List.of(), "정규장", LocalTime.of(13, 20), "외국계 실시간");
 
         assertEquals(sixArg, withNull);
@@ -196,7 +196,7 @@ class KisPollerServiceTest {
 
     @Test
     void 수급_랭킹_양쪽_다_비면_데이터없음_표기() {
-        String msg = InvestorFlowService.composeInvestorFlow(
+        String msg = InvestorFlowComposer.composeInvestorFlow(
                 Investor.INSTITUTION, List.of(), List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
         assertTrue(msg.contains("기관"), msg);
         assertTrue(msg.contains("(데이터 없음)"), msg);
@@ -210,7 +210,7 @@ class KisPollerServiceTest {
         List<InvestorPairItem> dualSell = List.of(
                 new InvestorPairItem("035720", "카카오", -30_000_000_000L, -15_000_000_000L, -1.5));
 
-        String msg = InvestorFlowService.composeInvestorPair(dualBuy, dualSell, "정규장", LocalTime.of(13, 20), "가집계·추정");
+        String msg = InvestorFlowComposer.composeInvestorPair(dualBuy, dualSell, "정규장", LocalTime.of(13, 20), "가집계·추정");
 
         assertTrue(msg.contains("외국인+기관 동시매매"), msg);
         assertTrue(msg.contains("정규장 13:20"), msg);
@@ -231,7 +231,7 @@ class KisPollerServiceTest {
     void 동시매매_한쪽이_비면_해당_종목_없음_표기() {
         List<InvestorPairItem> dualBuy = List.of(
                 new InvestorPairItem("005930", "삼성전자", 120_000_000_000L, 80_000_000_000L, 1.8));
-        String msg = InvestorFlowService.composeInvestorPair(dualBuy, List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
+        String msg = InvestorFlowComposer.composeInvestorPair(dualBuy, List.of(), "정규장", LocalTime.of(13, 20), "가집계·추정");
         assertTrue(msg.contains("(해당 종목 없음)"), msg);
     }
 
@@ -325,7 +325,7 @@ class KisPollerServiceTest {
         // 시장 전체(빈 라벨) 한 건 — 코스피/코스닥 분리 없이 한 줄.
         List<MarketInvestorFlow> flows = List.of(
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L));
-        String msg = InvestorFlowService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
+        String msg = InvestorFlowComposer.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
 
         assertTrue(msg.startsWith("📊 **시장 수급** | 13:40  (가집계)"), msg);
         assertTrue(msg.contains("🌍 외국인 -3,200억"), msg);
@@ -344,7 +344,7 @@ class KisPollerServiceTest {
         List<MarketInvestorFlow> flows = List.of(
                 new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L),
                 new MarketInvestorFlow("코스닥", 80_000_000_000L, -30_000_000_000L, -50_000_000_000L));
-        String msg = InvestorFlowService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
+        String msg = InvestorFlowComposer.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계");
 
         assertTrue(msg.contains("코스피  🌍 외국인 -3,200억 · 🏛 기관 +1,500억 · 👤 개인 +1,700억"), msg);
         assertTrue(msg.contains("코스닥  🌍 외국인 +800억 · 🏛 기관 -300억 · 👤 개인 -500억"), msg);
@@ -354,7 +354,7 @@ class KisPollerServiceTest {
 
     @Test
     void 시장수급_리포트라인은_코스피_코스닥을_슬래시로_구분한다() {
-        String line = InvestorFlowService.marketFlowLine(List.of(
+        String line = InvestorFlowComposer.marketFlowLine(List.of(
                 new MarketInvestorFlow("코스피", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L),
                 new MarketInvestorFlow("코스닥", 80_000_000_000L, -30_000_000_000L, -50_000_000_000L)));
         assertEquals("📊 시장 수급 | 코스피 외국인 -3,200억·기관 +1,500억·개인 +1,700억 / "
@@ -367,7 +367,7 @@ class KisPollerServiceTest {
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L));
         String indexLine = "🇰🇷 코스피 2,750.32 ▲ +0.82% · 코스닥 850.10 ▼ -0.35%";
 
-        String msg = InvestorFlowService.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계", indexLine);
+        String msg = InvestorFlowComposer.composeMarketFlow(flows, LocalTime.of(13, 40), "가집계", indexLine);
 
         // 제목(0) → 지수(1) → 수급(2) 순서
         List<String> lines = msg.lines().toList();
@@ -378,8 +378,8 @@ class KisPollerServiceTest {
 
     @Test
     void 시장_전체수급_리포트라인은_컴팩트_한줄이고_비면_null() {
-        assertNull(InvestorFlowService.marketFlowLine(List.of()));
-        String line = InvestorFlowService.marketFlowLine(List.of(
+        assertNull(InvestorFlowComposer.marketFlowLine(List.of()));
+        String line = InvestorFlowComposer.marketFlowLine(List.of(
                 new MarketInvestorFlow("", -320_000_000_000L, 150_000_000_000L, 170_000_000_000L)));
         assertEquals("📊 시장 수급 | 외국인 -3,200억·기관 +1,500억·개인 +1,700억", line);
     }

@@ -130,7 +130,7 @@ public class MacroReportService {
         String fxLine = domesticMarket.fxSummaryLine();                   // 원달러 환율(null 가능)
         String usFuturesLine = usFutures.summaryLine();                   // 대외 여건(null 가능)
         // 시장 전체 수급 — 틱이 저장한 최신 스냅샷을 쓰되, 없으면(헤드라인 비활성 등) 즉석 조회.
-        String marketFlowLine = InvestorFlowService.marketFlowLine(investorFlow.latestMarketFlows());
+        String marketFlowLine = InvestorFlowComposer.marketFlowLine(investorFlow.latestMarketFlows());
         // 기준 날짜·시각을 맨 앞에 박는다 — 이게 없으면 LLM/그라운딩이 '오늘/이번 주'를 몰라 지난(엉뚱한 날짜) 일정을 끌어온다.
         // 모델이 옳은 오늘 날짜를 받고도 학습기억으로 일정 날짜를 지어내는 문제가 있어, 검색 확인·추측금지를 강하게 못박는다.
         String dateAnchor = String.format(
