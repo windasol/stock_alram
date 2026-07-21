@@ -39,7 +39,6 @@ public class MacroReportService {
 
     private static final Logger log = LoggerFactory.getLogger(MacroReportService.class);
     private static final ZoneId KST = KstTime.ZONE;
-    private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
     /** 시황 분석 '기준 날짜' 앵커용 — 예: 2026년 07월 10일(금). 요일까지 박아 LLM이 '오늘/이번 주'를 정확히 잡게 한다. */
     private static final DateTimeFormatter MACRO_DATE_FMT =
             DateTimeFormatter.ofPattern("yyyy년 MM월 dd일(E)", java.util.Locale.KOREAN);
@@ -138,7 +137,7 @@ public class MacroReportService {
                 + "[날짜 규칙] 네 학습기억의 날짜는 틀릴 수 있으니 신뢰하지 마라. 일정의 날짜·발표 여부는 오직 google_search 검색으로 "
                 + "확인한 것만 사용하고, 검색으로 정확한 날짜가 확인되지 않는 일정은 아예 넣지 마라(추측·어림 금지). "
                 + "특히 실적은 '이미 발표됐는지'를 검색으로 확인해, 오늘보다 과거에 발표된 건 미래 일정으로 넣지 마라.",
-                MACRO_DATE_FMT.format(now), SUMMARY_TIME_FMT.format(time));
+                MACRO_DATE_FMT.format(now), KstTime.HH_MM.format(time));
         String facts = dateAnchor + "\n\n"
                 + buildFlowFacts(indexLine, marketFlowLine, fxLine, usFuturesLine, fb, fs, ib, is, db, turnover, sectorByCode);
 
@@ -180,7 +179,7 @@ public class MacroReportService {
      * 통째로 생략하고 사유만 남긴다. 틀린 미래 일정이 나가는 것보다 캘린더가 없는 편이 안전하다.
      */
     static String composeMacroMessage(String narrative, LocalTime time, boolean grounded) {
-        String ts = SUMMARY_TIME_FMT.format(time);
+        String ts = KstTime.HH_MM.format(time);
         String[] parts = narrative.split(CALENDAR_MARKER, 2);
         String marketBody = parts[0].strip();
         StringBuilder sb = new StringBuilder();
@@ -262,7 +261,7 @@ public class MacroReportService {
         for (NewsArticle a : unique.values()) {
             sb.append("\n");
             if (a.publishedAt() != null) {
-                sb.append(SUMMARY_TIME_FMT.format(a.publishedAt().withZoneSameInstant(KST))).append(" ");
+                sb.append(KstTime.HH_MM.format(a.publishedAt().withZoneSameInstant(KST))).append(" ");
             }
             sb.append(a.source()).append(" | ").append(a.title());
         }

@@ -47,8 +47,6 @@ public class DisclosurePriceTracker {
     private static final Logger log = LoggerFactory.getLogger(DisclosurePriceTracker.class);
     private static final ZoneId KST = KstTime.ZONE;
     private static final DateTimeFormatter HHMMSS = DateTimeFormatter.ofPattern("HHmmss");
-    /** 고점/저점 발생 시각 표기용 — "10:07". */
-    private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 
     private static final int PRE_MIN = 2;       // 기준가를 잡는 공시 전 시점(분)
     private static final int WINDOW_MIN = 10;   // 공시 후 분석 창(분)
@@ -188,10 +186,10 @@ public class DisclosurePriceTracker {
                         + "🔽 저점 %+.1f%% %,d원 (%s)\n"
                         + "패턴: %s · %s",
                 st.endMin(), d.corpName(), d.reportNm(),
-                CLOCK.format(t0.toLocalTime()), st.discPrice(), st.discPct(),
+                KstTime.HH_MM.format(t0.toLocalTime()), st.discPrice(), st.discPct(),
                 st.endMin(), st.endPrice(), st.endPct(),
-                st.mfePct(), st.peakPrice(), CLOCK.format(st.peakAt()),
-                st.maePct(), st.troughPrice(), CLOCK.format(st.troughAt()),
+                st.mfePct(), st.peakPrice(), KstTime.HH_MM.format(st.peakAt()),
+                st.maePct(), st.troughPrice(), KstTime.HH_MM.format(st.troughAt()),
                 startDirection(st.discPrice(), st.endPrice()), st.pattern());
     }
 
@@ -215,11 +213,11 @@ public class DisclosurePriceTracker {
             o.put("endPct", round1(st.endPct()));
             o.put("mfePct", round1(st.mfePct()));
             o.put("mfeMin", st.peakMin());
-            o.put("mfeAt", CLOCK.format(st.peakAt()));
+            o.put("mfeAt", KstTime.HH_MM.format(st.peakAt()));
             o.put("mfeWon", st.peakPrice());
             o.put("maePct", round1(st.maePct()));
             o.put("maeMin", st.troughMin());
-            o.put("maeAt", CLOCK.format(st.troughAt()));
+            o.put("maeAt", KstTime.HH_MM.format(st.troughAt()));
             o.put("maeWon", st.troughPrice());
             o.put("pattern", st.pattern());
             Files.writeString(storeFile, HttpJson.MAPPER.writeValueAsString(o) + System.lineSeparator(),

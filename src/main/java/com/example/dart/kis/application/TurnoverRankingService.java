@@ -1,5 +1,6 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.kis.domain.KisMoney;
 import com.example.dart.kis.domain.Session;
 import com.example.dart.kis.domain.TradingValueItem;
@@ -11,7 +12,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -28,7 +28,6 @@ import java.util.stream.Collectors;
 public class TurnoverRankingService {
 
     private static final Logger log = LoggerFactory.getLogger(TurnoverRankingService.class);
-    private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
 
     /** 거래대금 섹터 랭킹에서 보여줄 상위 섹터 수. */
     private static final int TOP_SECTORS = 10;
@@ -103,7 +102,7 @@ public class TurnoverRankingService {
 
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("💰 **거래대금 섹터 랭킹** | %s %s%n(거래대금 상위 %d종목 기준)",
-                session, SUMMARY_TIME_FMT.format(time), items.size()));
+                session, KstTime.HH_MM.format(time), items.size()));
         int rank = 1;
         for (Map.Entry<String, List<Turnover>> e : ranked) {
             List<Turnover> list = e.getValue();

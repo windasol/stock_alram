@@ -38,7 +38,6 @@ public class AutoTradeService implements TradeSignalListener {
     private static final Logger log = LoggerFactory.getLogger(AutoTradeService.class);
     private static final ZoneId KST = KstTime.ZONE;
     private static final DateTimeFormatter HHMMSS = DateTimeFormatter.ofPattern("HHmmss");
-    private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 
     private final KisClient kisClient;
     private final Notifier notifier;
@@ -115,7 +114,7 @@ public class AutoTradeService implements TradeSignalListener {
             notifier.send(String.format(
                     "🟢 **[모의매수]** %s(%s) · 매출대비 %s%%\n진입 %s원 × %d주 = %s (%s)",
                     corpName, stockCode, trimPct(salesRatioPct),
-                    KoreanMoney.format(entry), qty, KoreanMoney.format(p.budget()), CLOCK.format(now)));
+                    KoreanMoney.format(entry), qty, KoreanMoney.format(p.budget()), KstTime.HH_MM.format(now)));
             log.info("🟢 [모의매수] {} {} — {}원 × {}주 (매출대비 {}%), 신호 {}",
                     stockCode, corpName, entry, qty, trimPct(salesRatioPct), signalId);
         } catch (Exception e) {
@@ -163,7 +162,7 @@ public class AutoTradeService implements TradeSignalListener {
                 "%s **[모의%s]** %s(%s)\n진입 %s → 청산 %s원 · %s%% · 손익 %s원 · 보유 %d분 (%s)",
                 emoji, reason, p.corpName(), p.stockCode(),
                 KoreanMoney.format(p.entryPrice()), KoreanMoney.format(exitPrice), signed(pnlPct),
-                signedWon(pnlWon), heldMin, CLOCK.format(now)));
+                signedWon(pnlWon), heldMin, KstTime.HH_MM.format(now)));
         log.info("{} [모의{}] {} {} — 진입 {} 청산 {} ({}%), 손익 {}원, 보유 {}분",
                 emoji, reason, p.stockCode(), p.corpName(), p.entryPrice(), exitPrice,
                 trimPct(pnlPct), pnlWon, heldMin);

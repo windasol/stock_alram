@@ -1,5 +1,6 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.kis.domain.Gainer;
 import com.example.dart.kis.domain.Session;
 import com.example.dart.kis.domain.VolumeRankItem;
@@ -10,7 +11,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -26,7 +26,6 @@ import java.util.stream.Collectors;
 public class SectorSummaryService {
 
     private static final Logger log = LoggerFactory.getLogger(SectorSummaryService.class);
-    private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
 
     private final KisClient client;
     private final SectorCacheStore sectors;
@@ -103,7 +102,7 @@ public class SectorSummaryService {
 
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("📊 **섹터 요약** | %s %s%n급등 %d종목 기준",
-                session, SUMMARY_TIME_FMT.format(time), total));
+                session, KstTime.HH_MM.format(time), total));
         int rank = 1;
         for (Map.Entry<String, List<Gainer>> e : ranked) {
             List<Gainer> list = e.getValue();

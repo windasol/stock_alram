@@ -1,5 +1,6 @@
 package com.example.dart.kis.application;
 
+import com.example.dart.common.domain.KstTime;
 import com.example.dart.common.text.TextTable;
 import com.example.dart.kis.domain.Investor;
 import com.example.dart.kis.domain.InvestorFlowItem;
@@ -8,7 +9,6 @@ import com.example.dart.kis.domain.KisMoney;
 import com.example.dart.kis.domain.MarketInvestorFlow;
 
 import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -20,8 +20,6 @@ import java.util.stream.Collectors;
  * 맞춰 ASCII로 정렬한다.
  */
 final class InvestorFlowComposer {
-
-    private static final DateTimeFormatter SUMMARY_TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
 
     /** 외국인·기관 수급 랭킹에서 순매수/순매도 각각 보여줄 종목 수. */
     static final int INVESTOR_FLOW_TOP = 30;
@@ -52,7 +50,7 @@ final class InvestorFlowComposer {
      */
     static String composeMarketFlow(List<MarketInvestorFlow> flows, LocalTime time, String tag, String indexLine) {
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("📊 **시장 수급** | %s  (%s)", SUMMARY_TIME_FMT.format(time), tag));
+        sb.append(String.format("📊 **시장 수급** | %s  (%s)", KstTime.HH_MM.format(time), tag));
         if (indexLine != null) sb.append(String.format("%n%s", indexLine));
         for (MarketInvestorFlow f : flows) {
             String prefix = f.market().isBlank() ? "" : f.market() + "  ";   // 전체(빈 라벨)면 접두어 없음
@@ -98,7 +96,7 @@ final class InvestorFlowComposer {
                                       String indexLine) {
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("%s **수급 TOP%d** | %s %s  (%s)",
-                inv.label(), INVESTOR_FLOW_TOP, session, SUMMARY_TIME_FMT.format(time), tag));
+                inv.label(), INVESTOR_FLOW_TOP, session, KstTime.HH_MM.format(time), tag));
         if (indexLine != null) sb.append(String.format("%n%s", indexLine));
 
         int rows = Math.max(buys.size(), sells.size());
@@ -139,7 +137,7 @@ final class InvestorFlowComposer {
                                       String session, LocalTime time, String tag) {
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("🤝 **외국인+기관 동시매매** | %s %s  (%s)",
-                session, SUMMARY_TIME_FMT.format(time), tag));
+                session, KstTime.HH_MM.format(time), tag));
         sb.append(String.format("%n```"));
         appendPairSection(sb, "[양매수 TOP" + INVESTOR_PAIR_TOP + "] 외국인·기관 둘 다 순매수", dualBuy);
         appendPairSection(sb, "[양매도 TOP" + INVESTOR_PAIR_TOP + "] 외국인·기관 둘 다 순매도", dualSell);
