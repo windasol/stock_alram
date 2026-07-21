@@ -184,8 +184,7 @@ public class KindPollerService extends AbstractPoller {
      * (PollerService 참고) 이 경로가 유일한 규모 분석이다 — 본문은 DART 원문 지연과 무관하게 즉시 받을 수 있다.
      */
     private void scheduleEnrichment(KindDisclosure d) {
-        enrichRetry.run(() -> {
-            KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
+        runEnrichment(d, "본문", "규모 분석 생략", "시총·매출 대비", doc -> {
             ContractInfo c =
                     documentParser.extractContractFromText(documentParser.htmlToPlainText(doc.bodyHtml()));
             OptionalLong cap = doc.stockCode() != null
@@ -195,13 +194,6 @@ public class KindPollerService extends AbstractPoller {
                     c.contractWon().isPresent() ? KoreanMoney.format(c.contractWon().getAsLong()) : "미추출");
             notifier.send(alertComposer.composeFollowup(d, c, cap));
             fireTradeSignal(d, doc.stockCode(), c);
-        }, (e, attempt) -> log.info("KIND 본문 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
-                ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString()),
-        e -> {
-            log.warn("KIND 본문 보강 {}회 실패 — 규모 분석 생략: {} - {}",
-                    ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
-            notifier.send(String.format("📊 **시총·매출 대비** | %s — %s\n상세 조회 실패",
-                    d.company(), d.title()));
         });
     }
 
@@ -211,8 +203,7 @@ public class KindPollerService extends AbstractPoller {
      * (계약 규모 분석과 동일한 관용). 본문은 DART 원문 지연과 무관하게 즉시 받을 수 있다.
      */
     private void scheduleCancellationEnrichment(KindDisclosure d) {
-        enrichRetry.run(() -> {
-            KindDocumentClient.KindDocument doc = docClient.fetch(d.acptNo());
+        runEnrichment(d, "소각", "소각금액 생략", "시총·소각금액", doc -> {
             OptionalLong amount = documentParser.cancellationAmountWon(
                     documentParser.htmlToPlainText(doc.bodyHtml()));
             OptionalLong cap = doc.stockCode() != null
@@ -221,14 +212,31 @@ public class KindPollerService extends AbstractPoller {
             log.info("KIND 소각금액 분석 [{} - {}] {}", d.company(), d.title(),
                     amount.isPresent() ? KoreanMoney.format(amount.getAsLong()) : "미추출");
             notifier.send(alertComposer.composeCancellation(d, amount, cap));
-        }, (e, attempt) -> log.info("KIND 소각 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
-                ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e.toString()),
-        e -> {
-            log.warn("KIND 소각 보강 {}회 실패 — 소각금액 생략: {} - {}",
-                    ENRICH_MAX_ATTEMPTS, d.company(), d.title(), e);
-            notifier.send(String.format("📊 **시총·소각금액** | %s — %s\n상세 조회 실패",
-                    d.company(), d.title()));
         });
+    }
+
+    /** KIND 뷰어 본문을 받아 보강 메시지를 조립·발송하는 성공 콜백 — 본문/시세 조회가 checked 예외를 던질 수 있어 throws 허용. */
+    @FunctionalInterface
+    private interface DocEnrichment {
+        void accept(KindDocumentClient.KindDocument doc) throws Exception;
+    }
+
+    /**
+     * 계약·소각 보강의 공통 골격 — 본문 fetch → 성공 콜백(파싱·조립·발송·부수효과) → 실패 시 재시도, 소진 시 폴백.
+     * 두 경로의 차이(본문 파서·컴포저·계약 경로의 트레이드 신호)는 {@code onDocument} 콜백에, 로그·폴백 문구는 라벨에 담는다.
+     */
+    private void runEnrichment(KindDisclosure d, String retryLabel, String exhaustedSkip,
+                               String fallbackTitle, DocEnrichment onDocument) {
+        enrichRetry.run(() -> onDocument.accept(docClient.fetch(d.acptNo())),
+                (e, attempt) -> log.info("KIND {} 보강 실패 — {}초 뒤 재시도 ({}/{}): {} - {} ({})",
+                        retryLabel, ENRICH_RETRY_DELAY_SEC, attempt, ENRICH_MAX_ATTEMPTS,
+                        d.company(), d.title(), e.toString()),
+                e -> {
+                    log.warn("KIND {} 보강 {}회 실패 — {}: {} - {}",
+                            retryLabel, ENRICH_MAX_ATTEMPTS, exhaustedSkip, d.company(), d.title(), e);
+                    notifier.send(String.format("📊 **%s** | %s — %s\n상세 조회 실패",
+                            fallbackTitle, d.company(), d.title()));
+                });
     }
 
     /** 계약 규모 확정 시 자동매매 리스너에 신호 전달(KIND 경로) — 리스너 없음·종목코드 없음·계약금액/비율 미상이면 무시. */
