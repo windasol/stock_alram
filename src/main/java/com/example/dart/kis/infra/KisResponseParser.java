@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.function.Function;
 
 /**
  * KIS Open API 응답(JSON 문자열)을 도메인 record로 옮기는 순수 파싱 계층 — 네트워크·HTTP와 분리돼 있어
@@ -117,24 +118,16 @@ final class KisResponseParser {
 
     /** 등락률순위 응답 JSON을 파싱한다. rt_cd!="0"이면 빈 목록. */
     static List<VolumeRankItem> parseFluctuationRank(String json) {
-        List<VolumeRankItem> result = new ArrayList<>();
-        try {
-            JsonNode root = HttpJson.MAPPER.readTree(json);
-            if (isRejected(root, "등락률순위")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("stck_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new VolumeRankItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path("stck_prpr").asText()),
-                        parseDouble(n.path("prdy_ctrt").asText()),
-                        parseLong(n.path("acml_vol").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 등락률순위 파싱 실패: {}", e.toString());
-        }
-        return result;
+        return parseList(json, "등락률순위", n -> {
+            String code = n.path("stck_shrn_iscd").asText("").trim();
+            if (code.isEmpty()) return null;
+            return new VolumeRankItem(
+                    code,
+                    n.path("hts_kor_isnm").asText("").trim(),
+                    parseLong(n.path("stck_prpr").asText()),
+                    parseDouble(n.path("prdy_ctrt").asText()),
+                    parseLong(n.path("acml_vol").asText()));
+        });
     }
 
     /**
@@ -142,23 +135,15 @@ final class KisResponseParser {
      * volume-rank의 종목코드 필드는 mksc_shrn_iscd, 거래대금은 acml_tr_pbmn(원).
      */
     static List<TradingValueItem> parseVolumeRank(String json) {
-        List<TradingValueItem> result = new ArrayList<>();
-        try {
-            JsonNode root = HttpJson.MAPPER.readTree(json);
-            if (isRejected(root, "거래대금순위")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("mksc_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new TradingValueItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path("acml_tr_pbmn").asText()),
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 거래대금순위 파싱 실패: {}", e.toString());
-        }
-        return result;
+        return parseList(json, "거래대금순위", n -> {
+            String code = n.path("mksc_shrn_iscd").asText("").trim();
+            if (code.isEmpty()) return null;
+            return new TradingValueItem(
+                    code,
+                    n.path("hts_kor_isnm").asText("").trim(),
+                    parseLong(n.path("acml_tr_pbmn").asText()),
+                    parseDouble(n.path("prdy_ctrt").asText()));
+        });
     }
 
     /**
@@ -166,23 +151,15 @@ final class KisResponseParser {
      * 종목코드는 mksc_shrn_iscd, 순매수 거래대금은 투자자별 필드(외국인 frgn_ntby_tr_pbmn / 기관 orgn_ntby_tr_pbmn).
      */
     static List<InvestorFlowItem> parseInvestorFlow(String json, Investor inv) {
-        List<InvestorFlowItem> result = new ArrayList<>();
-        try {
-            JsonNode root = HttpJson.MAPPER.readTree(json);
-            if (isRejected(root, "외국인·기관 수급")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("mksc_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new InvestorFlowItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path(inv.amountField()).asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 외국인·기관 수급 파싱 실패: {}", e.toString());
-        }
-        return result;
+        return parseList(json, "외국인·기관 수급", n -> {
+            String code = n.path("mksc_shrn_iscd").asText("").trim();
+            if (code.isEmpty()) return null;
+            return new InvestorFlowItem(
+                    code,
+                    n.path("hts_kor_isnm").asText("").trim(),
+                    parseLong(n.path(inv.amountField()).asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
+                    parseDouble(n.path("prdy_ctrt").asText()));
+        });
     }
 
     /**
@@ -190,24 +167,16 @@ final class KisResponseParser {
      * 거래대금은 백만원→원으로 환산해 담는다.
      */
     static List<InvestorPairItem> parseInvestorPair(String json) {
-        List<InvestorPairItem> result = new ArrayList<>();
-        try {
-            JsonNode root = HttpJson.MAPPER.readTree(json);
-            if (isRejected(root, "동시매매 수급")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("mksc_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                result.add(new InvestorPairItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        parseLong(n.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
-                        parseLong(n.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 동시매매 수급 파싱 실패: {}", e.toString());
-        }
-        return result;
+        return parseList(json, "동시매매 수급", n -> {
+            String code = n.path("mksc_shrn_iscd").asText("").trim();
+            if (code.isEmpty()) return null;
+            return new InvestorPairItem(
+                    code,
+                    n.path("hts_kor_isnm").asText("").trim(),
+                    parseLong(n.path("frgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,  // 백만원 → 원
+                    parseLong(n.path("orgn_ntby_tr_pbmn").asText()) * NTBY_PBMN_UNIT_WON,
+                    parseDouble(n.path("prdy_ctrt").asText()));
+        });
     }
 
     /**
@@ -216,26 +185,18 @@ final class KisResponseParser {
      * 금액(원) ≈ 순매수수량 × 현재가(stck_prpr).
      */
     static List<InvestorFlowItem> parseForeignMemberEstimate(String json) {
-        List<InvestorFlowItem> result = new ArrayList<>();
-        try {
-            JsonNode root = HttpJson.MAPPER.readTree(json);
-            if (isRejected(root, "외국계 매매종목 가집계")) return result;
-            for (JsonNode n : root.path("output")) {
-                String code = n.path("stck_shrn_iscd").asText("").trim();
-                if (code.isEmpty()) continue;
-                long netQty = parseLong(n.path("glob_total_shnu_qty").asText())
-                        - parseLong(n.path("glob_total_seln_qty").asText());   // 외국계 순매수수량
-                long price = parseLong(n.path("stck_prpr").asText());
-                result.add(new InvestorFlowItem(
-                        code,
-                        n.path("hts_kor_isnm").asText("").trim(),
-                        netQty * price,                                        // 순매수수량 × 현재가 ≈ 순매수금액(원)
-                        parseDouble(n.path("prdy_ctrt").asText())));
-            }
-        } catch (Exception e) {
-            log.warn("KIS 외국계 매매종목 가집계 파싱 실패: {}", e.toString());
-        }
-        return result;
+        return parseList(json, "외국계 매매종목 가집계", n -> {
+            String code = n.path("stck_shrn_iscd").asText("").trim();
+            if (code.isEmpty()) return null;
+            long netQty = parseLong(n.path("glob_total_shnu_qty").asText())
+                    - parseLong(n.path("glob_total_seln_qty").asText());   // 외국계 순매수수량
+            long price = parseLong(n.path("stck_prpr").asText());
+            return new InvestorFlowItem(
+                    code,
+                    n.path("hts_kor_isnm").asText("").trim(),
+                    netQty * price,                                        // 순매수수량 × 현재가 ≈ 순매수금액(원)
+                    parseDouble(n.path("prdy_ctrt").asText()));
+        });
     }
 
     /**
@@ -262,6 +223,26 @@ final class KisResponseParser {
             log.warn("KIS 종목별 투자자 확정 수급 파싱 실패: {}", e.toString());
             return null;
         }
+    }
+
+    /**
+     * output 배열 파서의 공통 골격 — readTree → 거부 체크 → 각 행을 mapper로 매핑(null은 skip) → 예외 시 로깅 후 빈 목록.
+     * 행별 필드명·skip 규칙·record 조립이 파서마다 다르므로 그 부분만 mapper 람다로 주입받는다.
+     * mapper가 null을 반환한 행(코드 빈값 등)은 건너뛴다.
+     */
+    private static <T> List<T> parseList(String json, String label, Function<JsonNode, T> mapper) {
+        List<T> result = new ArrayList<>();
+        try {
+            JsonNode root = HttpJson.MAPPER.readTree(json);
+            if (isRejected(root, label)) return result;
+            for (JsonNode n : root.path("output")) {
+                T item = mapper.apply(n);
+                if (item != null) result.add(item);
+            }
+        } catch (Exception e) {
+            log.warn("KIS {} 파싱 실패: {}", label, e.toString());
+        }
+        return result;
     }
 
     /**
