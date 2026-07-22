@@ -2,15 +2,14 @@ package com.example.dart.kis.infra;
 
 import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
+import com.example.dart.kis.infra.YahooChartClient.Snapshot;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,7 +27,6 @@ import java.util.Optional;
 public class DomesticMarketClient {
 
     private static final Logger log = LoggerFactory.getLogger(DomesticMarketClient.class);
-    private static final String API = "https://query1.finance.yahoo.com/v8/finance/chart/%s";
 
     /** 국내 지수 — 야후 심볼과 표시 라벨. (코스피·코스닥 종합지수) */
     private static final List<Symbol> INDICES = List.of(
@@ -49,10 +47,12 @@ public class DomesticMarketClient {
     /** 네이버 투자자 순매수 값 단위: 억원 → 원 환산 계수. */
     private static final long EOK_TO_WON = 100_000_000L;
 
-    private final HttpClient httpClient;
+    private final HttpClient httpClient;      // 네이버 투자자 트렌드 호출용 (야후는 yahoo가 담당)
+    private final YahooChartClient yahoo;
 
     public DomesticMarketClient() {
         this.httpClient = TrustStores.newHttpClient();
+        this.yahoo = new YahooChartClient();
     }
 
     /**
@@ -62,7 +62,7 @@ public class DomesticMarketClient {
     public String indexSummaryLine() {
         List<Quote> quotes = new ArrayList<>();
         for (Symbol s : INDICES) {
-            Optional<Snapshot> snap = fetch(s.code());
+            Optional<Snapshot> snap = yahoo.fetch(s.code());
             if (snap.isPresent()) quotes.add(new Quote(s.label(), snap.get().pct()));
         }
         return formatIndexSummary(quotes);
@@ -76,7 +76,7 @@ public class DomesticMarketClient {
     public String indexHeadlineLine() {
         List<IndexQuote> quotes = new ArrayList<>();
         for (Symbol s : INDICES) {
-            fetch(s.code()).ifPresent(snap -> quotes.add(new IndexQuote(s.label(), snap.price(), snap.pct())));
+            yahoo.fetch(s.code()).ifPresent(snap -> quotes.add(new IndexQuote(s.label(), snap.price(), snap.pct())));
         }
         return formatIndexHeadline(quotes);
     }
@@ -86,7 +86,7 @@ public class DomesticMarketClient {
      * 환율은 등락률뿐 아니라 레벨까지 표기한다 — "1,350원 돌파" 같은 절대값이 외국인 매매에 직접 작용하기 때문.
      */
     public String fxSummaryLine() {
-        return fetch(FX_SYMBOL).map(DomesticMarketClient::formatFx).orElse(null);
+        return yahoo.fetch(FX_SYMBOL).map(DomesticMarketClient::formatFx).orElse(null);
     }
 
     /**
@@ -111,41 +111,6 @@ public class DomesticMarketClient {
             }
         }
         return flows;
-    }
-
-    private Optional<Snapshot> fetch(String symbol) {
-        try {
-            String url = String.format(API, URLEncoder.encode(symbol, StandardCharsets.UTF_8));
-            HttpResponse<String> response = HttpJson.get(httpClient, URI.create(url), Duration.ofSeconds(10),
-                    "User-Agent", "Mozilla/5.0");   // 야후는 UA 없으면 거부(429/401)
-            if (response.statusCode() != 200) {
-                log.warn("국내 지수·환율 조회 실패 (symbol={}): status={}", symbol, response.statusCode());
-                return Optional.empty();
-            }
-            return parseSnapshot(response.body());
-        } catch (Exception e) {
-            log.warn("국내 지수·환율 조회 중 오류 (symbol={}): {}", symbol, e.toString());
-            return Optional.empty();
-        }
-    }
-
-    /**
-     * 야후 차트 응답에서 현재가와 전일 대비 등락률(%)을 뽑는다.
-     * meta.regularMarketPrice 와 meta.previousClose(없으면 chartPreviousClose)로 (현재/전일-1)*100.
-     * 값이 없거나 전일가 0·파싱 실패면 empty.
-     */
-    Optional<Snapshot> parseSnapshot(String json) {
-        try {
-            JsonNode meta = HttpJson.MAPPER.readTree(json).path("chart").path("result").path(0).path("meta");
-            double price = meta.path("regularMarketPrice").asDouble(Double.NaN);
-            double prev = meta.path("previousClose").asDouble(
-                    meta.path("chartPreviousClose").asDouble(Double.NaN));
-            if (Double.isNaN(price) || Double.isNaN(prev) || prev == 0.0) return Optional.empty();
-            return Optional.of(new Snapshot(price, (price - prev) / prev * 100.0));
-        } catch (Exception e) {
-            log.warn("국내 지수·환율 JSON 파싱 실패: {}", e.toString());
-            return Optional.empty();
-        }
     }
 
     /**
@@ -222,7 +187,4 @@ public class DomesticMarketClient {
 
     /** 시장 라벨 + 개인/외국인/기관 순매수(원). 네이버 지수 투자자 트렌드에서 파싱 — kis.MarketInvestorFlow로 매핑된다. */
     public record InvestorNet(String market, long foreignWon, long institutionWon, long individualWon) {}
-
-    /** 현재가(레벨) + 전일 대비 등락률(%). */
-    record Snapshot(double price, double pct) {}
 }
