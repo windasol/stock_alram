@@ -2,6 +2,7 @@ package com.example.dart.kis.infra;
 
 import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
+import com.example.dart.common.text.Texts;
 import com.example.dart.kis.domain.Investor;
 import com.example.dart.kis.domain.InvestorConfirmed;
 import com.example.dart.kis.domain.InvestorFlowItem;
@@ -190,7 +191,7 @@ public class KisClient {
             if (items.isEmpty() && log.isDebugEnabled()) {
                 // 0건이면 원인(빈 output·rt_cd·권한) 파악용으로 원본 응답을 debug로만 남긴다.
                 log.debug("KIS 수급 0건 ({} {}) — 원본응답: {}", inv, buySide ? "순매수상위" : "순매도상위",
-                        body.length() > DEBUG_BODY_MAX ? body.substring(0, DEBUG_BODY_MAX) : body);
+                        Texts.ellipsize(body, DEBUG_BODY_MAX));
             }
             return items;
         } catch (Exception e) {
@@ -248,7 +249,7 @@ public class KisClient {
             if (items.isEmpty() && log.isDebugEnabled()) {
                 // 0건이면 원인(NX 미지원·권한·시간대) 파악용으로 원본 응답을 debug로만 남긴다.
                 log.debug("KIS 외국계 가집계 0건 ({} {}) — 원본응답: {}", marketDiv, buySide ? "매수순" : "매도순",
-                        body.length() > DEBUG_BODY_MAX ? body.substring(0, DEBUG_BODY_MAX) : body);
+                        Texts.ellipsize(body, DEBUG_BODY_MAX));
             }
             return items;
         } catch (Exception e) {

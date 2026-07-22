@@ -2,6 +2,7 @@ package com.example.dart.llm;
 
 import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
+import com.example.dart.common.text.Texts;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -93,7 +94,7 @@ public class GeminiClient implements LlmClient {
                     HttpJson.MAPPER.writeValueAsString(body), requestTimeout,
                     "x-goog-api-key", apiKey);   // 키를 URL이 아닌 헤더로 — 로그 노출 방지
             if (response.statusCode() != 200) {
-                log.warn("Gemini 응답 실패: status={}, grounded={}, body={}", response.statusCode(), grounded, brief(response.body()));
+                log.warn("Gemini 응답 실패: status={}, grounded={}, body={}", response.statusCode(), grounded, Texts.ellipsize(response.body(), 300));
                 return null;
             }
             return response.body();
@@ -158,8 +159,4 @@ public class GeminiClient implements LlmClient {
         }
     }
 
-    private static String brief(String s) {
-        if (s == null) return "";
-        return s.length() > 300 ? s.substring(0, 300) + "…" : s;
-    }
 }

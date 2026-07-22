@@ -2,6 +2,7 @@ package com.example.dart.news;
 
 import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
+import com.example.dart.common.text.Texts;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.jsoup.Jsoup;
 import org.slf4j.Logger;
@@ -61,7 +62,7 @@ public class NaverNewsClient {
             if (response.statusCode() != 200) {
                 String body = response.body();
                 log.warn("네이버 뉴스 검색 실패: status={}, body={}", response.statusCode(),
-                        body.length() > 300 ? body.substring(0, 300) : body);
+                        Texts.ellipsize(body, 300));
                 return Collections.emptyList();
             }
 

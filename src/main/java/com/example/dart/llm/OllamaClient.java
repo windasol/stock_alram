@@ -2,6 +2,7 @@ package com.example.dart.llm;
 
 import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
+import com.example.dart.common.text.Texts;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -72,7 +73,7 @@ public class OllamaClient implements LlmClient {
                     httpClient, URI.create(baseUrl + "/api/chat"),
                     HttpJson.MAPPER.writeValueAsString(body), requestTimeout);
             if (response.statusCode() != 200) {
-                log.warn("Ollama 응답 실패: status={}, body={}", response.statusCode(), brief(response.body()));
+                log.warn("Ollama 응답 실패: status={}, body={}", response.statusCode(), Texts.ellipsize(response.body(), 200));
                 return null;
             }
             JsonNode content = HttpJson.MAPPER.readTree(response.body()).path("message").path("content");
@@ -89,8 +90,4 @@ public class OllamaClient implements LlmClient {
         }
     }
 
-    private static String brief(String s) {
-        if (s == null) return "";
-        return s.length() > 200 ? s.substring(0, 200) + "…" : s;
-    }
 }
