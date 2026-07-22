@@ -38,7 +38,7 @@ public class YahooChartClient {
         try {
             String url = String.format(API, URLEncoder.encode(symbol, StandardCharsets.UTF_8));
             HttpResponse<String> response = HttpJson.get(httpClient, URI.create(url), Duration.ofSeconds(10),
-                    "User-Agent", "Mozilla/5.0");   // 야후는 UA 없으면 거부(429/401)
+                    "User-Agent", HttpJson.UA_MINIMAL);   // 야후는 UA 없으면 거부(429/401)
             if (response.statusCode() != 200) {
                 log.warn("야후 차트 조회 실패 (symbol={}): status={}", symbol, response.statusCode());
                 return Optional.empty();

@@ -24,6 +24,11 @@ public final class HttpJson {
     /** 프로젝트 공용 ObjectMapper — 스레드 안전, 전역 1개. */
     public static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /** 최소 User-Agent — UA 없으면 거부하는 API(야후·네이버 등)에 붙이는 통과용 값. */
+    public static final String UA_MINIMAL = "Mozilla/5.0";
+    /** 브라우저형 User-Agent — 짧은 UA를 막는 사이트(KIND 등)용. */
+    public static final String UA_BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+
     private HttpJson() {}
 
     /**

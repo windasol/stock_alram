@@ -1,5 +1,6 @@
 package com.example.dart.disclosure.infra;
 
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
 
 import java.net.URI;
@@ -93,7 +94,7 @@ public class KindDocumentClient {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(Duration.ofSeconds(15))
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .header("User-Agent", HttpJson.UA_BROWSER)
                 .header("Referer", BASE + "/common/disclsviewer.do")
                 .GET()
                 .build();

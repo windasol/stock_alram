@@ -100,7 +100,7 @@ public class DomesticMarketClient {
             try {
                 HttpResponse<String> response = HttpJson.get(httpClient,
                         URI.create(String.format(INVESTOR_TREND_API, m.code())), Duration.ofSeconds(10),
-                        "User-Agent", "Mozilla/5.0");   // 네이버도 UA 없으면 거부
+                        "User-Agent", HttpJson.UA_MINIMAL);   // 네이버도 UA 없으면 거부
                 if (response.statusCode() != 200) {
                     log.warn("네이버 시장 수급 조회 실패 ({}): status={}", m.label(), response.statusCode());
                     continue;

@@ -2,6 +2,7 @@ package com.example.dart.disclosure.infra;
 
 import com.example.dart.common.domain.KstTime;
 import com.example.dart.disclosure.domain.DisclosureKeys;
+import com.example.dart.common.infra.HttpJson;
 import com.example.dart.common.infra.TrustStores;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -56,7 +57,7 @@ public class KindClient {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(ENDPOINT))
                 .timeout(Duration.ofSeconds(15))
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .header("User-Agent", HttpJson.UA_BROWSER)
                 .header("Referer", ENDPOINT)
                 .header("X-Requested-With", "XMLHttpRequest")
                 .header("Content-Type", "application/x-www-form-urlencoded")

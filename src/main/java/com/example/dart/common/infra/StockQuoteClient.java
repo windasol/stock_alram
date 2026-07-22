@@ -21,7 +21,6 @@ public class StockQuoteClient {
 
     private static final Logger log = LoggerFactory.getLogger(StockQuoteClient.class);
     private static final String API = "https://m.stock.naver.com/api/stock/%s/integration";
-    private static final String USER_AGENT = "Mozilla/5.0";
     /** 단건 조회 요청 타임아웃(초). */
     private static final int REQUEST_TIMEOUT_SEC = 10;
 
@@ -48,7 +47,7 @@ public class StockQuoteClient {
         try {
             HttpResponse<String> response = HttpJson.get(httpClient,
                     URI.create(String.format(API, stockCode)), Duration.ofSeconds(REQUEST_TIMEOUT_SEC),
-                    "User-Agent", USER_AGENT);
+                    "User-Agent", HttpJson.UA_MINIMAL);
             if (response.statusCode() != 200) {
                 log.warn("{} 실패 (code={}): status={}", label, stockCode, response.statusCode());
                 return Optional.empty();
