@@ -41,11 +41,8 @@ public class GainerScout {
             if (!cooledDown(it.code(), now)) continue;
             lastAlert.put(it.code(), now);
             log.info("급등 [{} {} {}]: {}%", sessionLabel, it.name(), it.code(), it.changePct());
-            try {
-                notifier.send(alertComposer.compose(it, sessionLabel));
-            } catch (Exception e) {
-                log.warn("급등 알림 전송 실패: {} {}", it.name(), it.code(), e);
-            }
+            notifier.trySend(alertComposer.compose(it, sessionLabel),
+                    "급등 알림 전송 실패: {} {}", it.name(), it.code());
         }
     }
 

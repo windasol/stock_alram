@@ -106,11 +106,8 @@ public class InvestorFlowService {
         if (flows.isEmpty()) return;   // 조회 실패(거부·빈응답) — 채널엔 안 보냄(로그만)
         lastMarketFlows = flows;       // 시황 리포트가 읽도록 저장
         String indexLine = domesticMarket.indexHeadlineLine();   // 현재 코스피·코스닥(전일 대비, null 가능)
-        try {
-            notifier.send(InvestorFlowComposer.composeMarketFlow(flows, time, "잠정", indexLine));   // 급등·수급표와 같은 KIS 채널
-        } catch (Exception e) {
-            log.warn("시장 전체 수급 헤드라인 전송 실패", e);
-        }
+        notifier.trySend(InvestorFlowComposer.composeMarketFlow(flows, time, "잠정", indexLine),   // 급등·수급표와 같은 KIS 채널
+                "시장 전체 수급 헤드라인 전송 실패");
     }
 
     /** 최신 시장 수급 스냅샷 — 틱이 저장한 것을 쓰되, 없으면(헤드라인 비활성 등) 즉석 조회. 시황 리포트용. */
@@ -163,11 +160,8 @@ public class InvestorFlowService {
         List<InvestorFlowItem> topSells = sells.stream().limit(InvestorFlowComposer.INVESTOR_FLOW_TOP).toList();
         log.info("{} 수급 랭킹 조립 ({} 매수 {}종목·매도 {}종목, {})",
                 tag, inv, topBuys.size(), topSells.size(), label);
-        try {
-            notifier.send(InvestorFlowComposer.composeInvestorFlow(inv, topBuys, topSells, label, time, tag, indexLine));
-        } catch (Exception e) {
-            log.warn("수급 랭킹 알림 전송 실패 ({} {})", tag, inv, e);
-        }
+        notifier.trySend(InvestorFlowComposer.composeInvestorFlow(inv, topBuys, topSells, label, time, tag, indexLine),
+                "수급 랭킹 알림 전송 실패 ({} {})", tag, inv);
     }
 
     /**
@@ -192,11 +186,8 @@ public class InvestorFlowService {
             return;
         }
         log.info("동시매매 랭킹 조립 (양매수 {}종목·양매도 {}종목, {})", dualBuy.size(), dualSell.size(), label);
-        try {
-            notifier.send(InvestorFlowComposer.composeInvestorPair(dualBuy, dualSell, label, time, "가집계·추정"));
-        } catch (Exception e) {
-            log.warn("동시매매 랭킹 알림 전송 실패", e);
-        }
+        notifier.trySend(InvestorFlowComposer.composeInvestorPair(dualBuy, dualSell, label, time, "가집계·추정"),
+                "동시매매 랭킹 알림 전송 실패");
     }
 
     /**

@@ -48,11 +48,7 @@ public class TurnoverRankingService {
     public void send(Session session, String label, LocalTime time) {
         String msg = build(session, label, time);
         if (msg == null) return;
-        try {
-            notifier.send(msg);
-        } catch (Exception e) {
-            log.warn("거래대금 랭킹 알림 전송 실패", e);
-        }
+        notifier.trySend(msg, "거래대금 랭킹 알림 전송 실패");
     }
 
     /**
